@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu>
+    <Services>
+        <NetDefense VisibleName="NetDefense" cssClass="fa fa-shield fa-fw" order="200">
+            <Settings VisibleName="Settings" url="/ui/netdefense/settings" order="10"/>
+            <LogFile VisibleName="Log File" order="20" url="/ui/diagnostics/log/core/ndagent"/>
+        </NetDefense>
+    </Services>
+</menu>

@@ -1,0 +1,48 @@
+# Binaries
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/ndagent
+/ndagent-*
+
+# Test binary
+*.test
+
+# Output of go coverage tool
+*.out
+coverage.html
+
+# Dependency directories
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Build artifacts
+dist/
+
+# Local config files (may contain secrets)
+*.conf
+!configs/*.example
+!plugin/**/*.conf
+
+# Logs
+*.log
+
+# API keys (never commit credentials)
+docs/apikey.txt
+
+# Temporary files
+*.tmp
+.tmp/

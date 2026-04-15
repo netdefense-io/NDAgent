@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<acl>
+    <page-services-netdefense>
+        <name>Services: NetDefense</name>
+        <description>NetDefense Agent Configuration</description>
+        <patterns>
+            <pattern>ui/netdefense/*</pattern>
+            <pattern>api/netdefense/*</pattern>
+            <pattern>ui/diagnostics/log/core/ndagent/*</pattern>
+            <pattern>api/diagnostics/log/core/ndagent/*</pattern>
+        </patterns>
+    </page-services-netdefense>
+</acl>

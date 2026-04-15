@@ -1,0 +1,2 @@
+rc.conf.d:/etc/rc.conf.d/ndagent
+ndagent.conf:/usr/local/etc/ndagent.conf

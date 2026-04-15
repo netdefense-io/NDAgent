@@ -1,0 +1,39 @@
+{
+	"name": "os-netdefense",
+	"origin": "netdefense/os-netdefense",
+	"version": "1.0_0",
+	"comment": "Firewall management augmentation tool",
+	"maintainer": "info@netdefense.io",
+	"www": "https://netdefense.io/",
+	"abi": "FreeBSD:14:amd64",
+	"arch": "freebsd:14:x86:64",
+	"prefix": "/usr/local",
+	"flatsize": 47906,
+	"licenselogic": "single",
+	"licenses": [
+		"BSD2CLAUSE"
+	],
+	"desc": "NetDefense Agent Integration for OPNsense - This plugin integrates the NetDefense Agent into OPNsense, providing augmented management capabilities.",
+	"deps": {},
+	"categories": [
+		"security"
+	],
+	"annotations": {
+		"product_abi": "25.7",
+		"product_arch": "amd64",
+		"product_conflicts": "os-netdefense-dev",
+		"product_email": "info@netdefense.io",
+		"product_hash": "af4bf6c6355bef7e575c02bb892e9dfd741382ecb0dbe24b2774ac285f5cdaed",
+		"product_id": "os-netdefense",
+		"product_name": "netdefense",
+		"product_tier": "4",
+		"product_version": "1.0_0",
+		"product_website": "https://netdefense.io/",
+		"FreeBSD_version": "1403000"
+	},
+	"scripts": {
+		"post-install": "if [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\nif [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/NetDefense; fi\nif [ -f /usr/local/etc/rc.configure_plugins ]; then echo \"Reloading plugin configuration\"; /usr/local/etc/rc.configure_plugins POST_INSTALL; fi\nif [ -f /usr/local/sbin/configctl ]; then echo -n \"Reloading template OPNsense/NetDefense: \"; /usr/local/sbin/configctl template reload OPNsense/NetDefense; fi; if [ -f /usr/local/etc/rc.d/ndagent ]; then echo \"Starting ndagent (if enabled)\"; /usr/local/etc/rc.d/ndagent start; fi",
+		"post-deinstall": "if [ -f /usr/local/etc/rc.configure_plugins ]; then echo \"Reloading plugin configuration\"; /usr/local/etc/rc.configure_plugins POST_DEINSTALL; fi",
+		"pre-deinstall": "if [ -f /usr/local/etc/rc.d/ndagent ]; then echo \"Stopping ndagent (if enabled)\"; /usr/local/etc/rc.d/ndagent stop; fi",
+	}
+}

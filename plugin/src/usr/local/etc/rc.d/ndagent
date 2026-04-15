@@ -1,0 +1,83 @@
+#!/bin/sh
+#
+# NetDefense Agent
+#
+# PROVIDE: ndagent
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+#
+# Add the following lines to /etc/rc.conf to enable ndagent:
+# ndagent_enable (bool):   Set to "NO" by default.
+#                          Set it to "YES" to enable ndagent.
+# ndagent_config (str):    Configuration file path
+#                          Default: /usr/local/etc/ndagent.conf
+# ndagent_pidfile (str):   PID file path
+#                          Default: /var/run/ndagent.pid
+# ndagent_logfile (str):   Log file path
+#                          Default: /var/log/ndagent.log
+
+. /etc/rc.subr
+
+name=ndagent
+rcvar=ndagent_enable
+
+load_rc_config $name
+
+: ${ndagent_enable:="NO"}
+: ${ndagent_config:="/usr/local/etc/ndagent.conf"}
+: ${ndagent_pidfile:="/var/run/ndagent.pid"}
+: ${ndagent_logfile:="/var/log/ndagent.log"}
+: ${ndagent_user:="root"}
+: ${ndagent_group:="wheel"}
+
+procname="/usr/local/bin/ndagent"
+command="/usr/sbin/daemon"
+pidfile="${ndagent_pidfile}"
+
+# Use FreeBSD daemon utility for backgrounding
+command_args="-f -p ${ndagent_pidfile} ${procname} --config ${ndagent_config}"
+
+# Check if service is enabled via configuration
+ndagent_prestart()
+{
+    if [ ! -f "${ndagent_config}" ]; then
+        warn "Configuration file ${ndagent_config} not found"
+        return 1
+    fi
+    
+    # Check if enabled in configuration
+    if ! grep -q "^enabled=true" "${ndagent_config}"; then
+        warn "NetDefense Agent is disabled in configuration"
+        return 1
+    fi
+    
+    # Validate required configuration
+    if ! grep -q "^token=" "${ndagent_config}"; then
+        warn "Token not configured in ${ndagent_config}"
+        return 1
+    fi
+    
+    return 0
+}
+
+ndagent_status()
+{
+    if [ -f "${pidfile}" ]; then
+        pid=$(cat "${pidfile}")
+        if kill -0 "${pid}" 2>/dev/null; then
+            echo "NetDefense Agent is running (pid: ${pid})"
+            return 0
+        else
+            echo "NetDefense Agent is not running (stale pid file)"
+            return 1
+        fi
+    else
+        echo "NetDefense Agent is not running"
+        return 1
+    fi
+}
+
+start_precmd=ndagent_prestart
+status_cmd=ndagent_status
+
+run_rc_command "$1"

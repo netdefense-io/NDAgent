@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<model>
+    <mount>//OPNsense/netdefense/settings</mount>
+    <description>NetDefense Agent Configuration</description>
+    <version>1.0.0</version>
+    <items>
+        <enabled type="BooleanField">
+            <Default>0</Default>
+            <Required>Y</Required>
+        </enabled>
+        <token type="TextField">
+            <mask>/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/</mask>
+            <ValidationMessage>Registration Token must be a valid UUID format</ValidationMessage>
+            <Required>Y</Required>
+        </token>
+        <deviceId type="TextField">
+            <mask>/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/</mask>
+            <ValidationMessage>Device ID must be a valid UUID format</ValidationMessage>
+            <Required>Y</Required>
+        </deviceId>
+        <serverAddress type="TextField">
+            <Default>https://hub.netdefense.io</Default>
+            <Required>Y</Required>
+        </serverAddress>
+        <sslVerify type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </sslVerify>
+        <logLevel type="OptionField">
+            <Default>INFO</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <DEBUG>DEBUG</DEBUG>
+                <INFO>INFO</INFO>
+                <WARNING>WARNING</WARNING>
+                <ERROR>ERROR</ERROR>
+            </OptionValues>
+        </logLevel>
+        <pathfinderHost type="TextField">
+            <Default>https://pathfinder.netdefense.io</Default>
+            <Required>Y</Required>
+        </pathfinderHost>
+        <pathfinderTlsVerify type="BooleanField">
+            <Default>1</Default>
+            <Required>Y</Required>
+        </pathfinderTlsVerify>
+        <pathfinderShell type="TextField">
+            <Default>/usr/local/sbin/opnsense-shell</Default>
+            <Required>Y</Required>
+        </pathfinderShell>
+        <apiKey type="TextField">
+            <Required>N</Required>
+        </apiKey>
+        <apiSecret type="TextField">
+            <Required>N</Required>
+        </apiSecret>
+        <apiConfigured type="BooleanField">
+            <Default>0</Default>
+            <Required>N</Required>
+        </apiConfigured>
+    </items>
+</model>

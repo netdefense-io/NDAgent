@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="utf-8"?>
+<form>
+    <field>
+        <id>settings.enabled</id>
+        <label>Enable NetDefense</label>
+        <type>checkbox</type>
+        <help>This will activate the NetDefense Agent service.</help>
+    </field>
+    <field>
+        <id>settings.token</id>
+        <label>Registration Token</label>
+        <type>text</type>
+        <help>UUID token for NetDefense server registration.</help>
+    </field>
+    <field>
+        <id>settings.deviceId</id>
+        <label>Device ID</label>
+        <type>text</type>
+        <help>Unique UUID identifier for this device (auto-generated when page loads if empty). Use the "Reset ID" button to generate a new UUID.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.serverAddress</id>
+        <label>Server Address</label>
+        <type>text</type>
+        <help>NetDefense server URL (e.g., https://hub.netdefense.io or https://example.com:8443).</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.sslVerify</id>
+        <label>SSL Verification</label>
+        <type>checkbox</type>
+        <help>Enable SSL certificate verification.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.logLevel</id>
+        <label>Log Level</label>
+        <type>dropdown</type>
+        <help>Logging level for NetDefense Agent.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.pathfinderHost</id>
+        <label>Pathfinder Address</label>
+        <type>text</type>
+        <help>Pathfinder server URL for remote shell connections.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.pathfinderTlsVerify</id>
+        <label>Pathfinder SSL Verification</label>
+        <type>checkbox</type>
+        <help>Enable SSL certificate verification for Pathfinder connections.</help>
+        <advanced>true</advanced>
+    </field>
+</form>

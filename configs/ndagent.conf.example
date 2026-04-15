@@ -1,0 +1,34 @@
+# NDAgent Configuration File
+# Copy this file to /usr/local/etc/ndagent.conf and modify as needed
+
+# Required: Enable the agent (true/false)
+enabled=true
+
+# Required: Authentication token from NetDefense server
+token=your-token-here
+
+# Required: Device UUID (unique identifier for this device)
+device_uuid=your-device-uuid-here
+
+# Server connection settings
+server_host=localhost
+server_port=8443
+
+# SSL certificate verification (disable only for testing)
+ssl_verify=true
+
+# Path to OPNsense config.xml file
+config_xml_path=/conf/config.xml
+
+# PID file location
+pid_file=/var/run/ndagent.pid
+
+# Logging level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+log_level=INFO
+
+# Test mode: blocks dangerous operations (SHUTDOWN, REBOOT)
+test_mode=false
+
+# Pathfinder settings (for remote access via CONNECT task)
+# pathfinder_host=https://pathfinder.netdefense.io
+# pathfinder_tls_verify=true
