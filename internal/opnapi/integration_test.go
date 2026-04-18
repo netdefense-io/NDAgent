@@ -832,8 +832,10 @@ func TestIntegration_CreateAndDeleteHostOverride(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Test UUID with NDAgent prefix
-	testUUID := "221f3268-ho01-4abc-9001-000000000001"
+	// Test UUID with NDAgent prefix. OPNsense validates the UUID as strict
+	// RFC-4122 hex; mnemonic segments (e.g. "ho01") contain non-hex chars and
+	// get rejected with {"result":"failed"}.
+	testUUID := "221f3268-0ff0-4abc-9001-000000000001"
 
 	// Create test host override
 	override := HostOverride{
@@ -887,8 +889,8 @@ func TestIntegration_CreateAndDeleteDomainForward(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
-	// Test UUID with NDAgent prefix
-	testUUID := "221f3268-fw01-4abc-9001-000000000001"
+	// Test UUID with NDAgent prefix (strict hex — see hostOverride test for why).
+	testUUID := "221f3268-0f01-4abc-9001-000000000001"
 
 	// Create test domain forward
 	forward := DomainForward{
@@ -941,8 +943,8 @@ func TestIntegration_CreateAndDeleteHostAlias(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
-	// First create a parent host override
-	parentUUID := "221f3268-ho02-4abc-9001-000000000001"
+	// First create a parent host override (strict-hex UUID).
+	parentUUID := "221f3268-0ff0-4abc-9001-000000000002"
 	parentOverride := HostOverride{
 		Enabled:     "1",
 		Hostname:    "nd-integration-parent",
@@ -961,8 +963,8 @@ func TestIntegration_CreateAndDeleteHostAlias(t *testing.T) {
 		_ = client.DeleteHostOverride(ctx, parentUUID)
 	}()
 
-	// Create test host alias
-	aliasUUID := "221f3268-ha01-4abc-9001-000000000001"
+	// Create test host alias (strict-hex UUID).
+	aliasUUID := "221f3268-0a1a-4abc-9001-000000000001"
 	alias := HostAlias{
 		Enabled:     "1",
 		Host:        parentUUID,

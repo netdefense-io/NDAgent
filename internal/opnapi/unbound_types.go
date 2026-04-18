@@ -35,8 +35,12 @@ type DomainForward struct {
 }
 
 // DomainForwardWrapper wraps a domain forward for API set operations.
+// The wire key is "dot" — OPNsense Unbound uses that single wrapper for
+// both type="forward" and type="dot" entries. Sending {"forward": {...}}
+// is silently rejected with {"result":"failed"} and no validation details.
+// Verified against /api/unbound/settings/getForward/ on OPNsense 26.1.2.
 type DomainForwardWrapper struct {
-	Forward DomainForward `json:"forward"`
+	Forward DomainForward `json:"dot"`
 }
 
 // HostAlias represents an Unbound host alias (CNAME-like) for API operations.

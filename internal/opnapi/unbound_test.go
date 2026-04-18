@@ -1,6 +1,7 @@
 package opnapi
 
 import (
+	"encoding/json"
 	"testing"
 )
 
@@ -154,6 +155,46 @@ func TestConvertToOPNDomainForward(t *testing.T) {
 	if forward.ForwardFirst != "0" {
 		t.Errorf("Expected ForwardFirst=0, got %s", forward.ForwardFirst)
 	}
+}
+
+// TestDomainForwardWrapperJSONKey guards against regressing to {"forward": ...}.
+// OPNsense Unbound requires the wrapper key to be "dot" for both type="forward"
+// and type="dot" entries; the wrong key is silently rejected with
+// {"result":"failed"} and no validation details.
+func TestDomainForwardWrapperJSONKey(t *testing.T) {
+	wrapper := DomainForwardWrapper{
+		Forward: DomainForward{
+			Enabled: "1",
+			Type:    "forward",
+			Domain:  "lab.internal",
+			Server:  "8.8.8.8",
+		},
+	}
+
+	raw, err := json.Marshal(wrapper)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &top); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if _, ok := top["dot"]; !ok {
+		t.Errorf("expected top-level key \"dot\", got keys %v (payload=%s)", keysOf(top), string(raw))
+	}
+	if _, ok := top["forward"]; ok {
+		t.Errorf("unexpected top-level key \"forward\"; OPNsense silently rejects this (payload=%s)", string(raw))
+	}
+}
+
+func keysOf(m map[string]json.RawMessage) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	return out
 }
 
 func TestConvertToOPNHostAlias(t *testing.T) {

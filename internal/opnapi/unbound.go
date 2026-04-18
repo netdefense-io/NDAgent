@@ -240,7 +240,16 @@ func (c *Client) SetForward(ctx context.Context, uuid string, forward DomainForw
 			c.log.Debugw("Validation errors", "errors", result.ValidationErrors.String())
 			return fmt.Errorf("validation failed: %s", result.ValidationErrors.String())
 		}
-		return fmt.Errorf("unexpected result: %s (response: %s)", result.Result, string(respBody))
+		// Structural rejection (e.g. wrong wrapper key, unknown field):
+		// OPNsense returns {"result":"failed"} with empty validations. Dump the
+		// request body so the next such bug is one log line away.
+		reqBody, _ := json.Marshal(wrapper)
+		c.log.Debugw("SetForward structural rejection",
+			"uuid", uuid,
+			"request_body", string(reqBody),
+			"response", string(respBody),
+		)
+		return fmt.Errorf("unexpected result: %s (response: %s, request: %s)", result.Result, string(respBody), string(reqBody))
 	}
 
 	c.log.Debugw("SetForward completed",
