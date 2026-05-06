@@ -55,6 +55,26 @@ type Config struct {
 	WebadminPort     int    // Detected webgui port (default: 443)
 	WebadminProtocol string // Detected webgui protocol (default: "https")
 
+	// Payload signing (PAYLOAD-SIGNATURES-DESIGN.md §12).
+	// DevicePrivKey is the base64-encoded raw 32-byte Ed25519 seed that
+	// signs outbound responses. Generated locally on first run if absent.
+	DevicePrivKey string `mapstructure:"device_privkey"`
+	// NDManager primary + emergency public keys are auto-discovered at
+	// first connect via TOFU (TLS-anchored fetch from broker's public
+	// /api/v1/.well-known/keys), persisted to /var/db/ndagent/ndm-keys.json,
+	// and pinned thereafter. See ROTATION-DIRECTIVE.md at the CoreCode
+	// root. They no longer ride in ndagent.conf.
+
+	// BootstrapToken is the operator-issued one-time token used to bind
+	// (or rebind) Device.device_pubkey when the broker's existing-device
+	// row has device_pubkey=NULL — see PAYLOAD-SIGNATURES-FINDINGS-FIXES.md
+	// §3 Finding 2. Sourced from ndagent.conf (rendered by the OPNsense
+	// plugin from a GUI input). Cleared from the in-memory Config after
+	// a successful StartRegistration response (single-use); the operator
+	// is expected to clear the GUI field separately so subsequent rebinds
+	// require a new token.
+	BootstrapToken string `mapstructure:"bootstrap_token"`
+
 	// Computed URIs (not from config file)
 	ServerURIWS    string
 	ServerURICheck string
@@ -104,6 +124,13 @@ func Load(configPath string) (*Config, error) {
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
+
+	// First-run keypair generation moved out of config.Load — see issue #15.
+	// state.LoadOrEnsureDevicePrivkey is invoked from lifecycle so the seed
+	// lives in /var/db/ndagent/device.key (outside configctl's reach) rather
+	// than in this conf file. cfg.DevicePrivKey is populated by lifecycle
+	// from that file, with the value below treated as a one-time migration
+	// source.
 
 	// Validate and normalize
 	if err := cfg.validate(); err != nil {
@@ -229,6 +256,14 @@ func (c *Config) validate() error {
 	if !validLevels[c.LogLevel] {
 		return fmt.Errorf("invalid log_level: %s (must be DEBUG, INFO, WARNING, ERROR, or CRITICAL)", c.LogLevel)
 	}
+
+	// device_privkey validation moved out of config.Load — see issue #15.
+	// The seed is now persisted at /var/db/ndagent/device.key and loaded
+	// by lifecycle (state.LoadOrEnsureDevicePrivkey) before Phase 1
+	// registration. The cfg.DevicePrivKey field is left empty here and
+	// populated by lifecycle from the key file (or migrated from any
+	// legacy conf line on first run).
+	c.DevicePrivKey = strings.TrimSpace(c.DevicePrivKey)
 
 	return nil
 }

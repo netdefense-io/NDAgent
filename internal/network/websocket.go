@@ -3,10 +3,13 @@ package network
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strconv"
 	"sync"
 	"time"
 
@@ -15,6 +18,8 @@ import (
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
+	"github.com/netdefense-io/ndagent/internal/signing"
+	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/util"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
@@ -40,61 +45,54 @@ type AuthResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// Command received from server
+// Command received from server, post-envelope-verification.
+//
+// PAYLOAD-SIGNATURES-DESIGN.md §6 wire shape:
+//
+//	{
+//	  "type": "task",
+//	  "task_id": <int>,
+//	  "task_code": "<8-char>",
+//	  "task_type": "PING|SYNC|...",
+//	  "envelope": "<base64 COSE_Sign1>",
+//	  "pathfinder_session": "<uuid>"   // CONNECT only
+//	}
+//
+// The agent's dispatch path verifies the envelope's signature, extracts
+// the payload from its protected wrapping, and constructs the Command
+// fields below from the verified bytes. Outer task_id is reconciled
+// against the protected-header task_id for tamper-resistance.
 type Command struct {
-	TaskID   string                 `json:"task_id"`
-	TaskType string                 `json:"task_type"`
-	Payload  map[string]interface{} `json:"payload"`
+	TaskID            string                 // numeric, stringified for backwards compatibility
+	TaskType          string
+	Payload           map[string]interface{} // verified payload bytes parsed as JSON object
+	PathfinderSession string                 // CONNECT only; outer-frame routing token
 }
 
-// UnmarshalJSON handles flexible JSON parsing for Command.
-// - task_id can be string or number
-// - payload can be object or JSON string
-func (c *Command) UnmarshalJSON(data []byte) error {
-	// Use a temporary struct with flexible types
-	type rawCommand struct {
-		TaskID   interface{} `json:"task_id"`
-		TaskType string      `json:"task_type"`
-		Payload  interface{} `json:"payload"`
-	}
+// rawCommandFrame is what we read off the wire before envelope verification.
+// Public-side downstream code never sees this — only the verified Command.
+type rawCommandFrame struct {
+	Type              string      `json:"type"`
+	TaskID            interface{} `json:"task_id"`
+	TaskCode          string      `json:"task_code,omitempty"`
+	TaskType          string      `json:"task_type"`
+	Envelope          string      `json:"envelope"`
+	PathfinderSession string      `json:"pathfinder_session,omitempty"`
+}
 
-	var raw rawCommand
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return err
-	}
-
-	// Handle task_id as string or number
-	switch v := raw.TaskID.(type) {
+// taskIDToString normalizes the outer-frame task_id (which may arrive as
+// a JSON number or a string) into the dispatcher's string form.
+func taskIDToString(raw interface{}) string {
+	switch v := raw.(type) {
 	case string:
-		c.TaskID = v
+		return v
 	case float64:
-		c.TaskID = fmt.Sprintf("%.0f", v)
+		return fmt.Sprintf("%.0f", v)
 	case nil:
-		c.TaskID = ""
+		return ""
 	default:
-		c.TaskID = fmt.Sprintf("%v", v)
+		return fmt.Sprintf("%v", v)
 	}
-
-	c.TaskType = raw.TaskType
-
-	// Handle payload as object or JSON string
-	switch v := raw.Payload.(type) {
-	case map[string]interface{}:
-		c.Payload = v
-	case string:
-		// Payload is a JSON string, parse it
-		if v != "" {
-			if err := json.Unmarshal([]byte(v), &c.Payload); err != nil {
-				return fmt.Errorf("failed to parse payload string: %w", err)
-			}
-		}
-	case nil:
-		c.Payload = nil
-	default:
-		return fmt.Errorf("unexpected payload type: %T", v)
-	}
-
-	return nil
 }
 
 // TaskResponse sent back to server.
@@ -137,14 +135,32 @@ type WebSocketClient struct {
 
 	// OPNsense API client for SYNC_API (nil if not configured)
 	apiClient *opnapi.Client
+
+	// State store — used by SendTaskResponse to acquire next_response_seq.
+	state *state.Store
+
+	// Cached signing material for outbound responses
+	// (PAYLOAD-SIGNATURES-DESIGN.md §12.4).
+	privMu     sync.Mutex
+	privCached ed25519.PrivateKey
+	kidCached  []byte
+
+	// responseMu serializes the acquire-seq + COSE-sign + WriteJSON
+	// triple so concurrent task goroutines can't interleave and put
+	// responses on the wire out of seq order. Distinct from `mu`
+	// (which protects the websocket connection itself) because heartbeats
+	// and other writes shouldn't block behind a long sign.
+	// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a (send-side ordering).
+	responseMu sync.Mutex
 }
 
 // NewWebSocketClient creates a new WebSocket client.
-func NewWebSocketClient(cfg *config.Config) *WebSocketClient {
+func NewWebSocketClient(cfg *config.Config, stateStore *state.Store, ndmKeys map[string]ed25519.PublicKey) *WebSocketClient {
 	return &WebSocketClient{
 		cfg:        cfg,
 		heartbeat:  NewHeartbeatManager(cfg.DeviceUUID, 60*time.Second),
-		dispatcher: NewCommandDispatcher(),
+		dispatcher: NewCommandDispatcher(stateStore, ndmKeys, cfg.DeviceUUID),
+		state:      stateStore,
 	}
 }
 
@@ -410,48 +426,125 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 	return conn.ReadMessage()
 }
 
-// SendTaskResponse sends a task response to the server.
+// SendTaskResponse sends a task response to the server, wrapped in a
+// COSE_Sign1 envelope signed by the device private key.
+//
+// Wire format per PAYLOAD-SIGNATURES-DESIGN.md §6:
+//
+//	{
+//	  "type": "task_response",
+//	  "task_id": <int>,
+//	  "envelope": "<base64 COSE_Sign1>"
+//	}
+//
+// The envelope's payload is the JSON-serialized response object
+// ({status, message, content, results, validation_errors}).
+//
+// Concurrency: multiple task goroutines can call this simultaneously
+// (e.g. an IN_PROGRESS heartbeat from one task racing with a final
+// response from another). The triple
+//
+//	acquire seq → COSE sign → WS write
+//
+// runs under `responseMu` so seq order matches wire order; the broker
+// strict-> replay barrier on Device.last_response_seq depends on this.
+// Distinct from the connection mutex so heartbeats stay live.
+// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a.
 func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data map[string]interface{}) error {
 	log := logging.Named("websocket")
 
-	resp := TaskResponse{
-		Type:    MsgTypeTaskResponse,
-		TaskID:  taskID,
-		Status:  status,
-		Message: message,
+	// Build the inner response object — what NDBroker will see as
+	// `data` after envelope verification.
+	inner := map[string]interface{}{
+		"status":  status,
+		"message": message,
 	}
-
-	// Flatten data fields to top level (matching Python behavior)
 	if data != nil {
-		// Handle content - can be string or map (for PULL responses)
 		if content, ok := data["content"].(string); ok {
-			resp.Content = content
+			inner["content"] = content
 		} else if contentMap, ok := data["content"].(map[string]interface{}); ok {
-			// Serialize map content to JSON string
 			contentBytes, err := json.Marshal(contentMap)
 			if err != nil {
 				log.Errorw("Failed to serialize content map", "error", err)
 			} else {
-				resp.Content = string(contentBytes)
+				inner["content"] = string(contentBytes)
 			}
 		}
 		if results, ok := data["results"]; ok {
-			resp.Results = results
+			inner["results"] = results
 		}
 		if validationErrors, ok := data["validation_errors"]; ok {
-			resp.ValidationErrors = validationErrors
+			inner["validation_errors"] = validationErrors
 		}
 	}
 
-	log.Debugw("Sending task response",
+	innerBytes, err := json.Marshal(inner)
+	if err != nil {
+		return fmt.Errorf("marshal inner response: %w", err)
+	}
+
+	priv, kid, err := w.devicePrivkey()
+	if err != nil {
+		return fmt.Errorf("load device private key: %w", err)
+	}
+
+	taskIDInt, err := strconv.ParseInt(taskID, 10, 64)
+	if err != nil {
+		return fmt.Errorf("task_id %q is not an integer: %w", taskID, err)
+	}
+
+	w.responseMu.Lock()
+	defer w.responseMu.Unlock()
+
+	if w.state == nil {
+		// Should never happen — NewWebSocketClient sets it.
+		return fmt.Errorf("internal: state store not wired into WebSocketClient")
+	}
+	seq, err := w.state.AcquireNextResponseSeq()
+	if err != nil {
+		return fmt.Errorf("acquire response seq: %w", err)
+	}
+
+	envelope, err := signing.BuildResponseEnvelope(priv, kid, taskIDInt, w.cfg.DeviceUUID, innerBytes, seq, 0)
+	if err != nil {
+		return fmt.Errorf("build response envelope: %w", err)
+	}
+
+	frame := map[string]interface{}{
+		"type":     MsgTypeTaskResponse,
+		"task_id":  taskIDInt,
+		"envelope": base64.StdEncoding.EncodeToString(envelope),
+	}
+
+	log.Debugw("Sending signed task response",
 		"task_id", taskID,
 		"status", status,
 		"message", message,
-		"has_content", resp.Content != "",
-		"has_results", resp.Results != nil,
+		"seq", seq,
+		"envelope_size", len(envelope),
 	)
 
-	return w.SendJSON(resp)
+	return w.SendJSON(frame)
+}
+
+// devicePrivkey lazily loads the agent's Ed25519 private key from
+// cfg.DevicePrivKey, caching it on the client. The kid is derived
+// once from the public component.
+func (w *WebSocketClient) devicePrivkey() (ed25519.PrivateKey, []byte, error) {
+	w.privMu.Lock()
+	defer w.privMu.Unlock()
+	if w.privCached != nil {
+		return w.privCached, w.kidCached, nil
+	}
+	priv, err := signing.PrivateKeyFromBase64(w.cfg.DevicePrivKey)
+	if err != nil {
+		return nil, nil, err
+	}
+	pub := signing.PublicKeyFromPrivate(priv)
+	kid := signing.KidFromPubkey(pub)
+	w.privCached = priv
+	w.kidCached = kid
+	return priv, kid, nil
 }
 
 // GetTLSConfig returns the TLS configuration for the WebSocket connection.

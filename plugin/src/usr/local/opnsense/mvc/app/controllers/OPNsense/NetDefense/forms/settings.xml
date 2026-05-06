@@ -54,4 +54,11 @@
         <help>Enable SSL certificate verification for Pathfinder connections.</help>
         <advanced>true</advanced>
     </field>
+    <field>
+        <id>settings.bootstrapToken</id>
+        <label>Re-bind Token</label>
+        <type>text</type>
+        <help>One-time token from your NetDefense administrator (issued via "ndcli device rebind-token &lt;name&gt;"). Paste here to re-bind this device's signing key — used after a suspected key leak, hardware replacement, or routine rotation. The agent rotates its keypair automatically when this field is set. Clear this field once the device shows ENABLED again.</help>
+        <advanced>true</advanced>
+    </field>
 </form>

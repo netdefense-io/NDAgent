@@ -58,5 +58,11 @@
             <Default>0</Default>
             <Required>N</Required>
         </apiConfigured>
+        <bootstrapToken type="TextField">
+            <!-- 43-char urlsafe-base64 (secrets.token_urlsafe(32)) -->
+            <mask>/^[A-Za-z0-9_-]{43}$/</mask>
+            <ValidationMessage>Bootstrap token must be 43 chars urlsafe-base64</ValidationMessage>
+            <Required>N</Required>
+        </bootstrapToken>
     </items>
 </model>

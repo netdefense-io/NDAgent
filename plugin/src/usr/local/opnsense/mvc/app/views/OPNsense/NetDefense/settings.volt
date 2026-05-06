@@ -567,6 +567,15 @@
                             <div class="help-block">{{ lang._('Logging verbosity for the NetDefense Agent.') }}</div>
                         </td>
                     </tr>
+                    <tr>
+                        <td><strong>{{ lang._('Re-bind Token') }}</strong></td>
+                        <td>
+                            <input type="text" class="form-control" id="settings.bootstrapToken" name="settings.bootstrapToken" placeholder="" autocomplete="off">
+                            <div class="help-block">
+                                {{ lang._('One-time token from your NetDefense administrator (issued via "ndcli device rebind-token <name>"). Paste here to re-bind the device signing key after a suspected leak, hardware replacement, or routine rotation. The agent rotates its keypair automatically when this field is set. Clear this field once the device shows ENABLED again.') }}
+                            </div>
+                        </td>
+                    </tr>
                 </tbody>
             </table>
         </div>

@@ -120,8 +120,14 @@ func run(cmd *cobra.Command, args []string) error {
 	shutdown := core.NewShutdownCoordinator()
 	shutdown.SetupSignalHandlers()
 
-	// Create lifecycle manager
-	lifecycle := core.NewLifecycleManager(cfg, shutdown)
+	// Create lifecycle manager (opens the agent's persistent state store
+	// at /var/db/ndagent/state for replay barriers and rebind-token
+	// idempotency).
+	lifecycle, err := core.NewLifecycleManager(cfg, configPath, shutdown)
+	if err != nil {
+		log.Errorw("Failed to initialize lifecycle manager", "error", err)
+		return err
+	}
 
 	// Run the agent lifecycle
 	log.Info("Starting agent lifecycle...")
