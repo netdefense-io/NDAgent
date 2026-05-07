@@ -94,6 +94,7 @@ func (h *HeartbeatManager) sendHeartbeat(ws *WebSocketClient) error {
 		"sequence", sequence,
 		"device_uuid", h.deviceUUID,
 	)
+	ws.TouchStatus()
 
 	return nil
 }

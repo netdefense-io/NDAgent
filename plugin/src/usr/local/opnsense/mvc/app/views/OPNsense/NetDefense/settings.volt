@@ -133,6 +133,49 @@
         });
     }
 
+    // Fetch agent runtime status (version + WS connection) from
+    // /var/run/ndagent.status via the ServiceController endpoint.
+    function checkAgentStatus() {
+        $.ajax({
+            url: '/api/netdefense/service/agentStatus',
+            type: 'GET',
+            success: function(data) {
+                var versionEl = $('#statusAgentVersion');
+                var connEl = $('#statusServerConnection');
+
+                if (data.version && data.version !== 'unknown') {
+                    versionEl.html('<span class="text-success"><i class="fa fa-check-circle"></i> ' + data.version + '</span>');
+                } else {
+                    versionEl.html('<span class="text-warning"><i class="fa fa-question-circle"></i> Unknown</span>');
+                }
+
+                if (data.connected) {
+                    var label = 'Connected';
+                    if (data.server) {
+                        label += ' (' + data.server + ')';
+                    }
+                    connEl.html('<span class="text-success"><i class="fa fa-check-circle"></i> ' + label + '</span>');
+                } else if (data.stale && data.state !== 'unknown') {
+                    connEl.html('<span class="text-warning"><i class="fa fa-exclamation-triangle"></i> Stale (' + data.state + ')</span>');
+                } else if (data.state === 'connecting') {
+                    connEl.html('<span class="text-warning"><i class="fa fa-spinner fa-spin"></i> Connecting</span>');
+                } else if (data.state === 'disconnected') {
+                    var label = 'Disconnected';
+                    if (data.last_error) {
+                        label += ' — ' + data.last_error;
+                    }
+                    connEl.html('<span class="text-danger"><i class="fa fa-times-circle"></i> ' + label + '</span>');
+                } else {
+                    connEl.html('<span class="text-danger"><i class="fa fa-times-circle"></i> Unknown</span>');
+                }
+            },
+            error: function() {
+                $('#statusAgentVersion').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
+                $('#statusServerConnection').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
+            }
+        });
+    }
+
     // Check service status
     function checkServiceStatus() {
         $.ajax({
@@ -200,6 +243,7 @@
         // Check API status and service status on page load
         checkApiStatus();
         checkServiceStatus();
+        checkAgentStatus();
 
         // Initialize standard OPNsense service control buttons (Start/Stop/Restart)
         updateServiceControlUI('netdefense');
@@ -363,6 +407,7 @@
                         // Refresh status displays after applying
                         setTimeout(function() {
                             checkServiceStatus();
+                            checkAgentStatus();
                             updateServiceControlUI('netdefense');
                         }, 1000);
                         btn.prop('disabled', false).html('<i class="fa fa-save"></i> Apply');
@@ -398,17 +443,21 @@
     <table class="table table-striped">
         <thead>
             <tr>
-                <th colspan="2"><i class="fa fa-shield"></i> {{ lang._('NetDefense Agent Status') }}</th>
+                <th colspan="4"><i class="fa fa-shield"></i> {{ lang._('NetDefense Agent Status') }}</th>
             </tr>
         </thead>
         <tbody>
             <tr>
                 <td style="width: 22%;"><strong>{{ lang._('API Credentials') }}</strong></td>
-                <td id="statusApiCreds"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
+                <td style="width: 28%;" id="statusApiCreds"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
+                <td style="width: 22%;"><strong>{{ lang._('Agent Version') }}</strong></td>
+                <td style="width: 28%;" id="statusAgentVersion"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
             </tr>
             <tr>
                 <td><strong>{{ lang._('Service') }}</strong></td>
                 <td id="statusService"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
+                <td><strong>{{ lang._('Server Connection') }}</strong></td>
+                <td id="statusServerConnection"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
             </tr>
         </tbody>
     </table>

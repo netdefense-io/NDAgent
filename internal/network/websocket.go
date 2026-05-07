@@ -20,6 +20,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/signing"
 	"github.com/netdefense-io/ndagent/internal/state"
+	"github.com/netdefense-io/ndagent/internal/status"
 	"github.com/netdefense-io/ndagent/internal/util"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
@@ -152,6 +153,10 @@ type WebSocketClient struct {
 	// and other writes shouldn't block behind a long sign.
 	// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a (send-side ordering).
 	responseMu sync.Mutex
+
+	// Status writer publishes connection lifecycle to the OPNsense
+	// plugin GUI via /var/run/ndagent.status. Optional; nil-safe.
+	statusWriter *status.Writer
 }
 
 // NewWebSocketClient creates a new WebSocket client.
@@ -252,14 +257,18 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 	}
 	defer func() {
 		// Send clean close frame if context was cancelled (graceful shutdown)
+		reason := ""
 		if ctx.Err() != nil {
 			w.CloseClean()
+			reason = "shutdown"
 		} else {
 			conn.Close()
+			reason = "connection ended"
 		}
 		w.mu.Lock()
 		w.conn = nil
 		w.mu.Unlock()
+		w.markStatus(func(sw *status.Writer) error { return sw.MarkDisconnected(reason) })
 	}()
 
 	w.mu.Lock()
@@ -278,6 +287,7 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 	log.Infow("Device authenticated successfully",
 		"device_uuid", w.cfg.DeviceUUID,
 	)
+	w.markStatus(func(sw *status.Writer) error { return sw.MarkConnected(w.cfg.ServerURIWS) })
 
 	// Run communication loop
 	return w.runCommunicationLoop(ctx)
@@ -572,6 +582,34 @@ func (w *WebSocketClient) GetBinaryPath() string {
 // GetConfigXMLPath returns the path to the OPNsense config.xml file.
 func (w *WebSocketClient) GetConfigXMLPath() string {
 	return w.cfg.ConfigXMLPath
+}
+
+// SetStatusWriter wires the runtime status publisher used by the
+// OPNsense plugin GUI. Safe to call before Run; nil-safe inside the
+// hot path.
+func (w *WebSocketClient) SetStatusWriter(sw *status.Writer) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.statusWriter = sw
+}
+
+// TouchStatus refreshes the status file's UpdatedAt timestamp without
+// changing state. Called from the heartbeat loop so a stalled agent
+// shows up as stale to the GUI even if it never crashed cleanly.
+func (w *WebSocketClient) TouchStatus() {
+	w.markStatus(func(sw *status.Writer) error { return sw.Touch() })
+}
+
+// markStatus reports a connection-state transition. Best-effort; status
+// file errors must not affect connectivity.
+func (w *WebSocketClient) markStatus(fn func(*status.Writer) error) {
+	w.mu.Lock()
+	sw := w.statusWriter
+	w.mu.Unlock()
+	if sw == nil {
+		return
+	}
+	_ = fn(sw)
 }
 
 // SetShutdownCallback sets the callback for requesting agent shutdown (used by RESTART task).

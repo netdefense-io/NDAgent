@@ -19,11 +19,11 @@
 		"security"
 	],
 	"annotations": {
-		"product_abi": "25.7",
+		"product_abi": "@@PRODUCT_ABI@@",
 		"product_arch": "amd64",
 		"product_conflicts": "os-netdefense-dev",
 		"product_email": "info@netdefense.io",
-		"product_hash": "af4bf6c6355bef7e575c02bb892e9dfd741382ecb0dbe24b2774ac285f5cdaed",
+		"product_hash": "@@PRODUCT_HASH@@",
 		"product_id": "os-netdefense",
 		"product_name": "netdefense",
 		"product_tier": "4",
@@ -32,7 +32,7 @@
 		"FreeBSD_version": "1403000"
 	},
 	"scripts": {
-		"post-install": "if [ -f /usr/local/etc/ndagent.conf ] && ! [ -e /var/db/ndagent/device.key ]; then PRIVKEY=$(grep '^device_privkey=' /usr/local/etc/ndagent.conf 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]'); if [ -n \"$PRIVKEY\" ]; then mkdir -p /var/db/ndagent; chmod 0700 /var/db/ndagent; echo \"$PRIVKEY\" > /var/db/ndagent/device.key; chmod 0600 /var/db/ndagent/device.key; chown root:wheel /var/db/ndagent/device.key; echo \"Migrated device_privkey to /var/db/ndagent/device.key (issue #15)\"; fi; fi\nif [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\nif [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/NetDefense; fi\nif [ -f /usr/local/etc/rc.configure_plugins ]; then echo \"Reloading plugin configuration\"; /usr/local/etc/rc.configure_plugins POST_INSTALL; fi\nif [ -f /usr/local/sbin/configctl ]; then echo -n \"Reloading template OPNsense/NetDefense: \"; /usr/local/sbin/configctl template reload OPNsense/NetDefense; fi; if [ -f /usr/local/etc/rc.d/ndagent ]; then echo \"Starting ndagent (if enabled)\"; /usr/local/etc/rc.d/ndagent start; fi",
+		"post-install": "if [ -f /usr/local/etc/ndagent.conf ] && ! [ -e /var/db/ndagent/device.key ]; then PRIVKEY=$(grep '^device_privkey=' /usr/local/etc/ndagent.conf 2>/dev/null | head -1 | cut -d= -f2- | tr -d '[:space:]'); if [ -n \"$PRIVKEY\" ]; then mkdir -p /var/db/ndagent; chmod 0700 /var/db/ndagent; echo \"$PRIVKEY\" > /var/db/ndagent/device.key; chmod 0600 /var/db/ndagent/device.key; chown root:wheel /var/db/ndagent/device.key; echo \"Migrated device_privkey to /var/db/ndagent/device.key (issue #15)\"; fi; fi\nif [ -f /usr/local/etc/rc.d/configd ]; then /usr/local/etc/rc.d/configd restart; fi\nif [ -f /usr/local/opnsense/mvc/script/run_migrations.php ]; then /usr/local/opnsense/mvc/script/run_migrations.php OPNsense/NetDefense; fi\nif [ -f /usr/local/etc/rc.configure_plugins ]; then echo \"Reloading plugin configuration\"; /usr/local/etc/rc.configure_plugins POST_INSTALL; fi\nif [ -x /usr/local/opnsense/scripts/firmware/register.php ]; then echo \"Registering plugin and scrubbing obsolete variants\"; /usr/local/opnsense/scripts/firmware/register.php sync; fi\nif [ -f /usr/local/sbin/configctl ]; then echo -n \"Reloading template OPNsense/NetDefense: \"; /usr/local/sbin/configctl template reload OPNsense/NetDefense; fi; if [ -f /usr/local/etc/rc.d/ndagent ]; then echo \"Starting ndagent (if enabled)\"; /usr/local/etc/rc.d/ndagent start; fi",
 		"post-deinstall": "if [ -f /usr/local/etc/rc.configure_plugins ]; then echo \"Reloading plugin configuration\"; /usr/local/etc/rc.configure_plugins POST_DEINSTALL; fi",
 		"pre-deinstall": "if [ -f /usr/local/etc/rc.d/ndagent ]; then echo \"Stopping ndagent (if enabled)\"; /usr/local/etc/rc.d/ndagent stop; fi",
 	}

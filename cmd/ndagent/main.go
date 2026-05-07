@@ -16,6 +16,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/core"
 	"github.com/netdefense-io/ndagent/internal/logging"
+	"github.com/netdefense-io/ndagent/internal/status"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
 
@@ -120,10 +121,20 @@ func run(cmd *cobra.Command, args []string) error {
 	shutdown := core.NewShutdownCoordinator()
 	shutdown.SetupSignalHandlers()
 
+	// Status writer publishes a JSON snapshot of agent identity + WS
+	// connection state to /var/run/ndagent.status for the OPNsense
+	// plugin GUI to read. Best-effort: a write failure (e.g. /var/run
+	// unwritable in a test rig) shouldn't take the agent down, so we
+	// log and proceed.
+	statusWriter := status.NewWriter(status.DefaultPath, version.Version, version.GitCommit, cfg.DeviceUUID)
+	if err := statusWriter.MarkConnecting(); err != nil {
+		log.Warnw("Could not write initial status file", "path", status.DefaultPath, "error", err)
+	}
+
 	// Create lifecycle manager (opens the agent's persistent state store
 	// at /var/db/ndagent/state for replay barriers and rebind-token
 	// idempotency).
-	lifecycle, err := core.NewLifecycleManager(cfg, configPath, shutdown)
+	lifecycle, err := core.NewLifecycleManager(cfg, configPath, shutdown, statusWriter)
 	if err != nil {
 		log.Errorw("Failed to initialize lifecycle manager", "error", err)
 		return err

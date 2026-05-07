@@ -1,9 +1,9 @@
 {
-  "product_abi": "25.7",
+  "product_abi": "@@PRODUCT_ABI@@",
   "product_arch": "amd64",
   "product_conflicts": "",
   "product_email": "info@netdefense.io",
-  "product_hash": "af4bf6c6355bef7e575c02bb892e9dfd741382ecb0dbe24b2774ac285f5cdaed",
+  "product_hash": "@@PRODUCT_HASH@@",
   "product_id": "os-netdefense",
   "product_name": "NetDefense Agent",
   "product_tier": "4",

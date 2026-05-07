@@ -13,6 +13,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/state"
+	"github.com/netdefense-io/ndagent/internal/status"
 	"github.com/netdefense-io/ndagent/internal/tasks"
 )
 
@@ -25,10 +26,11 @@ type LifecycleManager struct {
 	shutdown           *ShutdownCoordinator
 	registrationClient *network.RegistrationClient
 	state              *state.Store
+	status             *status.Writer
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
-func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *ShutdownCoordinator) (*LifecycleManager, error) {
+func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *ShutdownCoordinator, statusWriter *status.Writer) (*LifecycleManager, error) {
 	log := logging.Named("lifecycle")
 
 	stateStore, err := state.New(state.DefaultStatePath)
@@ -71,6 +73,7 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		shutdown:           shutdown,
 		registrationClient: network.NewRegistrationClient(cfg),
 		state:              stateStore,
+		status:             statusWriter,
 	}, nil
 }
 
@@ -140,6 +143,7 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 
 		// Phase 1: Registration verification (HTTP API calls)
 		log.Info("Phase 1: Starting registration verification...")
+		_ = l.status.MarkConnecting()
 
 		err := l.registrationClient.WaitForRegistration(ctx)
 		if err != nil {
@@ -248,6 +252,7 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 	// NewLifecycleManager so the rebind-token rotation check can use
 	// it before Phase 1).
 	wsClient := network.NewWebSocketClient(l.cfg, l.state, ndmDispatchKeys)
+	wsClient.SetStatusWriter(l.status)
 	_ = ndmRotationKeys // held for future rotation-directive verify
 
 	// Initialize OPNsense API client if credentials are configured
