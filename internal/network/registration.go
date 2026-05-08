@@ -54,12 +54,11 @@ func (e *RegistrationStartError) IsTransient() bool {
 }
 
 // nextStartBackoff computes the next sleep duration for a transient
-// StartRegistration failure (issue #18). Doubles the previous backoff with
-// 0–5s of jitter, capped at max. If the server sent a Retry-After hint
-// that's larger than the local computation, the hint wins — SlowAPI knows
-// exactly when its sliding window will free up, so honoring it both
-// reduces wasted retries AND avoids piling more requests onto a still-
-// rate-limited window.
+// StartRegistration failure. Doubles the previous backoff with 0–5s of
+// jitter, capped at max. If the server sent a Retry-After hint larger
+// than the local computation, the hint wins — the server knows exactly
+// when its sliding window will free up, so honoring it reduces wasted
+// retries and avoids piling more requests onto a still-rate-limited window.
 func nextStartBackoff(prev time.Duration, retryAfter, max time.Duration) time.Duration {
 	const initial = 10 * time.Second
 	jitter := time.Duration(rand.Int63n(int64(5 * time.Second)))
@@ -128,10 +127,9 @@ type StartRegistrationRequest struct {
 	DeviceUUID   string `json:"device_uuid"`
 	Name         string `json:"name"`
 	Version      string `json:"version"`
-	DevicePubkey string `json:"device_pubkey,omitempty"` // base64 Ed25519 raw 32-byte pubkey (PAYLOAD-SIGNATURES-DESIGN.md §12.1)
+	DevicePubkey string `json:"device_pubkey,omitempty"` // base64 Ed25519 raw 32-byte pubkey
 	// BootstrapToken is sent only when the operator has issued a fresh
-	// rebind token via the NDManager admin endpoint. See
-	// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 2 / Layer 4.
+	// rebind token via the NDManager admin endpoint.
 	BootstrapToken string `json:"bootstrap_token,omitempty"`
 }
 
@@ -282,7 +280,7 @@ func (r *RegistrationClient) StartRegistration(ctx context.Context) error {
 	// Single-use semantics: zero the in-memory copy after a successful
 	// StartRegistration. The OPNsense plugin's GUI field is the source of
 	// truth — operators clear it manually after confirming the rebind on
-	// the broker side. PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 2 / Layer 4.
+	// the broker side.
 	if r.cfg.BootstrapToken != "" {
 		r.cfg.BootstrapToken = ""
 		log.Info("Bootstrap token cleared from in-memory config (single-use)")
@@ -301,11 +299,11 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 	// `totalDelay` — accumulating delay used by the existing CheckRegistration
 	// connection-error path. Pre-existing pattern; left intact.
 	//
-	// `startBackoff` — issue #18: separate tracker for transient
-	// StartRegistration failures (429, 5xx). Without this, the agent would
-	// retry Start every 10s and trap itself in the broker's 5/min rate
-	// limiter forever. Resets to zero on a successful Start. Honors the
-	// server's Retry-After header as a floor when present.
+	// `startBackoff` — separate tracker for transient StartRegistration
+	// failures (429, 5xx). Without this, the agent would retry Start every
+	// 10s and trap itself in the broker's 5/min rate limiter forever.
+	// Resets to zero on a successful Start. Honors the server's Retry-After
+	// header as a floor when present.
 	var totalDelay float64
 	var startBackoff time.Duration
 	const maxTotalDelay = 60.0 // Cap at around 1 minute

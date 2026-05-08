@@ -2,11 +2,10 @@
 //
 // Two counters are tracked:
 //   - `last_executed_task_id`: replay barrier for inbound dispatch envelopes
-//     (NDManager → agent). PAYLOAD-SIGNATURES-DESIGN.md §13.
+//     (NDManager → agent).
 //   - `next_response_seq`: device-monotonic counter included in the protected
-//     header of every outbound response envelope. Replaces task_id as the
-//     response replay token because IN_PROGRESS and final responses share
-//     task_id. PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a.
+//     header of every outbound response envelope. Distinct from task_id
+//     because IN_PROGRESS and final responses share a task_id.
 //
 // The agent acquires a fresh seq under a mutex that also covers the WS write
 // (see internal/network/websocket.go) so seq order matches wire order.
@@ -37,8 +36,7 @@ type onDisk struct {
 	// `bootstrap_token=` value the agent used to rotate its keypair.
 	// Stored so a restart that still has the same (now-consumed) token
 	// in conf doesn't double-rotate. Empty when the agent has never
-	// processed a rebind token. PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3
-	// Finding 2 (UX follow-up).
+	// processed a rebind token.
 	LastRebindTokenHash string `json:"last_rebind_token_hash,omitempty"`
 }
 

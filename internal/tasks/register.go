@@ -23,4 +23,7 @@ func RegisterHandlers(ws *network.WebSocketClient) {
 
 	// Register remote access handler
 	dispatcher.RegisterHandler(network.TaskTypeConnect, HandleConnect)
+
+	// Register plugin self-install handler
+	dispatcher.RegisterHandler(network.TaskTypePluginInstall, HandlePluginInstall)
 }

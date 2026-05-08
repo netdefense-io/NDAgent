@@ -11,6 +11,12 @@ var (
 
 	// GitCommit is the short git commit hash of the build.
 	GitCommit = "unknown"
+
+	// PackageName is the FreeBSD pkg name this build was packaged under
+	// (os-netdefense / os-netdefense-qa / os-netdefense-dev). Used by the
+	// PLUGIN_INSTALL handler to invoke `pkg install` against the correct
+	// channel; the agent never accepts a channel override from the wire.
+	PackageName = "unknown"
 )
 
 // Info returns a formatted version string with all version information.

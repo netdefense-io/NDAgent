@@ -1,13 +1,12 @@
 // Package network — NDM trust set TOFU bootstrap.
 //
 // On first connect, the agent fetches the NDM trust set (primary +
-// emergency Ed25519 pubkeys) from the broker's public JWKS endpoint
-// over TLS and pins both to disk. Subsequent runs read from the cache
-// and never poll. Rotation happens out-of-band via emergency-signed
-// directives (see ROTATION-DIRECTIVE.md at the CoreCode root); the
-// directive consumer is not yet implemented, so the manual escape
-// hatch in beta is `rm /var/db/ndagent/ndm-keys.json && service
-// ndagent restart` to force a re-TOFU against the current broker JWKS.
+// emergency Ed25519 pubkeys) from the broker's public JWKS endpoint over
+// TLS and pins both to disk. Subsequent runs read from the cache and
+// never poll. Rotation happens out-of-band via emergency-signed directives;
+// until that consumer ships, the manual escape hatch is
+// `rm /var/db/ndagent/ndm-keys.json && service ndagent restart` to force a
+// re-TOFU against the current broker JWKS.
 package network
 import (
 	"context"
@@ -52,8 +51,7 @@ type ndmKeyEntry struct {
 	PubkeyB64 string `json:"pubkey_b64"`
 }
 
-// jwksResponse mirrors broker's GET /api/v1/.well-known/keys response
-// (also compatible with NDManager's existing JWKS endpoint).
+// jwksResponse mirrors the broker's GET /api/v1/.well-known/keys response.
 type jwksResponse struct {
 	Keys []jwkKey `json:"keys"`
 }
@@ -69,8 +67,8 @@ type jwkKey struct {
 }
 
 // LoadOrFetchNDMKeys returns the NDM trust set as two kid→pubkey maps
-// (dispatch = primary only, rotation = emergency only — caller must keep
-// them separate per PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 7).
+// (dispatch = primary only, rotation = emergency only — the caller must
+// keep them separate; the dispatch verifier never consults the emergency key).
 //
 // The cache file at cachePath is consulted first; only on cache-miss
 // (or unreadable cache) does the agent fetch from the broker over TLS.

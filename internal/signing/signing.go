@@ -1,5 +1,5 @@
 // Package signing implements COSE_Sign1 envelope build/verify for the
-// NDAgent payload-signing protocol. See PAYLOAD-SIGNATURES-DESIGN.md.
+// NDAgent payload-signing protocol.
 package signing
 
 import (
@@ -25,12 +25,11 @@ const (
 	HdrTaskID    = int64(-65539)
 	HdrDeviceUUID = int64(-65540)
 	HdrVersion   = int64(-65541)
-	// v=2 amendments per PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §4.1.
 	HdrTaskType = int64(-65542) // dispatch envelopes only
 	HdrSeq      = int64(-65543) // response envelopes only
 	HdrExp      = int64(-65544) // dispatch envelopes only
 
-	// Bumped from 1 to 2 for the v=2 amendment. Verifiers reject anything else.
+	// Verifiers reject anything other than the current envelope version.
 	EnvelopeVersion = 2
 	// Response-leg freshness window — the agent generates iat fresh at
 	// send time, so bounding to ±300s blocks captured-frame replay. The
@@ -124,9 +123,9 @@ type DecodedEnvelope struct {
 // and produces a COSE_Sign1 envelope tagged with CBOR tag 18, ready
 // to base64-encode and place in the WS frame's `envelope` field.
 //
-// `seq` is the device-monotonic response replay token (Finding 3a). The
-// caller MUST acquire it under a critical section that also covers the
-// subsequent WS write so seq order matches wire order.
+// `seq` is the device-monotonic response replay token. The caller MUST
+// acquire it under a critical section that also covers the subsequent WS
+// write so seq order matches wire order.
 //
 // `iat` is filled with the current wall-clock seconds when zero.
 func BuildResponseEnvelope(
@@ -174,14 +173,14 @@ func BuildResponseEnvelope(
 
 // VerifyDispatchEnvelope verifies an NDManager-signed envelope received
 // over the WS dispatch path. Caller supplies a kid lookup function — for
-// dispatch verifies, the agent passes ONLY its primary table here (per
-// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 7, the emergency key is
-// never consulted for dispatch).
+// dispatch verifies, the agent passes ONLY its primary table here. The
+// emergency key is never consulted for dispatch (it is reserved for
+// rotation directives).
 //
 // Returns the verified header fields. The caller is responsible for the
 // semantic checks beyond signature: iss == "ndmanager", device_uuid match,
 // task_id strict-greater replay barrier, exp not yet expired, type matches
-// expected routing. v=2 also enforces alg=Ed25519 inline below.
+// expected routing. Alg=Ed25519 is also enforced inline below.
 func VerifyDispatchEnvelope(envelope []byte, lookup VerifyKeyByKid) (*DecodedEnvelope, error) {
 	var msg cose.Sign1Message
 	if err := msg.UnmarshalCBOR(envelope); err != nil {
@@ -211,9 +210,8 @@ func VerifyDispatchEnvelope(envelope []byte, lookup VerifyKeyByKid) (*DecodedEnv
 		return nil, err
 	}
 
-	// Finding 8 — alg policy. Today only Ed25519 is supported; reject
-	// anything else explicitly so a future PQ rotation has to opt in
-	// rather than silently sliding through.
+	// Only Ed25519 is supported; reject anything else explicitly so a future
+	// PQ rotation has to opt in rather than silently sliding through.
 	if dec.Alg != int64(cose.AlgorithmEd25519) {
 		return nil, fmt.Errorf("envelope alg %d unsupported (only Ed25519/-8 in v=2)", dec.Alg)
 	}

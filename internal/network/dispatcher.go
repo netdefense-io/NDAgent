@@ -18,14 +18,15 @@ import (
 
 // Task type constants
 const (
-	TaskTypePing     = "PING"
-	TaskTypeShutdown = "SHUTDOWN"
-	TaskTypeReboot   = "REBOOT"
-	TaskTypeRestart  = "RESTART"
-	TaskTypePull     = "PULL"
-	TaskTypeSync     = "SYNC"
-	TaskTypeBackup   = "BACKUP"
-	TaskTypeConnect  = "CONNECT"
+	TaskTypePing          = "PING"
+	TaskTypeShutdown      = "SHUTDOWN"
+	TaskTypeReboot        = "REBOOT"
+	TaskTypeRestart       = "RESTART"
+	TaskTypePull          = "PULL"
+	TaskTypeSync          = "SYNC"
+	TaskTypeBackup        = "BACKUP"
+	TaskTypeConnect       = "CONNECT"
+	TaskTypePluginInstall = "PLUGIN_INSTALL"
 )
 
 // TaskHandler is a function that handles a specific task type.
@@ -40,7 +41,7 @@ type CommandDispatcher struct {
 	mu          sync.Mutex
 	taskCount   int
 
-	// State store for replay barrier (PAYLOAD-SIGNATURES-DESIGN.md §13).
+	// State store for replay barrier (per-NDM monotonic task_id).
 	state *state.Store
 	// Static NDM pubkey table (primary + emergency) — populated from
 	// the agent's conf at startup.
@@ -76,11 +77,9 @@ func (d *CommandDispatcher) RegisterHandler(taskType string, handler TaskHandler
 
 // ReceiveCommands reads and dispatches commands from the WebSocket.
 //
-// Each frame goes through envelope verification (v=2 amendments per
-// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Findings 1, 4, 7) before
-// reaching the handler:
-//  1. Decode the outer frame (envelope must be present — closed beta has
-//     no fallthrough for unsigned dispatches).
+// Each frame goes through envelope verification before reaching the handler:
+//  1. Decode the outer frame (envelope must be present — there is no
+//     fallthrough for unsigned dispatches).
 //  2. Verify the COSE_Sign1 envelope against the agent's DISPATCH key set
 //     ONLY (primary). Emergency is loaded into a separate map for rotation
 //     directives and is never consulted here.
@@ -145,10 +144,10 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 			continue
 		}
 
-		// Header binding checks. v=2 amendments:
-		// - drop iat ±300s skew (replaced by signed exp; Finding 4)
-		// - signed exp must not have passed
-		// - signed type must be present (we route from it; Finding 1)
+		// Header binding checks:
+		// - signed exp must not have passed (replaces an iat skew check)
+		// - signed type must be present (we route from it, not from the
+		//   unsigned outer frame field)
 		if decoded.Iss != "ndmanager" {
 			log.Errorw("Envelope iss mismatch",
 				"task_id", outerTaskIDStr, "iss", decoded.Iss)
@@ -195,10 +194,9 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 			continue
 		}
 
-		// Reconstruct verified Command. TaskType is from the SIGNED
-		// envelope, not the unsigned outer frame field (Finding 1).
-		// pathfinder_session for CONNECT is now inside the signed
-		// payload (Finding 6); we pull it out below if present.
+		// Reconstruct verified Command. TaskType is from the SIGNED envelope,
+		// not the unsigned outer frame field. pathfinder_session for CONNECT
+		// lives inside the signed payload; pulled out below if present.
 		cmd := Command{
 			TaskID:   fmt.Sprintf("%d", decoded.TaskID),
 			TaskType: decoded.Type,

@@ -176,7 +176,9 @@
         });
     }
 
-    // Check service status
+    // Render the human-readable service status text. The buttons + pill are
+    // rendered separately by upstream's updateServiceControlUI into
+    // #service_status_container.
     function checkServiceStatus() {
         $.ajax({
             url: '/api/netdefense/service/status',
@@ -455,7 +457,10 @@
             </tr>
             <tr>
                 <td><strong>{{ lang._('Service') }}</strong></td>
-                <td id="statusService"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
+                <td>
+                    <span id="statusService"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</span>
+                    <span id="service_status_container"></span>
+                </td>
                 <td><strong>{{ lang._('Server Connection') }}</strong></td>
                 <td id="statusServerConnection"><i class="fa fa-spinner fa-spin"></i> {{ lang._('Checking...') }}</td>
             </tr>

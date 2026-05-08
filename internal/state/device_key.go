@@ -19,7 +19,7 @@ import (
 // reload — including the agent's own `device_privkey=` line. That caused
 // silent keypair regenerations whenever the operator hit Save in the
 // NetDefense settings page, breaking response-signature verification on
-// the broker side. See netdefense-io/NDAgent-go#15.
+// the broker side.
 //
 // /var/db/ndagent/ is outside configctl's reach, mode 0700, root-owned.
 // Same lifetime semantics as state.json.

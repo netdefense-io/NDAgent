@@ -46,9 +46,7 @@ type AuthResponse struct {
 	Error  string `json:"error,omitempty"`
 }
 
-// Command received from server, post-envelope-verification.
-//
-// PAYLOAD-SIGNATURES-DESIGN.md §6 wire shape:
+// Command received from server, post-envelope-verification. Wire shape:
 //
 //	{
 //	  "type": "task",
@@ -140,18 +138,16 @@ type WebSocketClient struct {
 	// State store — used by SendTaskResponse to acquire next_response_seq.
 	state *state.Store
 
-	// Cached signing material for outbound responses
-	// (PAYLOAD-SIGNATURES-DESIGN.md §12.4).
+	// Cached signing material for outbound responses.
 	privMu     sync.Mutex
 	privCached ed25519.PrivateKey
 	kidCached  []byte
 
-	// responseMu serializes the acquire-seq + COSE-sign + WriteJSON
-	// triple so concurrent task goroutines can't interleave and put
-	// responses on the wire out of seq order. Distinct from `mu`
-	// (which protects the websocket connection itself) because heartbeats
-	// and other writes shouldn't block behind a long sign.
-	// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a (send-side ordering).
+	// responseMu serializes the acquire-seq + COSE-sign + WriteJSON triple
+	// so concurrent task goroutines can't interleave and put responses on
+	// the wire out of seq order. Distinct from `mu` (which protects the
+	// websocket connection itself) because heartbeats and other writes
+	// shouldn't block behind a long sign.
 	responseMu sync.Mutex
 
 	// Status writer publishes connection lifecycle to the OPNsense
@@ -439,7 +435,7 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 // SendTaskResponse sends a task response to the server, wrapped in a
 // COSE_Sign1 envelope signed by the device private key.
 //
-// Wire format per PAYLOAD-SIGNATURES-DESIGN.md §6:
+// Wire format:
 //
 //	{
 //	  "type": "task_response",
@@ -456,10 +452,9 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 //
 //	acquire seq → COSE sign → WS write
 //
-// runs under `responseMu` so seq order matches wire order; the broker
+// runs under `responseMu` so seq order matches wire order; the broker's
 // strict-> replay barrier on Device.last_response_seq depends on this.
 // Distinct from the connection mutex so heartbeats stay live.
-// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 3a.
 func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data map[string]interface{}) error {
 	log := logging.Named("websocket")
 

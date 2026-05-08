@@ -38,12 +38,10 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		return nil, fmt.Errorf("open agent state store at %s: %w", state.DefaultStatePath, err)
 	}
 
-	// Resolve device_privkey from /var/db/ndagent/device.key (issue #15).
-	// On a v1.4.0 → v1.4.1 upgrade, the legacy `device_privkey=` line in
-	// ndagent.conf is honored once as a migration source and persisted
-	// to the new file location — keypair preserved across the upgrade.
-	// Subsequent configctl template reloads cannot wipe the seed because
-	// the file lives outside /usr/local.
+	// Resolve device_privkey from /var/db/ndagent/device.key. A legacy
+	// `device_privkey=` line in ndagent.conf is honored once as a migration
+	// source; the new path lives outside /usr/local so configctl template
+	// reloads cannot wipe the seed.
 	privkey, origin, err := state.LoadOrEnsureDevicePrivkey(state.DefaultDeviceKeyPath, cfg.DevicePrivKey)
 	if err != nil {
 		return nil, fmt.Errorf("load device privkey from %s: %w", state.DefaultDeviceKeyPath, err)
@@ -58,7 +56,7 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 	case state.PrivkeyMigrated:
 		log.Warnw("Device signing key migrated from ndagent.conf to durable storage",
 			"path", state.DefaultDeviceKeyPath,
-			"reason", "configctl template reload was wiping the conf line on every GUI Save (issue #15)",
+			"reason", "configctl template reload was wiping the conf line on every GUI Save",
 		)
 	case state.PrivkeyGenerated:
 		log.Warnw("Generated fresh device keypair",
@@ -80,18 +78,16 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 // maybeRotateForRebindToken rotates the device keypair when ndagent.conf
 // carries a `bootstrap_token=` value the agent has not yet consumed.
 //
-// PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 2 / UX follow-up:
-// the rebind ceremony is meant to defend against a leaked privkey, so a
-// new pubkey MUST be bound — not the same pubkey rebound to the same
-// device row. The agent forces this at the source: any time a rebind
-// token is in conf and the persisted `last_rebind_token_hash` doesn't
-// match it, generate a fresh keypair (which also overwrites the old
+// The rebind ceremony defends against a leaked privkey, so a new pubkey
+// MUST be bound — not the same pubkey rebound to the same device row.
+// Whenever a rebind token is in conf and the persisted `last_rebind_token_hash`
+// doesn't match it, generate a fresh keypair (overwriting any legacy
 // `device_privkey=` line) before sending DeviceRegistrationStart.
 //
-// Idempotent across restarts: if the operator hasn't yet cleared the
-// OPNsense GUI field after a successful rebind, the conf still has the
-// (now-consumed) token. The recorded hash matches, so we skip rotation
-// and leave the freshly-bound keypair alone.
+// Idempotent across restarts: if the operator hasn't cleared the GUI field
+// after a successful rebind, the conf still has the (now-consumed) token.
+// The recorded hash matches, so we skip rotation and leave the freshly-bound
+// keypair alone.
 func (l *LifecycleManager) maybeRotateForRebindToken() error {
 	log := logging.Named("lifecycle")
 	token := strings.TrimSpace(l.cfg.BootstrapToken)
@@ -217,14 +213,10 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 	log.Info("Starting WebSocket client...")
 
 	// Load NDM verification keys split into dispatch (primary) and
-	// rotation (emergency) tables; only the dispatch table is wired
-	// to the dispatcher. Emergency is held for the future rotation
-	// flow only. PAYLOAD-SIGNATURES-FINDINGS-FIXES.md §3 Finding 7.
-	//
-	// Trust source is the broker's public /api/v1/.well-known/keys
-	// endpoint, fetched once via TOFU at first connect and pinned to
-	// /var/db/ndagent/ndm-keys.json thereafter. See ROTATION-DIRECTIVE.md
-	// at the CoreCode root.
+	// rotation (emergency) tables; only the dispatch table is wired to
+	// the dispatcher. Emergency is held for the future rotation flow.
+	// Trust source is the broker's /api/v1/.well-known/keys, fetched once
+	// via TOFU at first connect and pinned to /var/db/ndagent/ndm-keys.json.
 	ndmDispatchKeys, ndmRotationKeys, err := network.LoadOrFetchNDMKeys(
 		ctx, l.cfg, network.DefaultNDMKeysCachePath,
 	)
