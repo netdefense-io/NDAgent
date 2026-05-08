@@ -96,8 +96,13 @@ class ApiCredsProvisioner
      * generation fails, the just-added user is removed before returning so
      * a retry starts clean.
      *
+     * The generated key + secret are written directly into the config XML
+     * (so the Volt template renders them into ndagent.conf) but are never
+     * returned to the caller — the operator should not see, log, or
+     * screenshot the credential. Only the locally running agent needs it.
+     *
      * @param bool $rotateExisting force key rotation (delete existing keys)
-     * @return array{result:string,message:string,api_key?:string,api_secret?:string}
+     * @return array{result:string,message:string}
      */
     public static function provision(bool $rotateExisting = false): array
     {
@@ -203,8 +208,6 @@ class ApiCredsProvisioner
         return [
             'result' => 'ok',
             'message' => 'API credentials configured successfully',
-            'api_key' => $keyResult['key'],
-            'api_secret' => $keyResult['secret'],
         ];
     }
 }

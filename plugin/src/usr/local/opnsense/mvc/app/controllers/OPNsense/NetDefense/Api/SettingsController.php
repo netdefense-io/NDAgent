@@ -85,10 +85,12 @@ class SettingsController extends ApiMutableModelControllerBase
             $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
             $backend->configdRun('template reload OPNsense/NetDefense');
 
+            // Note: the generated API key/secret are intentionally not
+            // included in the response. They live only in /conf/config.xml
+            // and the rendered ndagent.conf — never on the wire to the UI.
             return [
                 'result' => 'ok',
                 'message' => 'API credentials configured successfully',
-                'api_key' => $result['api_key'],
             ];
         }
 

@@ -60,6 +60,11 @@ const UUID_RE = '/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$
 
 /**
  * Print a result block (--json) or human-readable lines and exit.
+ *
+ * The API key and secret are never included in the payload — they live
+ * only in /conf/config.xml and ndagent.conf. Stdout from this script
+ * lands in install.sh logs, CI consoles, and operator screenshots; the
+ * key must not appear on any of those surfaces.
  */
 function emit(array $payload, int $code, bool $json): void
 {
@@ -68,8 +73,8 @@ function emit(array $payload, int $code, bool $json): void
     } else {
         fwrite(STDOUT, "result: " . ($payload['result'] ?? 'unknown') . "\n");
         foreach ($payload as $k => $v) {
-            if ($k === 'result' || $k === 'api_secret') {
-                continue; // never print the secret to a tty
+            if ($k === 'result') {
+                continue;
             }
             if (is_bool($v)) {
                 $v = $v ? 'true' : 'false';
@@ -196,11 +201,9 @@ try {
     if ($doSetupApi) {
         $apiSetupResult = ApiCredsProvisioner::provision(false);
         $result['api_setup'] = $apiSetupResult['result'];
-        if ($apiSetupResult['result'] === 'ok' && isset($apiSetupResult['api_key'])) {
-            $result['api_key'] = $apiSetupResult['api_key'];
-        } elseif ($apiSetupResult['result'] === 'skipped') {
-            // OK: existing user+key; reuse them. apiKey is already in config XML.
-        }
+        // Note: the actual key/secret are deliberately not propagated
+        // here — they're already in config.xml and the rendered
+        // ndagent.conf. The operator never needs to see them.
     }
 
     Config::getInstance()->save();
