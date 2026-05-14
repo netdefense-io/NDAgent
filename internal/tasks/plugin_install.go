@@ -2,15 +2,23 @@ package tasks
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"syscall"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
+	"github.com/netdefense-io/ndagent/internal/pkgmgr"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
+
+// pkgmgrQuery is the indirection point for tests. Production uses
+// pkgmgr.Query; unit tests stub it to avoid shelling out to pkg(8).
+var pkgmgrQuery = pkgmgr.Query
 
 // helperScriptPath is the on-device path of the detached pkg(8) wrapper
 // shipped by the os-netdefense* package. It must outlive the agent process
@@ -67,6 +75,23 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 		}
 	}
 
+	// Idempotency check: if the requested version is already installed,
+	// skip the helper-fork + agent-restart cycle entirely. Without this
+	// pkg(8) treats "install $name $sameversion" as a no-op, the new
+	// agent boots on the same version, and NDBroker's post-install
+	// version-compare path marks the task FAILED because version did
+	// not change. See `routers/websocket.py` post-auth update path.
+	//
+	// Errors querying pkg(8) (binary missing, transient signal, etc.)
+	// fall through to the normal install path — better to attempt the
+	// install than to fail-closed on a query glitch.
+	if alreadyAt, msg := alreadyAtTargetVersion(ctx, log, targetVersion); alreadyAt {
+		log.Infow("PLUGIN_INSTALL is a no-op; reporting COMPLETED without forking helper",
+			"task_id", cmd.TaskID, "package", version.PackageName, "version", version.Version,
+		)
+		return SendTaskResponse(ws, cmd.TaskID, NewSuccessResult(msg))
+	}
+
 	if _, err := os.Stat(helperScriptPath); err != nil {
 		// Half-installed pkg or stripped binary. Fail fast so the operator
 		// sees a clean FAILED rather than a silent IN_PROGRESS that never
@@ -120,4 +145,52 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	ws.RequestShutdown()
 
 	return nil
+}
+
+// alreadyAtTargetVersion reports whether the requested install would be a
+// no-op. Returns (true, message) if the agent is already at the requested
+// version, or (false, "") otherwise.
+//
+// Two cases:
+//   - target == "": "latest". No-op if the running version equals the
+//     latest version offered by any configured pkg repository (`pkg
+//     rquery -U`). On query failure we fall through and let the install
+//     attempt happen — pkg may still know better than us about the
+//     repo state.
+//   - target != "<some semver>": no-op if the running version equals
+//     target. We compare against the build-time-stamped version constant
+//     rather than `pkg query` because they must agree (pkg installed it
+//     in the first place); if the in-memory and on-disk versions diverge,
+//     something else is broken and we want the helper to run.
+func alreadyAtTargetVersion(ctx context.Context, log *zap.SugaredLogger, target string) (bool, string) {
+	current := version.Version
+	if current == "" || current == "unknown" || current == "dev" {
+		return false, ""
+	}
+
+	if target != "" {
+		if current == target {
+			return true, fmt.Sprintf("Already at version %s; no install performed.", current)
+		}
+		return false, ""
+	}
+
+	// target == "" → "latest". Need to know what "latest" means right now.
+	statuses, err := pkgmgrQuery(ctx, []string{version.PackageName})
+	if err != nil || len(statuses) == 0 {
+		log.Warnw("pkg query failed; proceeding with install attempt",
+			"package", version.PackageName, "error", err,
+		)
+		return false, ""
+	}
+	available := statuses[0].AvailableVersion
+	if available == "" {
+		// Package not in any repo we know about. Let the install attempt
+		// surface the real failure; we have no basis to short-circuit.
+		return false, ""
+	}
+	if current == available {
+		return true, fmt.Sprintf("Already at latest version %s; no install performed.", current)
+	}
+	return false, ""
 }
