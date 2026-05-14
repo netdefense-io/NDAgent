@@ -113,6 +113,30 @@ func (l *LifecycleManager) maybeRotateForRebindToken() error {
 	return nil
 }
 
+// maybeClearRebindTokenInConfig invokes the OPNsense plugin helper to
+// strip the consumed bootstrapToken from /conf/config.xml so the next
+// template render of ndagent.conf does not carry it. Best-effort: a
+// helper failure is logged at WARN and does not abort the lifecycle —
+// the token is internally inert at this point because the agent's
+// state.LastRebindTokenHash already matches it.
+//
+// Reflects the cleared value in-process so any subsequent iteration of
+// the lifecycle loop in this run sees the field as empty and does not
+// retry the helper unnecessarily.
+func (l *LifecycleManager) maybeClearRebindTokenInConfig(ctx context.Context) {
+	if l.cfg.BootstrapToken == "" {
+		return
+	}
+	log := logging.Named("lifecycle")
+	if err := clearRebindTokenInConfig(ctx); err != nil {
+		log.Warnw("Failed to clear consumed rebind token from local config; the token is internally inert and you may remove the field manually if it persists",
+			"error", err)
+		return
+	}
+	log.Info("Cleared consumed rebind token from OPNsense config; ndagent.conf will not carry it after the next template render")
+	l.cfg.BootstrapToken = ""
+}
+
 // Run executes the complete agent lifecycle.
 // It handles both connection phases and automatically restarts on failure.
 func (l *LifecycleManager) Run(ctx context.Context) error {
@@ -170,6 +194,15 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 			return ctx.Err()
 		default:
 		}
+
+		// Registration succeeded; if ndagent.conf still carries a
+		// bootstrap_token=, clear it via the OPNsense plugin helper.
+		// The token is single-use: the broker has already cleared its
+		// server-side hash, and the agent's internal state (LastRebindTokenHash)
+		// already prevents re-rotation. This step is the device-side
+		// housekeeping the operator used to be told to do manually.
+		// Best-effort: failure is logged but does not abort the flow.
+		l.maybeClearRebindTokenInConfig(ctx)
 
 		// Phase 2: Establish WebSocket connection and maintain it
 		log.Info("Phase 2: Registration verified. Establishing WebSocket connection...")
