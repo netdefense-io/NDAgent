@@ -348,21 +348,10 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Execute sync for users and groups if present
 	if len(users) > 0 || len(groups) > 0 {
 		userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups)
-
-		// Merge results
 		syncResult.Results = append(syncResult.Results, userGroupResult.Results...)
 		syncResult.Errors = append(syncResult.Errors, userGroupResult.Errors...)
-
-		// Update success status
 		if !userGroupResult.Success {
 			syncResult.Success = false
-		}
-
-		// Update message
-		if syncResult.Message == "No changes applied" && userGroupResult.Message != "No changes applied" {
-			syncResult.Message = userGroupResult.Message
-		} else if userGroupResult.Message != "No changes applied" {
-			syncResult.Message = syncResult.Message + ". " + userGroupResult.Message
 		}
 	}
 
@@ -378,11 +367,6 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	if !unboundResult.Success {
 		syncResult.Success = false
 	}
-	if syncResult.Message == "No changes applied" && unboundResult.Message != "No changes applied" {
-		syncResult.Message = unboundResult.Message
-	} else if unboundResult.Message != "No changes applied" {
-		syncResult.Message = syncResult.Message + ". " + unboundResult.Message
-	}
 
 	// Execute sync for VPN networks. Same orphan-cleanup-always semantics.
 	// executeSyncVPN handles the "plugin not installed" case by returning
@@ -393,11 +377,6 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	if !vpnResult.Success {
 		syncResult.Success = false
 	}
-	if syncResult.Message == "No changes applied" && vpnResult.Message != "No changes applied" {
-		syncResult.Message = vpnResult.Message
-	} else if vpnResult.Message != "No changes applied" {
-		syncResult.Message = syncResult.Message + ". " + vpnResult.Message
-	}
 
 	// Execute sync for Zabbix entities. Same orphan-cleanup-always
 	// semantics, with graceful skip when os-zabbix-agent isn't installed.
@@ -407,11 +386,12 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	if !zabbixResult.Success {
 		syncResult.Success = false
 	}
-	if syncResult.Message == "No changes applied" && zabbixResult.Message != "No changes applied" {
-		syncResult.Message = zabbixResult.Message
-	} else if zabbixResult.Message != "No changes applied" {
-		syncResult.Message = syncResult.Message + ". " + zabbixResult.Message
-	}
+
+	// Compose the user-facing summary from the combined results so every
+	// snippet family reports in the same "+A ~M -D" shape and untouched
+	// sections drop out entirely. Sub-executors' per-section messages
+	// are still used by their own structured logs.
+	syncResult.Message = buildSyncSummary(syncResult.Results, len(syncResult.Errors))
 
 	// Build response
 	data := map[string]interface{}{
