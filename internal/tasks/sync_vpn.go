@@ -74,6 +74,16 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 
 	allServers, err := client.SearchServers(ctx, opnapi.NDAgentWireGuardPrefix)
 	if err != nil {
+		if opnapi.IsNotFound(err) {
+			// os-wireguard plugin isn't installed on this device. Treat
+			// the whole VPN sync as a silent no-op — same behavior the
+			// Zabbix executor has when os-zabbix-agent is absent.
+			log.Debug("WireGuard plugin not installed on this device; skipping VPN sync")
+			return SyncAPIResult{
+				Success: true,
+				Message: "No changes applied",
+			}
+		}
 		result.Success = false
 		result.Message = fmt.Sprintf("Failed to search WireGuard servers: %v", err)
 		result.Errors = append(result.Errors, result.Message)

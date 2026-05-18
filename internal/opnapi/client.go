@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +14,28 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"go.uber.org/zap"
 )
+
+// APIError is the typed error returned by doRequest for non-2xx responses.
+// Callers can use errors.As / IsNotFound to dispatch on status code — most
+// commonly to detect 404 (plugin endpoint missing because the OPNsense
+// plugin isn't installed on this device) and silently skip the sync block
+// for that plugin group.
+type APIError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("API error: status %d, body: %s", e.StatusCode, e.Body)
+}
+
+// IsNotFound returns true if err wraps an APIError with HTTP 404.
+// Used by sync executors to silently skip a sync block when the underlying
+// OPNsense plugin isn't installed on this device.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
 
 // Client is the OPNsense REST API client.
 type Client struct {
@@ -90,7 +113,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("API error: status %d, body: %s", resp.StatusCode, string(respBody))
+		return nil, &APIError{StatusCode: resp.StatusCode, Body: string(respBody)}
 	}
 
 	return respBody, nil

@@ -196,6 +196,30 @@ func executeSyncZabbix(
 	var results []SyncAPIItemResult
 	var errors []string
 
+	// Phase 0: Plugin-presence probe.
+	//
+	// The Zabbix executor runs every sync (so orphan cleanup is reliable),
+	// but most devices don't have os-zabbix-agent installed. A single
+	// ListAllZabbixUserParameters call doubles as the probe: a 404 means
+	// the plugin's REST endpoints aren't mounted, which we treat as a
+	// silent no-op rather than an error in the sync report.
+	currentUPRows, err := client.ListAllZabbixUserParameters(ctx)
+	if err != nil {
+		if opnapi.IsNotFound(err) {
+			log.Debug("Zabbix plugin not installed on this device; skipping zabbix sync")
+			return SyncAPIResult{
+				Success: true,
+				Message: "No changes applied",
+			}
+		}
+		return SyncAPIResult{
+			Success: false,
+			Message: fmt.Sprintf("Failed to list zabbix userparameters: %v", err),
+			Results: results,
+			Errors:  append(errors, err.Error()),
+		}
+	}
+
 	// Phase 1: Settings (singleton, replace-in-full)
 	//
 	// OPNsense's settings/set rejects payloads where any Required field is
@@ -237,20 +261,13 @@ func executeSyncZabbix(
 		}
 	}
 
-	// Phase 2-3: UserParameters (only fetched/managed if there is desired
-	// state OR we need to verify no orphans remain — we only fetch if the
-	// payload mentioned this kind, to keep no-op syncs cheap).
-	if len(userParams) > 0 {
-		currentRows, err := client.ListAllZabbixUserParameters(ctx)
-		if err != nil {
-			return SyncAPIResult{
-				Success: false,
-				Message: fmt.Sprintf("Failed to list zabbix userparameters: %v", err),
-				Results: results,
-				Errors:  append(errors, err.Error()),
-			}
-		}
-		currentManaged := opnapi.FilterManagedZabbixUserParameters(currentRows)
+	// Phase 2-3: UserParameters.
+	//
+	// Runs every sync. Empty desired list = delete every NDAgent-managed
+	// userparameter on the device (orphan cleanup is the whole point of
+	// removing the if-len gate).
+	{
+		currentManaged := opnapi.FilterManagedZabbixUserParameters(currentUPRows)
 
 		// Index current managed rows by key for O(1) match.
 		currentByKey := make(map[string]map[string]interface{}, len(currentManaged))
@@ -328,8 +345,8 @@ func executeSyncZabbix(
 		}
 	}
 
-	// Phase 4-5: Aliases (same pattern)
-	if len(aliases) > 0 {
+	// Phase 4-5: Aliases (same pattern, runs every sync).
+	{
 		currentRows, err := client.ListAllZabbixAliases(ctx)
 		if err != nil {
 			return SyncAPIResult{
@@ -415,9 +432,11 @@ func executeSyncZabbix(
 		}
 	}
 
-	// Phase 6: Apply changes. Skip the reconfigure call if nothing was
-	// touched in this batch — saves a service bounce on no-op syncs.
-	touched := settings != nil || len(userParams) > 0 || len(aliases) > 0
+	// Phase 6: Apply changes. Skip the reconfigure call if nothing
+	// actually changed on the device — saves a service bounce on no-op
+	// syncs (no settings push, no creates, no updates, no deletes). The
+	// item count in `results` captures all four.
+	touched := len(results) > 0
 	if touched {
 		if err := client.ReconfigureZabbix(ctx); err != nil {
 			errors = append(errors, fmt.Sprintf("Zabbix reconfigure: %v", err))

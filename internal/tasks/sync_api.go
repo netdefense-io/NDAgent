@@ -366,64 +366,51 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		}
 	}
 
-	// Execute sync for Unbound DNS entities if present
-	if len(hostOverrides) > 0 || len(domainForwards) > 0 || len(hostAliases) > 0 || len(unboundACLs) > 0 {
-		unboundResult := executeSyncUnbound(ctx, apiClient, hostOverrides, domainForwards, hostAliases, unboundACLs)
-
-		// Merge results
-		syncResult.Results = append(syncResult.Results, unboundResult.Results...)
-		syncResult.Errors = append(syncResult.Errors, unboundResult.Errors...)
-
-		// Update success status
-		if !unboundResult.Success {
-			syncResult.Success = false
-		}
-
-		// Update message
-		if syncResult.Message == "No changes applied" && unboundResult.Message != "No changes applied" {
-			syncResult.Message = unboundResult.Message
-		} else if unboundResult.Message != "No changes applied" {
-			syncResult.Message = syncResult.Message + ". " + unboundResult.Message
-		}
+	// Execute sync for Unbound DNS entities.
+	//
+	// Runs every sync (no len-based gate) so that managed-but-undesired
+	// entries are reliably swept off the device. Empty desired lists are
+	// the signal to delete all NDAgent-owned entries — same semantic the
+	// firewall ALIAS/RULE path has always had.
+	unboundResult := executeSyncUnbound(ctx, apiClient, hostOverrides, domainForwards, hostAliases, unboundACLs)
+	syncResult.Results = append(syncResult.Results, unboundResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, unboundResult.Errors...)
+	if !unboundResult.Success {
+		syncResult.Success = false
+	}
+	if syncResult.Message == "No changes applied" && unboundResult.Message != "No changes applied" {
+		syncResult.Message = unboundResult.Message
+	} else if unboundResult.Message != "No changes applied" {
+		syncResult.Message = syncResult.Message + ". " + unboundResult.Message
 	}
 
-	// Execute sync for VPN networks if present
-	if len(vpnNetworks) > 0 {
-		vpnResult := executeSyncVPN(ctx, apiClient, vpnNetworks)
-
-		// Merge results
-		syncResult.Results = append(syncResult.Results, vpnResult.Results...)
-		syncResult.Errors = append(syncResult.Errors, vpnResult.Errors...)
-
-		// Update success status
-		if !vpnResult.Success {
-			syncResult.Success = false
-		}
-
-		// Update message
-		if syncResult.Message == "No changes applied" && vpnResult.Message != "No changes applied" {
-			syncResult.Message = vpnResult.Message
-		} else if vpnResult.Message != "No changes applied" {
-			syncResult.Message = syncResult.Message + ". " + vpnResult.Message
-		}
+	// Execute sync for VPN networks. Same orphan-cleanup-always semantics.
+	// executeSyncVPN handles the "plugin not installed" case by returning
+	// a no-op success when the WireGuard search endpoints 404.
+	vpnResult := executeSyncVPN(ctx, apiClient, vpnNetworks)
+	syncResult.Results = append(syncResult.Results, vpnResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, vpnResult.Errors...)
+	if !vpnResult.Success {
+		syncResult.Success = false
+	}
+	if syncResult.Message == "No changes applied" && vpnResult.Message != "No changes applied" {
+		syncResult.Message = vpnResult.Message
+	} else if vpnResult.Message != "No changes applied" {
+		syncResult.Message = syncResult.Message + ". " + vpnResult.Message
 	}
 
-	// Execute sync for Zabbix entities if present
-	if zabbixSettings != nil || len(zabbixUserParams) > 0 || len(zabbixAliases) > 0 {
-		zabbixResult := executeSyncZabbix(ctx, apiClient, zabbixSettings, zabbixUserParams, zabbixAliases)
-
-		syncResult.Results = append(syncResult.Results, zabbixResult.Results...)
-		syncResult.Errors = append(syncResult.Errors, zabbixResult.Errors...)
-
-		if !zabbixResult.Success {
-			syncResult.Success = false
-		}
-
-		if syncResult.Message == "No changes applied" && zabbixResult.Message != "No changes applied" {
-			syncResult.Message = zabbixResult.Message
-		} else if zabbixResult.Message != "No changes applied" {
-			syncResult.Message = syncResult.Message + ". " + zabbixResult.Message
-		}
+	// Execute sync for Zabbix entities. Same orphan-cleanup-always
+	// semantics, with graceful skip when os-zabbix-agent isn't installed.
+	zabbixResult := executeSyncZabbix(ctx, apiClient, zabbixSettings, zabbixUserParams, zabbixAliases)
+	syncResult.Results = append(syncResult.Results, zabbixResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, zabbixResult.Errors...)
+	if !zabbixResult.Success {
+		syncResult.Success = false
+	}
+	if syncResult.Message == "No changes applied" && zabbixResult.Message != "No changes applied" {
+		syncResult.Message = zabbixResult.Message
+	} else if zabbixResult.Message != "No changes applied" {
+		syncResult.Message = syncResult.Message + ". " + zabbixResult.Message
 	}
 
 	// Build response

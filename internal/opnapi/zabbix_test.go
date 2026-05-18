@@ -2,6 +2,8 @@ package opnapi
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 )
 
@@ -283,6 +285,27 @@ func TestMergeZabbixSettings_SnippetDebugLevelWins(t *testing.T) {
 	body := MergeZabbixSettings(snippet, currentRaw)
 	if body.Settings.Main.DebugLevel != "val_1" {
 		t.Errorf("snippet debug_level=1 should win over current val_5, got %q", body.Settings.Main.DebugLevel)
+	}
+}
+
+func TestAPIError_IsNotFound(t *testing.T) {
+	err404 := &APIError{StatusCode: 404, Body: "endpoint not found"}
+	if !IsNotFound(err404) {
+		t.Error("IsNotFound(404) should be true")
+	}
+	wrapped := fmt.Errorf("list zabbix: %w", err404)
+	if !IsNotFound(wrapped) {
+		t.Error("IsNotFound on wrapped 404 should be true")
+	}
+	err500 := &APIError{StatusCode: 500, Body: "internal"}
+	if IsNotFound(err500) {
+		t.Error("IsNotFound(500) should be false")
+	}
+	if IsNotFound(nil) {
+		t.Error("IsNotFound(nil) should be false")
+	}
+	if IsNotFound(errors.New("plain")) {
+		t.Error("IsNotFound on plain error should be false")
 	}
 }
 
