@@ -263,6 +263,28 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
+	// Parse Zabbix entities from payload. Settings is a singleton (pointer,
+	// nil means no ZABBIX_SETTINGS snippet present); the other two are
+	// per-entity lists. Key-prefix ownership is enforced inside
+	// executeSyncZabbix on the userparameter/alias paths.
+	zabbixSettings, err := parseAPIZabbixSettings(cmd.Payload)
+	if err != nil {
+		result := NewFailureResult(fmt.Sprintf("Failed to parse zabbix_settings: %v", err))
+		return SendTaskResponse(ws, cmd.TaskID, result)
+	}
+
+	zabbixUserParams, err := parseAPIZabbixUserParameters(cmd.Payload)
+	if err != nil {
+		result := NewFailureResult(fmt.Sprintf("Failed to parse zabbix_userparameters: %v", err))
+		return SendTaskResponse(ws, cmd.TaskID, result)
+	}
+
+	zabbixAliases, err := parseAPIZabbixAliases(cmd.Payload)
+	if err != nil {
+		result := NewFailureResult(fmt.Sprintf("Failed to parse zabbix_aliases: %v", err))
+		return SendTaskResponse(ws, cmd.TaskID, result)
+	}
+
 	// Validate UUIDs have correct prefix
 	for _, alias := range aliases {
 		if !strings.HasPrefix(alias.UUID, opnapi.NDAgentUUIDPrefix) {
@@ -301,6 +323,10 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		}
 	}
 
+	zabbixSettingsCount := 0
+	if zabbixSettings != nil {
+		zabbixSettingsCount = 1
+	}
 	log.Infow("Executing SYNC_API",
 		"alias_count", len(aliases),
 		"rule_count", len(rules),
@@ -311,6 +337,9 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"host_alias_count", len(hostAliases),
 		"unbound_acl_count", len(unboundACLs),
 		"vpn_network_count", len(vpnNetworks),
+		"zabbix_settings_count", zabbixSettingsCount,
+		"zabbix_userparameter_count", len(zabbixUserParams),
+		"zabbix_alias_count", len(zabbixAliases),
 	)
 
 	// Execute sync for aliases and rules
@@ -376,6 +405,24 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 			syncResult.Message = vpnResult.Message
 		} else if vpnResult.Message != "No changes applied" {
 			syncResult.Message = syncResult.Message + ". " + vpnResult.Message
+		}
+	}
+
+	// Execute sync for Zabbix entities if present
+	if zabbixSettings != nil || len(zabbixUserParams) > 0 || len(zabbixAliases) > 0 {
+		zabbixResult := executeSyncZabbix(ctx, apiClient, zabbixSettings, zabbixUserParams, zabbixAliases)
+
+		syncResult.Results = append(syncResult.Results, zabbixResult.Results...)
+		syncResult.Errors = append(syncResult.Errors, zabbixResult.Errors...)
+
+		if !zabbixResult.Success {
+			syncResult.Success = false
+		}
+
+		if syncResult.Message == "No changes applied" && zabbixResult.Message != "No changes applied" {
+			syncResult.Message = zabbixResult.Message
+		} else if zabbixResult.Message != "No changes applied" {
+			syncResult.Message = syncResult.Message + ". " + zabbixResult.Message
 		}
 	}
 

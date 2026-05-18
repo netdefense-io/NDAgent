@@ -63,6 +63,15 @@ func HandlePullAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		content, err = pullHostAlias(ctx, apiClient, name)
 	case "unbound_acl":
 		content, err = pullUnboundACL(ctx, apiClient, name)
+	case "zabbix_settings":
+		// Singleton — the `name` parameter is used as the destination
+		// snippet name only; the agent always returns the full
+		// zabbixagent settings tree.
+		content, err = pullZabbixSettings(ctx, apiClient)
+	case "zabbix_userparameter":
+		content, err = pullZabbixUserParameter(ctx, apiClient, name)
+	case "zabbix_alias":
+		content, err = pullZabbixAlias(ctx, apiClient, name)
 	default:
 		result := NewFailureResult(fmt.Sprintf("Unsupported config_type: %s", configType))
 		return SendTaskResponse(ws, cmd.TaskID, result)
@@ -295,6 +304,123 @@ func pullUnboundACL(ctx context.Context, client *opnapi.Client, name string) (ma
 		"networks":    payload.Networks,
 		"description": payload.Description,
 		"templates":   payload.Templates,
+	}, nil
+}
+
+// pullZabbixSettings fetches the full zabbixagent settings tree and flattens
+// the OPNsense GET response shape (SelectMultiple dicts, val_N enum keys)
+// into the portable APIZabbixSettingsPayload form sync_zabbix.go expects on
+// the way back. The result is a single snippet that, on re-sync, replaces
+// the device's settings wholesale.
+//
+// `name` is ignored on the agent side — Zabbix settings is a singleton, so
+// there's nothing to look up. The broker uses the `name` argument as the
+// destination snippet name.
+func pullZabbixSettings(ctx context.Context, client *opnapi.Client) (map[string]interface{}, error) {
+	raw, err := client.GetZabbixSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	zaRaw, ok := raw["zabbixagent"].(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("settings response missing 'zabbixagent' wrapper")
+	}
+
+	local, _ := zaRaw["local"].(map[string]interface{})
+	hostname, _ := local["hostname"].(string)
+
+	settings, _ := zaRaw["settings"].(map[string]interface{})
+	main, _ := settings["main"].(map[string]interface{})
+	tuning, _ := settings["tuning"].(map[string]interface{})
+	features, _ := settings["features"].(map[string]interface{})
+
+	getStr := func(m map[string]interface{}, k string) string {
+		v, _ := m[k].(string)
+		return v
+	}
+	csvToList := func(s string) []string {
+		if s == "" {
+			return nil
+		}
+		// opnapi.ZabbixMultiSelectToCSV returns a comma-separated form;
+		// split back into a list for the portable payload.
+		var out []string
+		start := 0
+		for i := 0; i < len(s); i++ {
+			if s[i] == ',' {
+				out = append(out, s[start:i])
+				start = i + 1
+			}
+		}
+		out = append(out, s[start:])
+		return out
+	}
+
+	enabledBool := getStr(main, "enabled") == "1"
+
+	return map[string]interface{}{
+		"hostname":               hostname,
+		"enabled":                enabledBool,
+		"server_list":            csvToList(opnapi.ZabbixMultiSelectToCSV(main["serverList"])),
+		"listen_port":            getStr(main, "listenPort"),
+		"listen_ip":              csvToList(opnapi.ZabbixMultiSelectToCSV(main["listenIP"])),
+		"source_ip":              getStr(main, "sourceIP"),
+		"listen_backlog":         getStr(main, "listenBacklog"),
+		"syslog_enable":          getStr(main, "syslogEnable") == "1",
+		"log_file_size":          getStr(main, "logFileSize"),
+		"debug_level":            opnapi.ZabbixDebugLevelFromGet(main["debugLevel"]),
+		"sudo_root":              getStr(main, "sudoRoot") == "1",
+		"start_agents":           getStr(tuning, "startAgents"),
+		"buffer_send":            getStr(tuning, "bufferSend"),
+		"buffer_size":            getStr(tuning, "bufferSize"),
+		"max_lines_per_second":   getStr(tuning, "maxLinesPerSecond"),
+		"timeout":                getStr(tuning, "timeout"),
+		"enable_active_checks":   getStr(features, "enableActiveChecks") == "1",
+		"active_check_servers":   csvToList(opnapi.ZabbixMultiSelectToCSV(features["activeCheckServers"])),
+		"refresh_active_checks":  getStr(features, "refreshActiveChecks"),
+		"enable_remote_commands": getStr(features, "enableRemoteCommands") == "1",
+		"log_remote_commands":    getStr(features, "logRemoteCommands") == "1",
+		"encryption":             getStr(features, "encryption"),
+		"encryption_identity":    getStr(features, "encryptionidentity"),
+		"encryption_psk":         getStr(features, "encryptionpsk"),
+	}, nil
+}
+
+// pullZabbixUserParameter searches userparameters for an exact `key` match
+// and returns the portable form. Returns (nil, nil) if not found.
+func pullZabbixUserParameter(ctx context.Context, client *opnapi.Client, key string) (map[string]interface{}, error) {
+	raw, err := client.GetZabbixUserParameterByKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	p := opnapi.ConvertZabbixUserParameterToAPI(raw)
+	return map[string]interface{}{
+		"key":           p.Key,
+		"command":       p.Command,
+		"enabled":       p.Enabled,
+		"accept_params": p.AcceptParams,
+	}, nil
+}
+
+// pullZabbixAlias searches aliases for an exact `key` match and returns the
+// portable form. Returns (nil, nil) if not found.
+func pullZabbixAlias(ctx context.Context, client *opnapi.Client, key string) (map[string]interface{}, error) {
+	raw, err := client.GetZabbixAliasByKey(ctx, key)
+	if err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	p := opnapi.ConvertZabbixAliasToAPI(raw)
+	return map[string]interface{}{
+		"key":           p.Key,
+		"source_key":    p.SourceKey,
+		"enabled":       p.Enabled,
+		"accept_params": p.AcceptParams,
 	}, nil
 }
 
