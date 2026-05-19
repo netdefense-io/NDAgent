@@ -285,6 +285,12 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
+	softwarePayload, err := parseSoftwarePayload(cmd.Payload)
+	if err != nil {
+		result := NewFailureResult(fmt.Sprintf("Failed to parse software: %v", err))
+		return SendTaskResponse(ws, cmd.TaskID, result)
+	}
+
 	// Validate UUIDs have correct prefix
 	for _, alias := range aliases {
 		if !strings.HasPrefix(alias.UUID, opnapi.NDAgentUUIDPrefix) {
@@ -327,6 +333,11 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	if zabbixSettings != nil {
 		zabbixSettingsCount = 1
 	}
+	softwarePresentCount, softwareAbsentCount := 0, 0
+	if softwarePayload != nil {
+		softwarePresentCount = len(softwarePayload.Present)
+		softwareAbsentCount = len(softwarePayload.Absent)
+	}
 	log.Infow("Executing SYNC_API",
 		"alias_count", len(aliases),
 		"rule_count", len(rules),
@@ -340,6 +351,8 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"zabbix_settings_count", zabbixSettingsCount,
 		"zabbix_userparameter_count", len(zabbixUserParams),
 		"zabbix_alias_count", len(zabbixAliases),
+		"software_present_count", softwarePresentCount,
+		"software_absent_count", softwareAbsentCount,
 	)
 
 	// Execute sync for aliases and rules
@@ -385,6 +398,19 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	syncResult.Errors = append(syncResult.Errors, zabbixResult.Errors...)
 	if !zabbixResult.Success {
 		syncResult.Success = false
+	}
+
+	// Execute software policy reconciliation. Unlike the other executors,
+	// this one doesn't need the OPNsense apiClient — it shells out to
+	// pkg(8) directly. nil softwarePayload (no SoftwarePolicy attached)
+	// short-circuits to a no-op.
+	if softwarePayload != nil {
+		softwareResult := executeSyncSoftware(ctx, softwarePayload)
+		syncResult.Results = append(syncResult.Results, softwareResult.Results...)
+		syncResult.Errors = append(syncResult.Errors, softwareResult.Errors...)
+		if !softwareResult.Success {
+			syncResult.Success = false
+		}
 	}
 
 	// Compose the user-facing summary from the combined results so every
