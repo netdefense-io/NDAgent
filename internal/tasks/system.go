@@ -2,13 +2,21 @@ package tasks
 
 import (
 	"context"
-	"os"
 	"os/exec"
+	"syscall"
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 )
+
+// restartHelperScript runs in a detached subprocess so it survives the
+// current agent's graceful shutdown. The sleep gives the running daemon(8)
+// supervisor time to exit cleanly (releasing the pidfile) before rc.d's
+// stop/start pair runs. `service ndagent restart` then brings up a fresh
+// rc.d-supervised agent with a real pidfile, so `service ndagent status`
+// stays accurate.
+const restartHelperScript = "sleep 2 && exec service ndagent restart"
 
 // HandleShutdown handles the SHUTDOWN task.
 // Executes: shutdown -p now
@@ -106,8 +114,17 @@ func HandleReboot(ctx context.Context, ws *network.WebSocketClient, cmd network.
 	return nil
 }
 
-// HandleRestart handles the RESTART task.
-// Spawns a new agent process and triggers graceful shutdown of the current process.
+// HandleRestart handles the RESTART task by delegating to rc.d.
+//
+// A detached `sh -c "sleep 2 && exec service ndagent restart"` is launched
+// as a session leader so it survives our exit, then graceful shutdown is
+// triggered. After the current daemon(8) supervisor reaps us and exits,
+// rc.d's restart spawns a fresh daemon-wrapped agent — same pidfile, same
+// supervision as the original boot.
+//
+// On platforms without `service` (developer macOS), the spawn still
+// succeeds but rc.d won't be there; the resulting state mirrors the
+// developer running ./run by hand and is not a supported production path.
 func HandleRestart(ctx context.Context, ws *network.WebSocketClient, cmd network.Command) error {
 	log := logging.Named("RESTART")
 
@@ -126,45 +143,38 @@ func HandleRestart(ctx context.Context, ws *network.WebSocketClient, cmd network
 		)
 	}
 
-	// Small delay to ensure response is sent
-	time.Sleep(1 * time.Second)
+	helper := exec.Command("/bin/sh", "-c", restartHelperScript)
+	helper.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	helper.Stdin = nil
+	helper.Stdout = nil
+	helper.Stderr = nil
 
-	// Get the executable path of the currently running agent. rc.d spawns
-	// the agent from /usr/local/bin/ndagent on OPNsense, so os.Executable()
-	// is the authoritative source — no separate config override.
-	execPath, err := os.Executable()
-	if err != nil {
-		log.Errorw("Failed to get executable path",
+	if err := helper.Start(); err != nil {
+		log.Errorw("Failed to spawn restart helper",
 			"error", err,
 		)
-		result := NewFailureResult("Failed to get executable path: " + err.Error())
+		result := NewFailureResult("Failed to spawn restart helper: " + err.Error())
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
-	log.Infow("Starting new agent process",
-		"path", execPath,
+	// Detach: we never Wait on the helper. It's a session leader and will
+	// outlive us; reaping is irrelevant once we exit.
+	log.Infow("Spawned restart helper",
+		"pid", helper.Process.Pid,
 	)
 
-	// Start new process (it will run independently)
-	cmdExec := exec.Command(execPath)
-	cmdExec.Stdout = nil
-	cmdExec.Stderr = nil
-	cmdExec.Stdin = nil
-
-	if err := cmdExec.Start(); err != nil {
-		log.Errorw("Failed to start new agent process",
-			"error", err,
-		)
-		result := NewFailureResult("Failed to start new agent process: " + err.Error())
-		return SendTaskResponse(ws, cmd.TaskID, result)
+	// Send terminal SUCCESS now so the task gets a definitive status. After
+	// this point the helper takes over, and our final shutdown will lose the
+	// websocket — no further responses possible.
+	result := NewSuccessResult("Agent restart scheduled via rc.d")
+	if err := SendTaskResponse(ws, cmd.TaskID, result); err != nil {
+		log.Warnw("Failed to send SUCCESS response", "error", err)
 	}
 
-	log.Infow("Started new agent process",
-		"pid", cmdExec.Process.Pid,
-	)
+	// Give the response a beat to flush before tearing down the connection.
+	time.Sleep(500 * time.Millisecond)
 
-	// Trigger graceful shutdown of current process
-	log.Info("Triggering graceful shutdown for restart")
+	log.Info("Triggering graceful shutdown; rc.d will respawn us in ~2s")
 	ws.RequestShutdown()
 
 	return nil
