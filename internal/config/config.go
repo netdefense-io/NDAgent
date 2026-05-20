@@ -34,9 +34,6 @@ type Config struct {
 	// Test mode
 	TestMode bool `mapstructure:"test_mode"`
 
-	// Binary path (for OPNsense plugin)
-	BinaryPath string `mapstructure:"binary_path"`
-
 	// OPNsense API credentials (for SYNC_API/PULL_API)
 	APIKey         string `mapstructure:"api_key"`
 	APISecret      string `mapstructure:"api_secret"`

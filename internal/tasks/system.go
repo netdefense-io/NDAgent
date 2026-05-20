@@ -129,7 +129,9 @@ func HandleRestart(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Small delay to ensure response is sent
 	time.Sleep(1 * time.Second)
 
-	// Get the executable path
+	// Get the executable path of the currently running agent. rc.d spawns
+	// the agent from /usr/local/bin/ndagent on OPNsense, so os.Executable()
+	// is the authoritative source — no separate config override.
 	execPath, err := os.Executable()
 	if err != nil {
 		log.Errorw("Failed to get executable path",
@@ -137,12 +139,6 @@ func HandleRestart(ctx context.Context, ws *network.WebSocketClient, cmd network
 		)
 		result := NewFailureResult("Failed to get executable path: " + err.Error())
 		return SendTaskResponse(ws, cmd.TaskID, result)
-	}
-
-	// If binary_path is configured, use that instead
-	binaryPath := ws.GetBinaryPath()
-	if binaryPath != "" {
-		execPath = binaryPath
 	}
 
 	log.Infow("Starting new agent process",

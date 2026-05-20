@@ -569,11 +569,6 @@ func (w *WebSocketClient) IsTestMode() bool {
 	return w.cfg.IsTestMode()
 }
 
-// GetBinaryPath returns the path to the agent binary.
-func (w *WebSocketClient) GetBinaryPath() string {
-	return w.cfg.BinaryPath
-}
-
 // GetConfigXMLPath returns the path to the OPNsense config.xml file.
 func (w *WebSocketClient) GetConfigXMLPath() string {
 	return w.cfg.ConfigXMLPath
