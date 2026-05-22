@@ -15,6 +15,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/status"
 	"github.com/netdefense-io/ndagent/internal/tasks"
+	"github.com/netdefense-io/ndagent/internal/telemetry"
 )
 
 // LifecycleManager manages the agent's two-phase lifecycle:
@@ -292,6 +293,19 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 		log.Infow("OPNsense API client initialized for SYNC_API",
 			"api_url", l.cfg.OPNsenseAPIURL,
 		)
+
+		// Start the heavy-telemetry collector. Lifetime is the agent
+		// process — survives WS reconnects so the cache doesn't reset
+		// every time NDBroker bounces. The shutdown coordinator's
+		// context cancels the goroutine on agent stop.
+		heavy := telemetry.NewHeavyCollector(apiClient)
+		go func() {
+			if err := heavy.Run(l.shutdown.Context()); err != nil && err != context.Canceled {
+				log.Warnw("heavy-telemetry collector exited", "error", err)
+			}
+		}()
+		wsClient.SetHeavyProvider(heavy.Snapshot)
+		log.Info("Heavy telemetry collector started")
 	} else {
 		log.Info("SYNC_API disabled: no API credentials configured")
 	}

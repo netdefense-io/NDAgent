@@ -634,6 +634,14 @@ func (w *WebSocketClient) GetAPIClient() *opnapi.Client {
 	return w.apiClient
 }
 
+// SetHeavyProvider wires the heavy-telemetry cache reader into the
+// heartbeat path. lifecycle.go calls this once after starting the
+// HeavyCollector goroutine; the provider is just a thin getter on the
+// collector and is safe to call concurrently with heartbeats.
+func (w *WebSocketClient) SetHeavyProvider(fn HeavyProvider) {
+	w.heartbeat.SetHeavyProvider(fn)
+}
+
 // GetPathfinderHost returns the Pathfinder server URL.
 func (w *WebSocketClient) GetPathfinderHost() string {
 	return w.cfg.PathfinderHost
