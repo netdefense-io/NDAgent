@@ -15,6 +15,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/status"
 	"github.com/netdefense-io/ndagent/internal/tasks"
+	"github.com/netdefense-io/ndagent/internal/taskstore"
 	"github.com/netdefense-io/ndagent/internal/telemetry"
 )
 
@@ -271,13 +272,28 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 		"rotation_kids", rotationKidHexes,
 	)
 
+	// Open the per-task registry. Used by the dispatcher (Begin), by
+	// SendTaskResponse (Complete + MarkDelivered), and by the boot-time
+	// drain below to deliver responses for tasks that finished in a
+	// previous agent process (PLUGIN_INSTALL, RESTART, REBOOT). Failure
+	// to open the store is non-fatal — the agent still runs, just
+	// without crash-recovery and without deferred-response delivery for
+	// this boot. Operators see the warning in the logs.
+	taskStoreInst, tsErr := taskstore.Open(taskstore.DefaultStorePath)
+	if tsErr != nil {
+		log.Warnw("Failed to open task store; per-task persistence disabled",
+			"path", taskstore.DefaultStorePath, "error", tsErr,
+		)
+		taskStoreInst = nil
+	}
+
 	// Create WebSocket client. Only the dispatch keys reach the
 	// dispatcher; emergency lives in rotation table only and is
 	// untouched until a future rotation-directive flow lands. The
 	// state store is owned by the LifecycleManager (opened in
 	// NewLifecycleManager so the rebind-token rotation check can use
 	// it before Phase 1).
-	wsClient := network.NewWebSocketClient(l.cfg, l.state, ndmDispatchKeys)
+	wsClient := network.NewWebSocketClient(l.cfg, l.state, taskStoreInst, tasks.LifecycleFor, ndmDispatchKeys)
 	wsClient.SetStatusWriter(l.status)
 	_ = ndmRotationKeys // held for future rotation-directive verify
 

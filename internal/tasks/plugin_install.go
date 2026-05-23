@@ -109,10 +109,13 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	// goroutines settle before we fork the helper and shut ourselves down.
 	time.Sleep(1 * time.Second)
 
-	args := []string{version.PackageName}
-	if targetVersion != "" {
-		args = append(args, targetVersion)
-	}
+	// Helper script args: $1=package, $2=target_version (empty = latest),
+	// $3=task_id. The helper writes a drop file at
+	// /var/db/ndagent/pending-results/<task_id>.json containing the pkg
+	// exit code; on the next agent boot the drain step reconciles that
+	// file into the task store and replays the task_response (see
+	// internal/taskstore). $2 must be passed (even empty) so $3 lines up.
+	args := []string{version.PackageName, targetVersion, cmd.TaskID}
 	cmdExec := exec.Command(helperScriptPath, args...)
 	// Detach: own session, own process group, no controlling terminal —
 	// pkg's `rc.d ndagent stop` sends SIGTERM to the agent's PID/PGID, not

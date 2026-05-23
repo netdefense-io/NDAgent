@@ -14,7 +14,15 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/signing"
 	"github.com/netdefense-io/ndagent/internal/state"
+	"github.com/netdefense-io/ndagent/internal/taskstore"
 )
+
+// LifecycleResolver maps a task_type string to its taskstore Lifecycle
+// category. The dispatcher uses it at Begin time so the boot-time drain
+// knows how to react to rows left IN_PROGRESS. Implemented in
+// internal/tasks/register.go (LifecycleFor); passed in via constructor
+// to avoid an import cycle (tasks → network → tasks).
+type LifecycleResolver func(taskType string) taskstore.Lifecycle
 
 // Task type constants
 const (
@@ -43,6 +51,15 @@ type CommandDispatcher struct {
 
 	// State store for replay barrier (per-NDM monotonic task_id).
 	state *state.Store
+	// Task-state registry: per-task IN_PROGRESS / terminal / delivered
+	// rows persisted across restarts. The dispatcher writes the Begin
+	// row; SendTaskResponse on the WebSocketClient writes the terminal
+	// + delivered markers. nil-tolerant for tests that don't need it.
+	taskStore *taskstore.Store
+	// Maps task_type → Lifecycle. nil-tolerant — falls back to
+	// LifecycleSynchronous, which is the right default for any unknown
+	// task type.
+	lifecycleFor LifecycleResolver
 	// Static NDM pubkey table (primary + emergency) — populated from
 	// the agent's conf at startup.
 	ndmKeys map[string]ed25519.PublicKey // hex(kid) -> pubkey
@@ -55,12 +72,17 @@ type CommandDispatcher struct {
 // `ndmKeys` maps lowercase-hex kid → pubkey for the NDManager primary
 // and emergency keys (loaded from the agent conf). `stateStore`
 // persists the `last_executed_task_id` replay barrier across restarts.
-func NewCommandDispatcher(stateStore *state.Store, ndmKeys map[string]ed25519.PublicKey, deviceUUID string) *CommandDispatcher {
+// `taskStore` and `lifecycleFor` are optional — pass nil to disable
+// per-task persistence (tests, or environments without /var/db/ndagent
+// write access). When taskStore is set, lifecycleFor MUST be too.
+func NewCommandDispatcher(stateStore *state.Store, taskStore *taskstore.Store, lifecycleFor LifecycleResolver, ndmKeys map[string]ed25519.PublicKey, deviceUUID string) *CommandDispatcher {
 	d := &CommandDispatcher{
-		handlers:   make(map[string]TaskHandler),
-		state:      stateStore,
-		ndmKeys:    ndmKeys,
-		deviceUUID: deviceUUID,
+		handlers:     make(map[string]TaskHandler),
+		state:        stateStore,
+		taskStore:    taskStore,
+		lifecycleFor: lifecycleFor,
+		ndmKeys:      ndmKeys,
+		deviceUUID:   deviceUUID,
 	}
 
 	// Note: Task handlers are registered by tasks.RegisterHandlers()
@@ -278,6 +300,25 @@ func (d *CommandDispatcher) dispatchCommand(ctx context.Context, ws *WebSocketCl
 			)
 		}
 		return
+	}
+
+	// Record the task as IN_PROGRESS in the local registry before the
+	// handler runs. The lifecycle category drives boot-time drain
+	// behavior if the agent dies before the handler can send a final
+	// task_response (see internal/taskstore). nil-tolerant for tests.
+	if d.taskStore != nil && d.lifecycleFor != nil {
+		if err := d.taskStore.Begin(cmd.TaskID, cmd.TaskType, d.lifecycleFor(cmd.TaskType)); err != nil {
+			// Don't block dispatch — the handler can still send a
+			// response; we just lose crash-recovery coverage for this
+			// one task. ErrAlreadyTerminal is expected if the broker
+			// redispatched a task we already finished; log at INFO so
+			// it's not noise.
+			log.Infow("taskstore.Begin failed",
+				"task_id", cmd.TaskID,
+				"task_type", cmd.TaskType,
+				"error", err,
+			)
+		}
 	}
 
 	// Execute handler

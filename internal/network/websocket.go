@@ -21,6 +21,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/signing"
 	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/status"
+	"github.com/netdefense-io/ndagent/internal/taskstore"
 	"github.com/netdefense-io/ndagent/internal/util"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
@@ -138,6 +139,12 @@ type WebSocketClient struct {
 	// State store — used by SendTaskResponse to acquire next_response_seq.
 	state *state.Store
 
+	// Task-state registry. SendTaskResponse marks the row terminal (for
+	// COMPLETED/FAILED) before the wire send and marks delivered after
+	// the wire send returns nil. nil-tolerant for tests and for any
+	// caller path that doesn't pass a store.
+	taskStore *taskstore.Store
+
 	// Cached signing material for outbound responses.
 	privMu     sync.Mutex
 	privCached ed25519.PrivateKey
@@ -156,12 +163,18 @@ type WebSocketClient struct {
 }
 
 // NewWebSocketClient creates a new WebSocket client.
-func NewWebSocketClient(cfg *config.Config, stateStore *state.Store, ndmKeys map[string]ed25519.PublicKey) *WebSocketClient {
+//
+// `taskStore` and `lifecycleFor` are optional — pass nil to disable
+// per-task persistence (tests). When set, they're plumbed both into
+// the dispatcher (Begin at dispatch time) and into SendTaskResponse
+// (Complete + MarkDelivered around the wire send).
+func NewWebSocketClient(cfg *config.Config, stateStore *state.Store, taskStore *taskstore.Store, lifecycleFor LifecycleResolver, ndmKeys map[string]ed25519.PublicKey) *WebSocketClient {
 	return &WebSocketClient{
 		cfg:        cfg,
 		heartbeat:  NewHeartbeatManager(cfg.DeviceUUID, 60*time.Second),
-		dispatcher: NewCommandDispatcher(stateStore, ndmKeys, cfg.DeviceUUID),
+		dispatcher: NewCommandDispatcher(stateStore, taskStore, lifecycleFor, ndmKeys, cfg.DeviceUUID),
 		state:      stateStore,
+		taskStore:  taskStore,
 	}
 }
 
@@ -284,6 +297,36 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		"device_uuid", w.cfg.DeviceUUID,
 	)
 	w.markStatus(func(sw *status.Writer) error { return sw.MarkConnected(w.cfg.ServerURIWS) })
+
+	// Drain any task responses left over from a previous agent process
+	// (PLUGIN_INSTALL drop files; RESTART/REBOOT come-back-success; or
+	// any handler that started but didn't deliver its terminal frame).
+	// Runs after auth completes (so SendTaskResponse will succeed) and
+	// before runCommunicationLoop starts pulling new commands (so we
+	// don't race against fresh dispatcher writes). Idempotent across
+	// reconnects — nothing to drain once we've delivered the backlog.
+	if w.taskStore != nil {
+		dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
+		sent, derr := taskstore.DrainUndelivered(
+			dctx,
+			w.taskStore,
+			taskstore.DefaultPendingResultsDir,
+			w,
+			func(format string, args ...interface{}) {
+				log.Infow(fmt.Sprintf(format, args...))
+			},
+		)
+		dcancel()
+		if derr != nil {
+			log.Warnw("Task store drain returned error",
+				"sent", sent, "error", derr,
+			)
+		} else if sent > 0 {
+			log.Infow("Task store drain delivered responses",
+				"count", sent,
+			)
+		}
+	}
 
 	// Run communication loop
 	return w.runCommunicationLoop(ctx)
@@ -529,7 +572,39 @@ func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data 
 		"envelope_size", len(envelope),
 	)
 
-	return w.SendJSON(frame)
+	// Record the terminal status to the task registry BEFORE the wire
+	// send. If the wire send fails we still have the result on disk; the
+	// next boot's drain will replay it. IN_PROGRESS frames don't touch
+	// the store — only terminal rows are interesting for replay.
+	isTerminal := status == TaskStatusCompleted || status == TaskStatusFailed
+	if isTerminal && w.taskStore != nil {
+		var resultBytes []byte
+		if len(inner) > 0 {
+			if b, mErr := json.Marshal(inner); mErr == nil {
+				resultBytes = b
+			}
+		}
+		if cErr := w.taskStore.Complete(taskID, status, message, resultBytes); cErr != nil {
+			log.Warnw("taskstore.Complete failed; response will go out unrecorded",
+				"task_id", taskID, "error", cErr,
+			)
+		}
+	}
+
+	if err := w.SendJSON(frame); err != nil {
+		return err
+	}
+
+	// Wire send succeeded — mark delivered so the boot-time drain
+	// doesn't replay this response on the next reauth.
+	if isTerminal && w.taskStore != nil {
+		if dErr := w.taskStore.MarkDelivered(taskID); dErr != nil {
+			log.Warnw("taskstore.MarkDelivered failed; response may be re-sent on next boot",
+				"task_id", taskID, "error", dErr,
+			)
+		}
+	}
+	return nil
 }
 
 // devicePrivkey lazily loads the agent's Ed25519 private key from
