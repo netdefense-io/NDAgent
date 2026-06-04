@@ -151,10 +151,6 @@ func getFirmwareSuffixOnDevice(ctx context.Context) (string, error) {
 type firmwareUpgradePayload struct {
 	// Mode must be "minor" or "major".
 	Mode string `json:"mode"`
-	// TargetVersion is optional. For major, it can be a series like "26.7".
-	// For minor, it can be a full version like "26.1.9". Informational for
-	// the agent (OPNsense auto-selects the latest).
-	TargetVersion string `json:"target_version,omitempty"`
 	// Reboot controls whether to apply only packages (false, minor only)
 	// or trigger a full OPNsense-managed update with reboot (true).
 	// Default: true. major+reboot=false is invalid.
@@ -188,10 +184,6 @@ func parseFirmwareUpgradePayload(cmd network.Command) (*firmwareUpgradePayload, 
 	}
 	if p.Mode != "minor" && p.Mode != "major" {
 		return nil, fmt.Errorf("mode must be \"minor\" or \"major\", got %q", p.Mode)
-	}
-
-	if tv, ok := cmd.Payload["target_version"].(string); ok {
-		p.TargetVersion = tv
 	}
 
 	// Reboot: explicit false overrides the default of true.
@@ -256,7 +248,6 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		"reboot", payload.Reboot,
 		"check_first", payload.CheckFirst,
 		"dry_run", payload.DryRun,
-		"target_version", payload.TargetVersion,
 		"test_mode", isTestMode,
 	)
 
@@ -728,9 +719,6 @@ func handleMajorWithReboot(
 
 	fromVersion := initialStatus.ProductVersion
 	toSeries := initialStatus.UpgradeMajorVersion
-	if toSeries == "" && payload.TargetVersion != "" {
-		toSeries = payload.TargetVersion
-	}
 
 	if err := SendInProgressResponse(ws, cmd.TaskID,
 		fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense may reboot up to 2 times...",
