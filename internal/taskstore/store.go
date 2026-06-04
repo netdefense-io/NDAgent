@@ -19,10 +19,12 @@ package taskstore
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -181,7 +183,7 @@ func OpenInMemory() (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-const schemaVersion = 1
+const schemaVersion = 2
 
 func initSchema(db *sql.DB) error {
 	if _, err := db.Exec(`
@@ -200,10 +202,41 @@ CREATE INDEX IF NOT EXISTS idx_task_states_undelivered ON task_states(delivered_
 `); err != nil {
 		return fmt.Errorf("init schema: %w", err)
 	}
+	// v2 migration: add task_meta column (stores JSON metadata set at Begin
+	// time, e.g. package_name + target_version for PLUGIN_INSTALL). SQLite
+	// ADD COLUMN is safe on any existing DB — it's a no-op if the column
+	// already exists (SQLite ≥ 3.37 supports IF NOT EXISTS on ADD COLUMN;
+	// we catch the "duplicate column" error for older SQLite versions used
+	// in the modernc driver).
+	if _, err := db.Exec(`ALTER TABLE task_states ADD COLUMN task_meta TEXT`); err != nil {
+		// "duplicate column name" means the migration already ran — not an error.
+		if !isDuplicateColumnError(err) {
+			return fmt.Errorf("migrate schema v2 (add task_meta): %w", err)
+		}
+	}
 	if _, err := db.Exec(fmt.Sprintf("PRAGMA user_version = %d", schemaVersion)); err != nil {
 		return fmt.Errorf("set user_version: %w", err)
 	}
 	return nil
+}
+
+// isDuplicateColumnError reports whether err is the SQLite "duplicate column
+// name" error returned when ALTER TABLE ADD COLUMN is run a second time.
+func isDuplicateColumnError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "duplicate column name") || strings.Contains(msg, "already exists")
+}
+
+// PluginInstallMeta is the metadata stored at Begin time for PLUGIN_INSTALL
+// tasks. It is written by BeginWithMeta and read by the boot-time drain to
+// perform a version-aware stuck-row resolution without requiring the original
+// command payload.
+type PluginInstallMeta struct {
+	PackageName   string `json:"package_name"`
+	TargetVersion string `json:"target_version"` // "" means "latest"
 }
 
 // Close releases the underlying DB handle. Safe to call on a nil receiver.
@@ -249,6 +282,44 @@ VALUES (?, ?, ?, ?, ?)
 		return fmt.Errorf("insert: %w", err)
 	}
 	return tx.Commit()
+}
+
+// SetTaskMeta stores a JSON-encoded metadata blob in the task_meta column for
+// an existing task row. It is intended to be called by a handler immediately
+// after the dispatcher has called Begin, before any long-running work begins.
+// The row must exist and be IN_PROGRESS; a no-op for terminal rows so callers
+// don't need to guard against task completion races.
+//
+// Only PLUGIN_INSTALL uses this today; future handler types may extend it.
+func (s *Store) SetTaskMeta(taskID string, meta interface{}) error {
+	raw, err := json.Marshal(meta)
+	if err != nil {
+		return fmt.Errorf("marshal task_meta: %w", err)
+	}
+	_, err = s.db.Exec(
+		"UPDATE task_states SET task_meta = ? WHERE task_id = ? AND status = ?",
+		string(raw), taskID, StatusInProgress,
+	)
+	return err
+}
+
+// GetPluginInstallMeta reads the PluginInstallMeta stored by SetTaskMeta for
+// the given task. Returns nil (no error) if the row has no metadata or the
+// task is not found — callers must treat nil as "metadata absent".
+func (s *Store) GetPluginInstallMeta(taskID string) (*PluginInstallMeta, error) {
+	var raw sql.NullString
+	err := s.db.QueryRow("SELECT task_meta FROM task_states WHERE task_id = ?", taskID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) || !raw.Valid || raw.String == "" {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query task_meta for %s: %w", taskID, err)
+	}
+	var m PluginInstallMeta
+	if err := json.Unmarshal([]byte(raw.String), &m); err != nil {
+		return nil, nil // malformed meta — treat as absent
+	}
+	return &m, nil
 }
 
 // Complete writes a terminal status for `taskID`. If the row doesn't
@@ -402,19 +473,20 @@ ORDER BY started_at ASC
 // with a drop file already on disk get their real outcome instead of
 // the "helper did not produce result file" fallback.
 func (s *Store) ResolveStuck() (int, error) {
-	rows, err := s.db.Query("SELECT task_id, lifecycle FROM task_states WHERE status = ?", StatusInProgress)
+	rows, err := s.db.Query("SELECT task_id, task_type, lifecycle FROM task_states WHERE status = ?", StatusInProgress)
 	if err != nil {
 		return 0, fmt.Errorf("query stuck: %w", err)
 	}
 	type stuck struct {
 		taskID    string
+		taskType  string
 		lifecycle Lifecycle
 	}
 	var pending []stuck
 	for rows.Next() {
 		var s stuck
 		var lc string
-		if err := rows.Scan(&s.taskID, &lc); err != nil {
+		if err := rows.Scan(&s.taskID, &s.taskType, &lc); err != nil {
 			rows.Close()
 			return 0, fmt.Errorf("scan stuck: %w", err)
 		}

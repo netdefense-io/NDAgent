@@ -13,6 +13,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
+	"github.com/netdefense-io/ndagent/internal/taskstore"
 	"github.com/netdefense-io/ndagent/pkg/version"
 )
 
@@ -72,6 +73,21 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	if cmd.Payload != nil {
 		if v, ok := cmd.Payload["target_version"].(string); ok {
 			targetVersion = v
+		}
+	}
+
+	// Persist package name and target version in the task registry so the
+	// boot-time drain can perform a version-aware resolution without the
+	// original command payload. Best-effort — a store write failure does not
+	// prevent the install from proceeding.
+	if store := ws.GetTaskStore(); store != nil {
+		meta := taskstore.PluginInstallMeta{
+			PackageName:   version.PackageName,
+			TargetVersion: targetVersion,
+		}
+		if err := store.SetTaskMeta(cmd.TaskID, meta); err != nil {
+			log.Warnw("Failed to persist PLUGIN_INSTALL metadata; drain fallback may be imprecise",
+				"task_id", cmd.TaskID, "error", err)
 		}
 	}
 

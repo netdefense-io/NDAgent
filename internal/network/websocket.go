@@ -18,6 +18,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
+	"github.com/netdefense-io/ndagent/internal/pkgmgr"
 	"github.com/netdefense-io/ndagent/internal/signing"
 	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/status"
@@ -332,6 +333,7 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 			func(format string, args ...interface{}) {
 				log.Infow(fmt.Sprintf(format, args...))
 			},
+			pluginInstallPkgChecker,
 		)
 		dcancel()
 		if derr != nil {
@@ -726,12 +728,45 @@ func (w *WebSocketClient) GetAPIClient() *opnapi.Client {
 	return w.apiClient
 }
 
+// GetTaskStore returns the per-task persistence registry. Task handlers may
+// call this to persist extra metadata (e.g. PLUGIN_INSTALL stores package name
+// and target version via store.SetTaskMeta so the boot-time drain can perform
+// a version-aware resolution). Returns nil when the store was not opened (tests
+// or environments without /var/db/ndagent write access).
+func (w *WebSocketClient) GetTaskStore() *taskstore.Store {
+	return w.taskStore
+}
+
 // SetPreDrainHook registers a callback that runs after WS auth and before
 // DrainUndelivered. lifecycle.go uses this to perform firmware-aware
 // boot-time reconciliation for FIRMWARE_UPGRADE rows before the generic
 // ResolveStuck applies the blunt LifecycleRestartCompletes rule.
 func (w *WebSocketClient) SetPreDrainHook(fn func(ctx context.Context, store *taskstore.Store)) {
 	w.preDrainHook = fn
+}
+
+// pluginInstallPkgChecker is the PluginInstallChecker wired into the
+// boot-time drain. It queries pkg(8) for the installed version of
+// packageName and returns it so the drain can determine whether a
+// PLUGIN_INSTALL task that lacks a drop file actually succeeded.
+//
+// When target is "" (latest), any installed version is accepted by the
+// drain logic. When target is a specific semver, the drain compares
+// installed == target. This function only reports the installed version;
+// the comparison is the drain's responsibility.
+//
+// pkg(8) lives in /usr/sbin, which is in the default rc.d PATH, so
+// DeviceExecEnv() is not strictly required here — but pkgmgr.Query uses
+// it internally for consistency with other on-device execs.
+func pluginInstallPkgChecker(ctx context.Context, packageName, _ string) (string, error) {
+	statuses, err := pkgmgr.Query(ctx, []string{packageName})
+	if err != nil {
+		return "", err
+	}
+	if len(statuses) == 0 {
+		return "", nil
+	}
+	return statuses[0].InstalledVersion, nil
 }
 
 // SetHeavyProvider wires the heavy-telemetry cache reader into the
