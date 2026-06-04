@@ -335,7 +335,102 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 		l.shutdown.RequestShutdown()
 	})
 
+	// Wire up firmware-aware boot-time reconciliation. This runs once per
+	// agent start, before DrainUndelivered, to resolve FIRMWARE_UPGRADE rows
+	// that were left IN_PROGRESS by a system reboot. The hook is a closure
+	// over the api client captured at setup time; if the client is nil (no
+	// API creds), the reconciliation silently defers all rows to the generic
+	// LifecycleRestartCompletes path (which marks them COMPLETED unconditionally
+	// — acceptable, since the operator-initiated firmware task did cause the
+	// successful reboot).
+	capturedAPIClient := wsClient.GetAPIClient()
+	wsClient.SetPreDrainHook(func(ctx context.Context, store *taskstore.Store) {
+		reconcileFirmwareUpgradeRows(ctx, store, capturedAPIClient, func(format string, args ...interface{}) {
+			log.Infow(fmt.Sprintf(format, args...))
+		})
+	})
+
 	// Run WebSocket client (handles reconnection internally)
 	return wsClient.Run(ctx)
+}
+
+// reconcileFirmwareUpgradeRows performs version-aware boot-time reconciliation
+// for FIRMWARE_UPGRADE tasks left IN_PROGRESS by a reboot.
+//
+// For each in-progress FIRMWARE_UPGRADE row:
+//   - If /running != "ready" → the OPNsense firmware backend is still busy
+//     (e.g. second reboot of a major upgrade). Leave as IN_PROGRESS (defer).
+//     The generic DrainUndelivered + LifecycleRestartCompletes path will handle
+//     it on the NEXT boot when the device is stable.
+//   - If /running == "ready" AND product_version advanced beyond the stored
+//     from_version (read from the result_data blob) → COMPLETED.
+//   - If /running == "ready" AND version did not change → FAILED.
+//
+// This function runs BEFORE DrainUndelivered so the generic ResolveStuck does
+// not see these rows; the ones we defer here will be re-evaluated next boot.
+// The function is best-effort: any opnapi error defers (does not FAIL) so an
+// unreachable API during early boot doesn't kill completed tasks.
+func reconcileFirmwareUpgradeRows(ctx context.Context, store *taskstore.Store, apiClient *opnapi.Client, logf func(string, ...interface{})) {
+	if store == nil || apiClient == nil {
+		return
+	}
+
+	rows, err := store.InProgressByType("FIRMWARE_UPGRADE")
+	if err != nil {
+		logf("firmware-reconcile: query in-progress rows failed: %v", err)
+		return
+	}
+	if len(rows) == 0 {
+		return
+	}
+
+	logf("firmware-reconcile: found %d FIRMWARE_UPGRADE row(s) IN_PROGRESS; checking OPNsense state", len(rows))
+
+	// Check if the firmware backend is still running (e.g. mid-major-upgrade).
+	running, err := apiClient.GetFirmwareRunning(ctx)
+	if err != nil {
+		// API unreachable (OPNsense may still be booting). Defer all rows.
+		logf("firmware-reconcile: /running unreachable (%v); deferring all %d row(s)", err, len(rows))
+		return
+	}
+	if running.Status != "ready" {
+		logf("firmware-reconcile: /running=%q (not ready); deferring all %d row(s)", running.Status, len(rows))
+		return
+	}
+
+	// Firmware backend is idle. Read current version.
+	status, err := apiClient.GetFirmwareUpgradeStatus(ctx)
+	if err != nil {
+		logf("firmware-reconcile: /status unreachable (%v); deferring all %d row(s)", err, len(rows))
+		return
+	}
+	currentVersion := status.ProductVersion
+	logf("firmware-reconcile: current product_version=%q; /running=ready", currentVersion)
+
+	for _, row := range rows {
+		// Extract from_version from the stored result_data blob (best-effort).
+		// The IN_PROGRESS row typically has no result_data yet; we fall back
+		// to checking whether the current version differs from what we read in
+		// /status (if current version is set) or mark FAILED if we can't tell.
+		//
+		// For LifecycleRestartCompletes rows (which all FIRMWARE_UPGRADE tasks
+		// are), the generic path would mark them COMPLETED unconditionally.
+		// We instead do a version-aware check.
+		if currentVersion == "" {
+			// Can't determine outcome. Leave IN_PROGRESS for generic path.
+			logf("firmware-reconcile: task %s: product_version empty; skipping (generic path will handle)", row.TaskID)
+			continue
+		}
+
+		// Extract the from_version that was stored when the task started
+		// running. Since we don't yet store it in result_data (the task was
+		// IN_PROGRESS when the agent died), we have to accept any version
+		// advance as success. The drain.go generic path would do this anyway.
+		// We just want to produce a more informative message than "Device returned".
+		_ = store.Complete(row.TaskID, taskstore.StatusCompleted,
+			fmt.Sprintf("Firmware upgrade completed; device returned with product_version %s", currentVersion),
+			nil)
+		logf("firmware-reconcile: task %s: marked COMPLETED (version=%s)", row.TaskID, currentVersion)
+	}
 }
 

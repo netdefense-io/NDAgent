@@ -26,15 +26,16 @@ type LifecycleResolver func(taskType string) taskstore.Lifecycle
 
 // Task type constants
 const (
-	TaskTypePing          = "PING"
-	TaskTypeShutdown      = "SHUTDOWN"
-	TaskTypeReboot        = "REBOOT"
-	TaskTypeRestart       = "RESTART"
-	TaskTypePull          = "PULL"
-	TaskTypeSync          = "SYNC"
-	TaskTypeBackup        = "BACKUP"
-	TaskTypeConnect       = "CONNECT"
-	TaskTypePluginInstall = "PLUGIN_INSTALL"
+	TaskTypePing            = "PING"
+	TaskTypeShutdown        = "SHUTDOWN"
+	TaskTypeReboot          = "REBOOT"
+	TaskTypeRestart         = "RESTART"
+	TaskTypePull            = "PULL"
+	TaskTypeSync            = "SYNC"
+	TaskTypeBackup          = "BACKUP"
+	TaskTypeConnect         = "CONNECT"
+	TaskTypePluginInstall   = "PLUGIN_INSTALL"
+	TaskTypeFirmwareUpgrade = "FIRMWARE_UPGRADE"
 )
 
 // TaskHandler is a function that handles a specific task type.

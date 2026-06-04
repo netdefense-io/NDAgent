@@ -160,6 +160,13 @@ type WebSocketClient struct {
 	// Status writer publishes connection lifecycle to the OPNsense
 	// plugin GUI via /var/run/ndagent.status. Optional; nil-safe.
 	statusWriter *status.Writer
+
+	// preDrainHook is called once after auth succeeds and before
+	// DrainUndelivered. It lets callers (lifecycle.go) run version-aware
+	// boot-time reconciliation (e.g. FIRMWARE_UPGRADE) before the generic
+	// ResolveStuck turns IN_PROGRESS rows into blunt COMPLETED/FAILED.
+	// Optional; nil-safe.
+	preDrainHook func(ctx context.Context, store *taskstore.Store)
 }
 
 // NewWebSocketClient creates a new WebSocket client.
@@ -297,6 +304,16 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		"device_uuid", w.cfg.DeviceUUID,
 	)
 	w.markStatus(func(sw *status.Writer) error { return sw.MarkConnected(w.cfg.ServerURIWS) })
+
+	// Pre-drain hook: firmware-aware reconciliation for FIRMWARE_UPGRADE rows
+	// that were left IN_PROGRESS by a reboot. Must run before DrainUndelivered
+	// so the firmware-specific rows are resolved before the generic
+	// ResolveStuck applies the LifecycleRestartCompletes rule.
+	if w.preDrainHook != nil && w.taskStore != nil {
+		hookCtx, hookCancel := context.WithTimeout(ctx, 15*time.Second)
+		w.preDrainHook(hookCtx, w.taskStore)
+		hookCancel()
+	}
 
 	// Drain any task responses left over from a previous agent process
 	// (PLUGIN_INSTALL drop files; RESTART/REBOOT come-back-success; or
@@ -707,6 +724,14 @@ func (w *WebSocketClient) GetAPIClient() *opnapi.Client {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.apiClient
+}
+
+// SetPreDrainHook registers a callback that runs after WS auth and before
+// DrainUndelivered. lifecycle.go uses this to perform firmware-aware
+// boot-time reconciliation for FIRMWARE_UPGRADE rows before the generic
+// ResolveStuck applies the blunt LifecycleRestartCompletes rule.
+func (w *WebSocketClient) SetPreDrainHook(fn func(ctx context.Context, store *taskstore.Store)) {
+	w.preDrainHook = fn
 }
 
 // SetHeavyProvider wires the heavy-telemetry cache reader into the

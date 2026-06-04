@@ -358,6 +358,43 @@ ORDER BY started_at ASC
 	return out, rows.Err()
 }
 
+// InProgressByType returns all rows still IN_PROGRESS for the given task type.
+// Used by the boot-time firmware reconciliation step to find FIRMWARE_UPGRADE
+// tasks that need version-aware resolution (rather than the generic
+// LifecycleRestartCompletes "Device returned" message).
+func (s *Store) InProgressByType(taskType string) ([]Record, error) {
+	rows, err := s.db.Query(`
+SELECT task_id, task_type, lifecycle, status, message, result_data, started_at, ended_at
+FROM task_states
+WHERE status = ? AND task_type = ?
+ORDER BY started_at ASC
+`, StatusInProgress, taskType)
+	if err != nil {
+		return nil, fmt.Errorf("query in-progress by type: %w", err)
+	}
+	defer rows.Close()
+
+	var out []Record
+	for rows.Next() {
+		var r Record
+		var lifecycleStr string
+		var endedAt sql.NullInt64
+		var startedAt int64
+		var data []byte
+		if err := rows.Scan(&r.TaskID, &r.TaskType, &lifecycleStr, &r.Status, &r.Message, &data, &startedAt, &endedAt); err != nil {
+			return nil, fmt.Errorf("scan in-progress: %w", err)
+		}
+		r.Lifecycle = parseLifecycle(lifecycleStr)
+		r.ResultData = data
+		r.StartedAt = time.Unix(startedAt, 0)
+		if endedAt.Valid {
+			r.EndedAt = time.Unix(endedAt.Int64, 0)
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 // ResolveStuck walks every row still IN_PROGRESS and applies the
 // lifecycle-category rule. Returns the number of rows changed.
 //

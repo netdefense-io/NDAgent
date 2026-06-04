@@ -27,6 +27,9 @@ func RegisterHandlers(ws *network.WebSocketClient) {
 
 	// Register plugin self-install handler
 	dispatcher.RegisterHandler(network.TaskTypePluginInstall, HandlePluginInstall)
+
+	// Register firmware upgrade handler
+	dispatcher.RegisterHandler(network.TaskTypeFirmwareUpgrade, HandleFirmwareUpgrade)
 }
 
 // LifecycleFor returns the taskstore Lifecycle category for a given task
@@ -43,6 +46,13 @@ func LifecycleFor(taskType string) taskstore.Lifecycle {
 		return taskstore.LifecycleRestartCompletes
 	case network.TaskTypePluginInstall:
 		return taskstore.LifecycleHelperResolves
+	case network.TaskTypeFirmwareUpgrade:
+		// Worst-case lifecycle: reboot=true paths kill the agent mid-task.
+		// LifecycleRestartCompletes covers this — the boot-time drain
+		// re-reads /status and /running to determine the real outcome.
+		// The reboot=false (synchronous) path sends a terminal response
+		// before returning, so no IN_PROGRESS row survives to the next boot.
+		return taskstore.LifecycleRestartCompletes
 	default:
 		return taskstore.LifecycleSynchronous
 	}

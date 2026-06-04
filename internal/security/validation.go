@@ -14,6 +14,11 @@ var (
 
 	// configFilenameRegex validates config filenames
 	configFilenameRegex = regexp.MustCompile(`^[a-zA-Z0-9._-]+\.conf$`)
+
+	// opnsensePackageNameRegex validates OPNsense package names passed to
+	// pkg(8) or opnsense-update. Only alphanumeric, hyphens, and underscores
+	// are permitted — the same character class accepted by pkg(8).
+	opnsensePackageNameRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 )
 
 const (
@@ -26,6 +31,10 @@ const (
 
 // ErrEmptyTarget is returned when ping target is empty
 var ErrEmptyTarget = errors.New("no target specified for ping")
+
+// ErrInvalidPackageName is returned when an OPNsense package name contains
+// characters outside the allowed set (alphanumeric, hyphens, underscores).
+var ErrInvalidPackageName = errors.New("invalid package name: only alphanumeric characters, hyphens, and underscores are allowed")
 
 // ErrInvalidTargetFormat is returned when ping target contains invalid characters
 var ErrInvalidTargetFormat = errors.New("invalid target format: only alphanumeric characters, dots, and hyphens are allowed")
@@ -174,6 +183,19 @@ func IsSafeFilePath(filePath string, allowedExtensions []string) bool {
 	}
 
 	return true
+}
+
+// ValidateOPNsensePackageName validates a package name before passing it to
+// pkg(8) or opnsense-update. Only alphanumeric characters, hyphens, and
+// underscores are permitted. Empty names are rejected.
+func ValidateOPNsensePackageName(name string) error {
+	if name == "" {
+		return errors.New("package name must not be empty")
+	}
+	if !opnsensePackageNameRegex.MatchString(name) {
+		return ErrInvalidPackageName
+	}
+	return nil
 }
 
 // ValidatePingCount validates the ping count parameter.
