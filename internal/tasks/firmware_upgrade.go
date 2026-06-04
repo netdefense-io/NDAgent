@@ -19,6 +19,7 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -28,6 +29,58 @@ import (
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
+
+// firmwareMessageMaxBytes is the safe upper bound for the JSON message we
+// put in Task.Message. NDBroker truncates at MAX_MESSAGE_BYTES = 16 KiB;
+// we target 15 KiB to leave headroom for the broker's own framing.
+const firmwareMessageMaxBytes = 15 * 1024
+
+// firmwareLogTailMaxBytes is the maximum number of bytes we allow for the
+// log_tail value when building the JSON message, so the whole object stays
+// well under firmwareMessageMaxBytes even in worst-case log output.
+const firmwareLogTailMaxBytes = 4 * 1024
+
+// firmwareSuccessJSON serialises data as compact JSON to use as the
+// Task.Message for successful FIRMWARE_UPGRADE outcomes. It caps the
+// log_tail field at firmwareLogTailMaxBytes bytes and drops the
+// package_names list (package count is already in packages_applied) to
+// keep the payload compact. Returns the JSON string; falls back to an
+// empty JSON object "{}" only if json.Marshal itself fails (which cannot
+// happen for a map[string]interface{} with well-typed values).
+func firmwareSuccessJSON(data map[string]interface{}) string {
+	// Cap log_tail to avoid blowing the broker's 16 KiB message limit.
+	if lt, ok := data["log_tail"].(string); ok && len(lt) > firmwareLogTailMaxBytes {
+		data["log_tail"] = lt[len(lt)-firmwareLogTailMaxBytes:]
+	}
+	// Drop package_names — the count is in packages_applied; the full list
+	// can be very long and is not consumed by either surface (NDCLI/NDWeb).
+	delete(data, "package_names")
+
+	b, err := json.Marshal(data)
+	if err != nil {
+		// Unreachable for well-typed map values, but be safe.
+		return "{}"
+	}
+	s := string(b)
+	// Final safety net: if the JSON somehow still exceeds our limit, truncate
+	// gracefully and return a minimal fallback so the task is still parseable
+	// as a firmware result (resolved_mode is enough for the UIs to detect it).
+	if len(s) > firmwareMessageMaxBytes {
+		// This can only happen if data has an unexpected large field. Remove
+		// everything optional and re-marshal the core fields only.
+		core := map[string]interface{}{
+			"resolved_mode": data["resolved_mode"],
+			"from_version":  data["from_version"],
+			"to_version":    data["to_version"],
+			"applied":       data["applied"],
+			"no_update":     data["no_update"],
+		}
+		if b2, err2 := json.Marshal(core); err2 == nil {
+			return string(b2)
+		}
+	}
+	return s
+}
 
 // firmwareCheckWait is how long we sleep after TriggerFirmwareCheck before
 // reading /status. Matches the collector's heuristic (~30 s). OPNsense's
@@ -277,30 +330,34 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 	case "minor":
 		if !hasMinor {
 			log.Infow("No minor updates available; no-op", "task_id", cmd.TaskID)
-			return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-				"No minor updates available",
-				map[string]interface{}{
-					"resolved_mode":    payload.Mode,
-					"from_version":     fromVersion,
-					"no_update":        true,
-					"applied":          false,
-					"reboot_performed": false,
-					"opnsense_status":  status.Status,
-				}))
+			d := map[string]interface{}{
+				"resolved_mode":    payload.Mode,
+				"from_version":     fromVersion,
+				"no_update":        true,
+				"applied":          false,
+				"reboot_performed": false,
+				"opnsense_status":  status.Status,
+			}
+			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+				Success: true,
+				Message: firmwareSuccessJSON(d),
+			})
 		}
 	case "major":
 		if !hasMajor {
 			log.Infow("No major updates available; no-op", "task_id", cmd.TaskID)
-			return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-				"No major updates available",
-				map[string]interface{}{
-					"resolved_mode":    payload.Mode,
-					"from_version":     fromVersion,
-					"no_update":        true,
-					"applied":          false,
-					"reboot_performed": false,
-					"opnsense_status":  status.Status,
-				}))
+			d := map[string]interface{}{
+				"resolved_mode":    payload.Mode,
+				"from_version":     fromVersion,
+				"no_update":        true,
+				"applied":          false,
+				"reboot_performed": false,
+				"opnsense_status":  status.Status,
+			}
+			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+				Success: true,
+				Message: firmwareSuccessJSON(d),
+			})
 		}
 	}
 
@@ -318,28 +375,27 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 			toVersion = status.ProductLatest
 		}
 
-		pkgNames := packageNames(status.UpgradePackages)
 		log.Infow("DRY_RUN: plan computed", "task_id", cmd.TaskID,
 			"mode", payload.Mode, "from", fromVersion, "to", toVersion)
 
-		return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-			fmt.Sprintf("DRY_RUN: would apply %s update from %s to %s",
-				payload.Mode, fromVersion, toVersion),
-			map[string]interface{}{
-				"resolved_mode":     payload.Mode,
-				"from_version":      fromVersion,
-				"to_version":        toVersion,
-				"reboot_performed":  false,
-				"reboots_expected":  reboots,
-				"applied":           false,
-				"dry_run":           true,
-				"no_update":         false,
-				"packages_applied":  len(status.UpgradePackages),
-				"package_names":     pkgNames,
-				"mixed_state":       false,
-				"opnsense_status":   status.Status,
-				"needs_reboot":      status.NeedsReboot,
-			}))
+		d := map[string]interface{}{
+			"resolved_mode":    payload.Mode,
+			"from_version":     fromVersion,
+			"to_version":       toVersion,
+			"reboot_performed": false,
+			"reboots_expected": reboots,
+			"applied":          false,
+			"dry_run":          true,
+			"no_update":        false,
+			"packages_applied": len(status.UpgradePackages),
+			"mixed_state":      false,
+			"opnsense_status":  status.Status,
+			"needs_reboot":     status.NeedsReboot,
+		}
+		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+			Success: true,
+			Message: firmwareSuccessJSON(d),
+		})
 	}
 
 	// ── Dispatch by mode × reboot ────────────────────────────────────────────
@@ -550,14 +606,10 @@ func sendMinorNoRebootResult(
 		"packages_applied":  packagesApplied,
 		"remaining_pending": remaining,
 	}
-	if mixedState {
-		return firmwareNoRebootSendResponse(ws, taskID, NewSuccessResultWithData(
-			"Packages applied without reboot (base/kernel deferred — mixed state)",
-			data))
-	}
-	return firmwareNoRebootSendResponse(ws, taskID, NewSuccessResultWithData(
-		"Packages applied without reboot",
-		data))
+	return firmwareNoRebootSendResponse(ws, taskID, TaskResult{
+		Success: true,
+		Message: firmwareSuccessJSON(data),
+	})
 }
 
 // handleMinorWithReboot implements: minor + reboot=true
@@ -613,31 +665,35 @@ func handleMinorWithReboot(
 		postStatus, err := client.GetFirmwareUpgradeStatus(ctx)
 		if err != nil {
 			// Can't verify in-session; leave it as COMPLETED (best-effort).
-			return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-				"Minor update completed (in-session, post-verify failed)",
-				map[string]interface{}{
-					"resolved_mode":    "minor",
-					"from_version":     fromVersion,
-					"reboot_performed": false,
-					"reboots_expected": 1,
-					"applied":          true,
-					"status_sentinel":  sentinel,
-					"opnsense_status":  "unknown",
-				}))
-		}
-		toVersion := postStatus.ProductVersion
-		return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-			fmt.Sprintf("Minor update completed: %s → %s", fromVersion, toVersion),
-			map[string]interface{}{
+			d := map[string]interface{}{
 				"resolved_mode":    "minor",
 				"from_version":     fromVersion,
-				"to_version":       toVersion,
 				"reboot_performed": false,
 				"reboots_expected": 1,
 				"applied":          true,
 				"status_sentinel":  sentinel,
-				"opnsense_status":  postStatus.Status,
-			}))
+				"opnsense_status":  "unknown",
+			}
+			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+				Success: true,
+				Message: firmwareSuccessJSON(d),
+			})
+		}
+		toVersion := postStatus.ProductVersion
+		d := map[string]interface{}{
+			"resolved_mode":    "minor",
+			"from_version":     fromVersion,
+			"to_version":       toVersion,
+			"reboot_performed": false,
+			"reboots_expected": 1,
+			"applied":          true,
+			"status_sentinel":  sentinel,
+			"opnsense_status":  postStatus.Status,
+		}
+		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+			Success: true,
+			Message: firmwareSuccessJSON(d),
+		})
 	case "reboot":
 		// System is rebooting. The task row stays IN_PROGRESS;
 		// LifecycleRestartCompletes resolves it on boot return.
@@ -711,28 +767,32 @@ func handleMajorWithReboot(
 		// Rare in practice for major (usually reboots). Resolve in-session.
 		postStatus, err := client.GetFirmwareUpgradeStatus(ctx)
 		if err != nil {
-			return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-				"Major upgrade completed (in-session, post-verify failed)",
-				map[string]interface{}{
-					"resolved_mode":    "major",
-					"from_version":     fromVersion,
-					"reboots_expected": 2,
-					"applied":          true,
-					"status_sentinel":  sentinel,
-				}))
-		}
-		return SendTaskResponse(ws, cmd.TaskID, NewSuccessResultWithData(
-			fmt.Sprintf("Major upgrade completed: %s → %s", fromVersion, postStatus.ProductVersion),
-			map[string]interface{}{
+			d := map[string]interface{}{
 				"resolved_mode":    "major",
 				"from_version":     fromVersion,
-				"to_version":       postStatus.ProductVersion,
 				"reboots_expected": 2,
-				"reboot_performed": false,
 				"applied":          true,
 				"status_sentinel":  sentinel,
-				"opnsense_status":  postStatus.Status,
-			}))
+			}
+			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+				Success: true,
+				Message: firmwareSuccessJSON(d),
+			})
+		}
+		d := map[string]interface{}{
+			"resolved_mode":    "major",
+			"from_version":     fromVersion,
+			"to_version":       postStatus.ProductVersion,
+			"reboots_expected": 2,
+			"reboot_performed": false,
+			"applied":          true,
+			"status_sentinel":  sentinel,
+			"opnsense_status":  postStatus.Status,
+		}
+		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+			Success: true,
+			Message: firmwareSuccessJSON(d),
+		})
 	case "reboot":
 		log.Infow("System rebooting during major upgrade; leaving IN_PROGRESS",
 			"task_id", cmd.TaskID)

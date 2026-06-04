@@ -2,7 +2,9 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -828,10 +830,16 @@ func TestHandleMinorNoReboot_MixedStateFromPreApplyData(t *testing.T) {
 	if !(*calls)[0].success {
 		t.Fatalf("expected COMPLETED, got FAILED: %q", (*calls)[0].message)
 	}
-	// The message for mixed_state=true must mention "mixed state".
+	// The message must be valid JSON with mixed_state=true (derived from the
+	// PRE-apply package list containing base/kernel, not from the stale
+	// post-apply NeedsReboot field).
 	msg := (*calls)[0].message
-	if !containsStr(msg, "mixed state") {
-		t.Errorf("expected message to mention 'mixed state' (base/kernel from pre-apply data), got %q", msg)
+	var parsed map[string]interface{}
+	if err2 := json.Unmarshal([]byte(msg), &parsed); err2 != nil {
+		t.Fatalf("message is not valid JSON: %v — got %q", err2, msg)
+	}
+	if ms, ok := parsed["mixed_state"].(bool); !ok || !ms {
+		t.Errorf("expected mixed_state=true in JSON message, got %v (full message: %q)", parsed["mixed_state"], msg)
 	}
 }
 
@@ -869,4 +877,208 @@ func containsStr(s, sub string) bool {
 			}
 			return false
 		}())
+}
+
+// ─── Rich JSON output (fix: Message must be JSON for success paths) ───────────
+//
+// The NDBroker discards the Data map and only stores Task.Message. The NDCLI
+// (parseFirmwareUpgradeData) and NDWeb (parseFirmwareResult) both parse the
+// Message field as JSON to render the rich output. The following tests verify
+// that every success terminal path emits valid JSON in Message with the correct
+// field names matching FirmwareUpgradeData (NDCLI) / FirmwareUpgradeResult (NDWeb).
+
+// assertFirmwareJSON parses msg as JSON into a map and checks that each
+// wantField is present with the expected value. t is the test instance.
+func assertFirmwareJSON(t *testing.T, msg string, wantFields map[string]interface{}) {
+	t.Helper()
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(msg), &parsed); err != nil {
+		t.Fatalf("message is not valid JSON: %v\ngot: %q", err, msg)
+	}
+	for field, wantVal := range wantFields {
+		got, ok := parsed[field]
+		if !ok {
+			t.Errorf("field %q missing in JSON message; message=%q", field, msg)
+			continue
+		}
+		// Compare as strings to avoid float64 vs int type mismatches from json.Unmarshal.
+		gotStr := fmt.Sprintf("%v", got)
+		wantStr := fmt.Sprintf("%v", wantVal)
+		if gotStr != wantStr {
+			t.Errorf("field %q: got %v (%T) want %v (%T)", field, got, got, wantVal, wantVal)
+		}
+	}
+}
+
+// captureHandleFirmwareUpgrade runs HandleFirmwareUpgrade with a stubbed
+// sendResponse and returns the captured terminal TaskResult.
+// The test installs a SendTaskResponse stub via firmwareNoRebootSendResponse
+// for the no-reboot path; for the full handler path it captures at the ws level.
+func captureNoRebootResult(
+	t *testing.T,
+	client firmwareOPNAPIClient,
+	payload *firmwareUpgradePayload,
+	preStatus *opnapi.FirmwareUpgradeStatus,
+) (TaskResult, error) {
+	t.Helper()
+	var captured TaskResult
+	restoreSend := SetFirmwareNoRebootSendResponseForTest(func(_ *network.WebSocketClient, _ string, result TaskResult) error {
+		captured = result
+		return nil
+	})
+	defer restoreSend()
+	defer SetFirmwareNoRebootSendInProgressForTest(func(_ *network.WebSocketClient, _, _ string) error { return nil })()
+
+	restoreExec := SetFirmwareExecFuncForTest(func(_ context.Context, _ ...string) ([]byte, []byte, int) {
+		return []byte("packages updated\n"), nil, 0
+	})
+	defer restoreExec()
+
+	restoreSuffix := SetFirmwareGetSuffixFuncForTest(func(_ context.Context) (string, error) {
+		return "", nil
+	})
+	defer restoreSuffix()
+
+	err := handleMinorNoReboot(context.Background(), nil,
+		minorNoRebootCmd("json-test"), client, payload, preStatus)
+	return captured, err
+}
+
+// TestFirmwareSuccessJSON_IsValidJSON verifies the firmwareSuccessJSON helper
+// always returns parseable JSON and never includes package_names (dropped for
+// compactness).
+func TestFirmwareSuccessJSON_IsValidJSON(t *testing.T) {
+	data := map[string]interface{}{
+		"resolved_mode":    "minor",
+		"from_version":     "26.1.2",
+		"to_version":       "26.1.9",
+		"reboot_performed": false,
+		"applied":          true,
+		"no_update":        false,
+		"packages_applied": 5,
+		"mixed_state":      false,
+		"package_names":    []string{"pkg-a", "pkg-b"}, // must be stripped
+		"log_tail":         "some log output",
+	}
+	msg := firmwareSuccessJSON(data)
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(msg), &parsed); err != nil {
+		t.Fatalf("firmwareSuccessJSON returned invalid JSON: %v\ngot: %q", err, msg)
+	}
+	if _, hasNames := parsed["package_names"]; hasNames {
+		t.Errorf("firmwareSuccessJSON must drop package_names, but it is present: %q", msg)
+	}
+}
+
+// TestFirmwareSuccessJSON_LogTailCapped verifies that a log_tail exceeding
+// firmwareLogTailMaxBytes is truncated so the total message stays under the
+// broker's 16 KiB limit.
+func TestFirmwareSuccessJSON_LogTailCapped(t *testing.T) {
+	// Build a log_tail of 8 KiB — twice our per-field cap.
+	bigLog := make([]byte, 8*1024)
+	for i := range bigLog {
+		bigLog[i] = 'x'
+	}
+	data := map[string]interface{}{
+		"resolved_mode": "minor",
+		"applied":       true,
+		"log_tail":      string(bigLog),
+	}
+	msg := firmwareSuccessJSON(data)
+	if len(msg) > firmwareMessageMaxBytes {
+		t.Errorf("firmwareSuccessJSON exceeded firmwareMessageMaxBytes (%d): got %d bytes",
+			firmwareMessageMaxBytes, len(msg))
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(msg), &parsed); err != nil {
+		t.Fatalf("capped message is not valid JSON: %v", err)
+	}
+}
+
+// TestMinorNoReboot_MessageIsJSONWithCoreFields verifies that the terminal
+// response for a successful minor/no-reboot apply carries the core fields
+// expected by NDCLI (FirmwareUpgradeData) and NDWeb (FirmwareUpgradeResult)
+// as JSON in Message.
+func TestMinorNoReboot_MessageIsJSONWithCoreFields(t *testing.T) {
+	preStatus := minorNoRebootPreStatus([]string{"opnsense", "curl"}, true)
+	client := &stubFirmwareClient{
+		statusResp:     preStatus,
+		postStatusResp: preStatus, // stale — irrelevant since exit 0 is truth
+	}
+	result, err := captureNoRebootResult(t, client,
+		&firmwareUpgradePayload{Mode: "minor", Reboot: false},
+		preStatus)
+	if err != nil {
+		t.Fatalf("captureNoRebootResult error: %v", err)
+	}
+	if !result.Success {
+		t.Fatalf("expected success, got failure: %q", result.Message)
+	}
+	// Verify core fields match the NDCLI/NDWeb contract exactly.
+	assertFirmwareJSON(t, result.Message, map[string]interface{}{
+		"resolved_mode":    "minor",
+		"from_version":     "26.1.2",
+		"to_version":       "26.1.9",
+		"reboot_performed": false,
+		"applied":          true,
+		"no_update":        false,
+		"packages_applied": float64(2), // json.Unmarshal decodes numbers as float64
+		"mixed_state":      true,       // base+kernel were pending
+	})
+}
+
+// TestDryRun_MessageIsJSONWithCoreFields verifies that a dry-run response
+// carries a JSON message with dry_run=true and the expected core fields.
+func TestDryRun_MessageIsJSONWithCoreFields(t *testing.T) {
+	msg := firmwareSuccessJSON(map[string]interface{}{
+		"resolved_mode":    "minor",
+		"from_version":     "26.1.2",
+		"to_version":       "26.1.9",
+		"reboot_performed": false,
+		"reboots_expected": 0,
+		"applied":          false,
+		"dry_run":          true,
+		"no_update":        false,
+		"packages_applied": 3,
+		"mixed_state":      false,
+	})
+	assertFirmwareJSON(t, msg, map[string]interface{}{
+		"resolved_mode":    "minor",
+		"from_version":     "26.1.2",
+		"dry_run":          true,
+		"applied":          false,
+		"no_update":        false,
+		"packages_applied": float64(3),
+	})
+}
+
+// TestNoUpdate_MessageIsJSONWithCoreFields verifies that a no-op COMPLETED
+// response (nothing to update) carries a JSON message with no_update=true.
+func TestNoUpdate_MessageIsJSONWithCoreFields(t *testing.T) {
+	msg := firmwareSuccessJSON(map[string]interface{}{
+		"resolved_mode":    "minor",
+		"from_version":     "26.1.2",
+		"no_update":        true,
+		"applied":          false,
+		"reboot_performed": false,
+	})
+	assertFirmwareJSON(t, msg, map[string]interface{}{
+		"resolved_mode": "minor",
+		"from_version":  "26.1.2",
+		"no_update":     true,
+		"applied":       false,
+	})
+}
+
+// TestFailedPath_MessageIsPlainText verifies that FAILED responses remain plain
+// text so they are readable when NDCLI/NDWeb fall back to showing Message raw.
+func TestFailedPath_MessageIsPlainText(t *testing.T) {
+	result := NewFailureResult("opnsense-update exited with code 1: pkg: repository unavailable")
+	if result.Success {
+		t.Fatal("NewFailureResult must produce Success=false")
+	}
+	// Must NOT start with '{' — it should be a human-readable string, not JSON.
+	if len(result.Message) > 0 && result.Message[0] == '{' {
+		t.Errorf("FAILED message must be plain text, not JSON; got: %q", result.Message)
+	}
 }
