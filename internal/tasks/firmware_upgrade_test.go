@@ -403,17 +403,17 @@ func TestPollUpgradeStatus_RebootSentinel(t *testing.T) {
 
 // stubFirmwareClient is a configurable stub for firmwareOPNAPIClient.
 type stubFirmwareClient struct {
-	checkErr        error
-	statusResp      *opnapi.FirmwareUpgradeStatus
-	statusErr       error
-	updateResp      *opnapi.FirmwareUpdateResponse
-	updateErr       error
-	upgradeResp     *opnapi.FirmwareUpgradeResponse
-	upgradeErr      error
-	progressResp    *opnapi.FirmwareProgressStatus
-	progressErr     error
-	runningResp     *opnapi.FirmwareRunning
-	runningErr      error
+	checkErr     error
+	statusResp   *opnapi.FirmwareUpgradeStatus
+	statusErr    error
+	updateResp   *opnapi.FirmwareUpdateResponse
+	updateErr    error
+	upgradeResp  *opnapi.FirmwareUpgradeResponse
+	upgradeErr   error
+	progressResp *opnapi.FirmwareProgressStatus
+	progressErr  error
+	runningResp  *opnapi.FirmwareRunning
+	runningErr   error
 	// postStatusResp is returned on the 2nd+ call to GetFirmwareUpgradeStatus.
 	postStatusResp  *opnapi.FirmwareUpgradeStatus
 	statusCallCount int
@@ -846,9 +846,9 @@ func TestHandleMinorNoReboot_MixedStateFromPreApplyData(t *testing.T) {
 // TestHasBaseOrKernelPending verifies the helper used to derive mixed_state.
 func TestHasBaseOrKernelPending(t *testing.T) {
 	cases := []struct {
-		name  string
-		pkgs  []opnapi.FirmwarePackageEntry
-		want  bool
+		name string
+		pkgs []opnapi.FirmwarePackageEntry
+		want bool
 	}{
 		{"empty", nil, false},
 		{"only non-reboot", []opnapi.FirmwarePackageEntry{{Name: "opnsense"}, {Name: "curl"}}, false},
@@ -1082,3 +1082,83 @@ func TestFailedPath_MessageIsPlainText(t *testing.T) {
 		t.Errorf("FAILED message must be plain text, not JSON; got: %q", result.Message)
 	}
 }
+
+// ─── waitForFirmwareReady ──────────────────────────────────────────────────
+
+// TestWaitForFirmwareReady_RunningThenReady verifies that waitForFirmwareReady
+// keeps polling while GetFirmwareRunning returns a non-"ready" status and
+// returns as soon as it reports "ready". This is the post-major-upgrade
+// scenario where the catalog fetch takes several polls.
+func TestWaitForFirmwareReady_RunningThenReady(t *testing.T) {
+	restoreInterval := SetFirmwareCheckPollIntervalForTest(1 * time.Millisecond)
+	defer restoreInterval()
+	restoreTimeout := SetFirmwareCheckTimeoutForTest(5 * time.Second)
+	defer restoreTimeout()
+
+	// Daemon is "running" for the first 3 calls then "ready" on the 4th.
+	pollCalls := 0
+	patchedClient := &patchedRunningClient{
+		stubFirmwareClient: &stubFirmwareClient{},
+		getRunning: func(_ context.Context) (*opnapi.FirmwareRunning, error) {
+			pollCalls++
+			if pollCalls >= 4 {
+				return &opnapi.FirmwareRunning{Status: "ready"}, nil
+			}
+			return &opnapi.FirmwareRunning{Status: "running"}, nil
+		},
+	}
+
+	waitForFirmwareReady(context.Background(), patchedClient, noopFirmwareLogger{})
+
+	if pollCalls < 4 {
+		t.Errorf("expected at least 4 polls (3 running + 1 ready), got %d", pollCalls)
+	}
+}
+
+// TestWaitForFirmwareReady_TimeoutFallsThrough verifies that when the firmware
+// daemon never reports "ready" within the timeout window, waitForFirmwareReady
+// returns without error (falls through) rather than hard-failing.
+func TestWaitForFirmwareReady_TimeoutFallsThrough(t *testing.T) {
+	restoreInterval := SetFirmwareCheckPollIntervalForTest(1 * time.Millisecond)
+	defer restoreInterval()
+	// Very short timeout — the daemon never becomes ready.
+	restoreTimeout := SetFirmwareCheckTimeoutForTest(5 * time.Millisecond)
+	defer restoreTimeout()
+
+	pollCalls := 0
+	patchedClient := &patchedRunningClient{
+		stubFirmwareClient: &stubFirmwareClient{},
+		getRunning: func(_ context.Context) (*opnapi.FirmwareRunning, error) {
+			pollCalls++
+			return &opnapi.FirmwareRunning{Status: "running"}, nil
+		},
+	}
+
+	// Must return without panicking or blocking. If it hangs the test times out.
+	waitForFirmwareReady(context.Background(), patchedClient, noopFirmwareLogger{})
+
+	if pollCalls == 0 {
+		t.Error("expected at least one poll call before timeout")
+	}
+	// Verify the function returned (reached here) — the test itself passing
+	// demonstrates the fall-through behaviour.
+}
+
+// ─── Helper types for waitForFirmwareReady tests ──────────────────────────
+
+// patchedRunningClient wraps stubFirmwareClient and overrides GetFirmwareRunning
+// with a closure so tests can control the return sequence without embedding.
+type patchedRunningClient struct {
+	*stubFirmwareClient
+	getRunning func(context.Context) (*opnapi.FirmwareRunning, error)
+}
+
+func (p *patchedRunningClient) GetFirmwareRunning(ctx context.Context) (*opnapi.FirmwareRunning, error) {
+	return p.getRunning(ctx)
+}
+
+// noopFirmwareLogger satisfies the Infow/Warnw interface used by waitForFirmwareReady.
+type noopFirmwareLogger struct{}
+
+func (noopFirmwareLogger) Infow(_ string, _ ...interface{}) {}
+func (noopFirmwareLogger) Warnw(_ string, _ ...interface{}) {}

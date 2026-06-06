@@ -28,6 +28,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
+	"github.com/netdefense-io/ndagent/internal/util"
 )
 
 // firmwareMessageMaxBytes is the safe upper bound for the JSON message we
@@ -82,13 +83,23 @@ func firmwareSuccessJSON(data map[string]interface{}) string {
 	return s
 }
 
-// firmwareCheckWait is how long we sleep after TriggerFirmwareCheck before
-// reading /status. Matches the collector's heuristic (~30 s). OPNsense's
-// check is async; reading too soon returns stale data.
-const firmwareCheckWait = 30 * time.Second
+// firmwareCheckPollInterval is how often we poll GET /core/firmware/running
+// while waiting for a TriggerFirmwareCheck to complete. 3 s is responsive
+// enough without flooding the OPNsense API.
+const firmwareCheckPollInterval = 3 * time.Second
 
-// firmwareSleepFunc is the time.Sleep indirection for tests.
-var firmwareSleepFunc = time.Sleep
+// firmwareCheckTimeout is the maximum time we wait for the firmware daemon to
+// report "ready" after a check is triggered. After a major series upgrade the
+// catalog fetch is a cold network round-trip; 120 s is generous but bounded.
+// On timeout we log WARN and fall through to the /status read anyway.
+const firmwareCheckTimeout = 120 * time.Second
+
+// firmwareCheckPollIntervalVar is the poll-interval indirection for tests
+// (mirrors the upgradeStatusPollInterval pattern).
+var firmwareCheckPollIntervalVar = firmwareCheckPollInterval
+
+// firmwareCheckTimeoutVar is the timeout indirection for tests.
+var firmwareCheckTimeoutVar = firmwareCheckTimeout
 
 // opnAPIClientForFirmware is the indirection for tests — production wires in
 // a real *opnapi.Client via the ws.OPNsenseClient() accessor.
@@ -282,8 +293,7 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 			log.Warnw("Firmware check trigger failed; proceeding with cached status",
 				"task_id", cmd.TaskID, "error", err)
 		} else {
-			log.Infow("Waiting for check to complete", "wait", firmwareCheckWait.String())
-			firmwareSleepFunc(firmwareCheckWait)
+			waitForFirmwareReady(ctx, client, log)
 		}
 	}
 
@@ -402,6 +412,56 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		return SendTaskResponse(ws, cmd.TaskID,
 			NewFailureResult(fmt.Sprintf("unsupported mode/reboot combination: mode=%s reboot=%v",
 				payload.Mode, payload.Reboot)))
+	}
+}
+
+// waitForFirmwareReady polls GET /core/firmware/running until OPNsense reports
+// the firmware daemon is idle (status == "ready"), meaning the background
+// catalog refresh triggered by TriggerFirmwareCheck has completed and
+// /status is safe to read.
+//
+// Uses util.ShutdownAwareSleep between polls so the loop respects graceful
+// agent shutdown. On timeout (firmwareCheckTimeoutVar) it logs WARN and
+// returns — the caller falls through to the /status read with whatever
+// data is cached. This matches the "degraded but proceed" contract for
+// check_first failures.
+func waitForFirmwareReady(
+	ctx context.Context,
+	client firmwareOPNAPIClient,
+	log interface {
+		Infow(string, ...interface{})
+		Warnw(string, ...interface{})
+	},
+) {
+	deadline := time.Now().Add(firmwareCheckTimeoutVar)
+	log.Infow("Waiting for firmware daemon to report ready",
+		"poll_interval", firmwareCheckPollIntervalVar.String(),
+		"timeout", firmwareCheckTimeoutVar.String())
+
+	for {
+		running, err := client.GetFirmwareRunning(ctx)
+		if err != nil {
+			log.Warnw("GetFirmwareRunning error; proceeding with cached /status", "error", err)
+			return
+		}
+		if running.Status == "ready" {
+			log.Infow("Firmware daemon ready; proceeding to read /status")
+			return
+		}
+		log.Infow("Firmware daemon still running; waiting", "daemon_status", running.Status)
+
+		if time.Now().After(deadline) {
+			log.Warnw("Timed out waiting for firmware daemon to become ready; proceeding with cached /status",
+				"timeout", firmwareCheckTimeoutVar.String())
+			return
+		}
+
+		if err := util.ShutdownAwareSleep(ctx, firmwareCheckPollIntervalVar); err != nil {
+			// Context cancelled (shutdown). Return immediately; the handler
+			// will also see the cancelled context on the next API call.
+			log.Warnw("Context cancelled while waiting for firmware daemon", "error", err)
+			return
+		}
 	}
 }
 

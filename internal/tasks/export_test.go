@@ -23,13 +23,21 @@ func setPkgmgrQueryForTest(f func(context.Context, []string) ([]pkgmgr.Status, e
 
 // ── Firmware upgrade test exports ──────────────────────────────────────────
 
-// SetFirmwareSleepNoopForTest replaces the sleep used after TriggerFirmwareCheck
-// with a no-op and returns a restore function. Tests call this to avoid
-// blocking for 30 s during unit tests.
-func SetFirmwareSleepNoopForTest() (restore func()) {
-	old := firmwareSleepFunc
-	firmwareSleepFunc = func(d time.Duration) {}
-	return func() { firmwareSleepFunc = old }
+// SetFirmwareCheckPollIntervalForTest sets the poll interval used by
+// waitForFirmwareReady to a short duration so tests don't block. Returns
+// a restore function.
+func SetFirmwareCheckPollIntervalForTest(d time.Duration) (restore func()) {
+	old := firmwareCheckPollIntervalVar
+	firmwareCheckPollIntervalVar = d
+	return func() { firmwareCheckPollIntervalVar = old }
+}
+
+// SetFirmwareCheckTimeoutForTest sets the timeout used by waitForFirmwareReady.
+// Returns a restore function.
+func SetFirmwareCheckTimeoutForTest(d time.Duration) (restore func()) {
+	old := firmwareCheckTimeoutVar
+	firmwareCheckTimeoutVar = d
+	return func() { firmwareCheckTimeoutVar = old }
 }
 
 // SetUpgradeStatusPollIntervalForTest sets the poll interval for
