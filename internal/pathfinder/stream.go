@@ -23,6 +23,11 @@ type StreamManager struct {
 	onAllClosed func()
 	handlerMu   sync.RWMutex
 
+	// sendFrameFunc, when non-nil, replaces the default client.SendFrame call
+	// in sendFrame. Used by tests to intercept outgoing frames without a real
+	// WebSocket connection.
+	sendFrameFunc func([]byte) error
+
 	// Track if we ever had streams (don't fire onAllClosed before first stream)
 	hadStreams bool
 
@@ -214,9 +219,14 @@ func (sm *StreamManager) handleAck(frame *Frame) {
 	sm.log.Debugw("Received ACK", "stream_id", frame.StreamID)
 }
 
-// sendFrame sends a frame via the client.
+// sendFrame sends a frame via the client. If sendFrameFunc is set (typically in
+// tests), it is called instead of the real client.SendFrame.
 func (sm *StreamManager) sendFrame(frame *Frame) error {
-	return sm.client.SendFrame(EncodeFrame(frame))
+	encoded := EncodeFrame(frame)
+	if sm.sendFrameFunc != nil {
+		return sm.sendFrameFunc(encoded)
+	}
+	return sm.client.SendFrame(encoded)
 }
 
 // removeStream removes a stream from the manager and fires the onAllClosed

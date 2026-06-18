@@ -141,6 +141,9 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 		WebadminSessionDir: ws.GetWebadminSessionDir(),
 		WebadminPort:       ws.GetWebadminPort(),
 	})
+	// Provide the connect-session context to the proxy so exec streams can
+	// use it for command timeouts and cancellation.
+	proxy.SetContext(ctx)
 
 	// Disconnect when all streams close
 	streamMgr.OnAllStreamsClosed(func() {

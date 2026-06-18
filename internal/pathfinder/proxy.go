@@ -1,6 +1,7 @@
 package pathfinder
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"net"
@@ -20,8 +21,10 @@ type ServiceConfig struct {
 
 // TCPProxy routes streams to local TCP services.
 type TCPProxy struct {
+	ctx          context.Context // connect-session context; used by exec streams
 	services     map[string]ServiceConfig
 	shellManager *ShellManager
+	execManager  *ExecManager
 	httpProxy    *HTTPProxy
 	mu           sync.RWMutex
 
@@ -52,11 +55,21 @@ func NewTCPProxyWithConfig(cfg ProxyConfig) *TCPProxy {
 	httpProxy := NewHTTPProxy("127.0.0.1", port, sessionMgr)
 
 	return &TCPProxy{
+		ctx:          context.Background(),
 		services:     make(map[string]ServiceConfig),
 		shellManager: NewShellManager(cfg.Shell),
+		execManager:  NewExecManager(),
 		httpProxy:    httpProxy,
 		log:          logging.Named("pathfinder.proxy"),
 	}
+}
+
+// SetContext sets the context used for exec streams. Should be called once with
+// the connect-session context before any streams are routed.
+func (p *TCPProxy) SetContext(ctx context.Context) {
+	p.mu.Lock()
+	p.ctx = ctx
+	p.mu.Unlock()
 }
 
 // AddService registers a service for proxying.
@@ -97,6 +110,14 @@ func (p *TCPProxy) ProxyStreamToLocal(stream *Stream) error {
 	case "webadmin":
 		// Use HTTP proxy for webadmin with session injection
 		return p.httpProxy.HandleStream(stream)
+	case "exec":
+		// Persistent exec stream: one connection, many serialised commands.
+		// The stream stays open until the client closes it.
+		p.mu.RLock()
+		ctx := p.ctx
+		p.mu.RUnlock()
+		go p.execManager.HandleExecStream(ctx, stream)
+		return nil
 	}
 
 	p.mu.RLock()
@@ -184,5 +205,6 @@ func DefaultOPNsenseServices(webadminPort int) []ServiceConfig {
 // CloseAll closes all shell sessions, HTTP proxy sessions, and pending streams.
 func (p *TCPProxy) CloseAll() {
 	p.shellManager.CloseAll()
+	p.execManager.CloseAll()
 	p.httpProxy.Close()
 }
