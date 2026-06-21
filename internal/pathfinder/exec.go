@@ -78,9 +78,12 @@ package pathfinder
 //     HOME=/root, working directory /root.
 //
 // 10. STREAM LIFETIME: the exec stream stays open across many commands. It closes
-//     only when the client sends a FrameTypeClose frame, which flows through the
-//     normal StreamManager.handleClose → OnAllStreamsClosed → session teardown
-//     path. The ExecManager never closes the stream itself.
+//     only when the client sends a FrameTypeClose frame, handled by the normal
+//     StreamManager.handleClose path. The ExecManager never closes the stream
+//     itself. Closing the exec stream does NOT end the CONNECT session: session
+//     lifetime is tied to the PathFinder relay connection (see
+//     internal/tasks/connect.go), not the open-stream count, so the webadmin
+//     tunnel survives the exec/terminal stream closing.
 
 import (
 	"bytes"

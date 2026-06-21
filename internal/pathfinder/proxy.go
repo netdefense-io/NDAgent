@@ -12,6 +12,15 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 )
 
+// ServiceName constants for the stream service identifiers the proxy routes.
+const (
+	ServiceWebadmin = "webadmin"
+	ServiceSSH      = "ssh"
+	ServiceShell    = "shell"
+	ServiceShellCtl = "shell-ctl"
+	ServiceExec     = "exec"
+)
+
 // ServiceConfig defines a service that can be proxied.
 type ServiceConfig struct {
 	Name      string // Service name (e.g., "ssh", "webadmin")
@@ -26,6 +35,7 @@ type TCPProxy struct {
 	shellManager *ShellManager
 	execManager  *ExecManager
 	httpProxy    *HTTPProxy
+	readOnly     bool // when true, only the webadmin service is proxied; all shell/exec/ssh streams are refused
 	mu           sync.RWMutex
 
 	log *zap.SugaredLogger
@@ -37,6 +47,14 @@ type ProxyConfig struct {
 	WebadminUser       string // Username for webadmin sessions (default: root)
 	WebadminSessionDir string // PHP session directory (default: /var/lib/php/sessions)
 	WebadminPort       int    // Webadmin port (default: 443)
+
+	// ReadOnly gates the tunnel to webadmin-only. When true, the proxy
+	// refuses every shell/shell-ctl/exec/ssh (and any other) stream and
+	// proxies only the read-only webadmin HTTP service. This is the
+	// server-side enforcement of read-only sessions: it holds regardless
+	// of which stream/service the (possibly modified) client requests, so
+	// an RO caller can never obtain a terminal/shell.
+	ReadOnly bool
 }
 
 // NewTCPProxy creates a new TCP proxy.
@@ -60,6 +78,7 @@ func NewTCPProxyWithConfig(cfg ProxyConfig) *TCPProxy {
 		shellManager: NewShellManager(cfg.Shell),
 		execManager:  NewExecManager(),
 		httpProxy:    httpProxy,
+		readOnly:     cfg.ReadOnly,
 		log:          logging.Named("pathfinder.proxy"),
 	}
 }
@@ -101,16 +120,30 @@ func (p *TCPProxy) GetService(name string) (ServiceConfig, bool) {
 func (p *TCPProxy) ProxyStreamToLocal(stream *Stream) error {
 	serviceName := stream.ServiceName()
 
+	// Read-only enforcement chokepoint. Every stream — whatever service the
+	// client names — passes through here. In a read-only session only the
+	// webadmin HTTP service (constrained by the forged read-only OPNsense
+	// ACL) is permitted; shell, shell-ctl, exec, ssh, and any other service
+	// are refused. This is the server-side guarantee that an RO caller can
+	// never obtain a terminal/root shell, independent of a modified client.
+	if p.readOnly && serviceName != ServiceWebadmin {
+		p.log.Warnw("Refusing non-webadmin stream in read-only session",
+			"stream_id", stream.ID(),
+			"service", serviceName,
+		)
+		return fmt.Errorf("service %q not permitted in read-only session", serviceName)
+	}
+
 	// Handle special services
 	switch serviceName {
-	case "shell":
+	case ServiceShell:
 		return p.shellManager.HandleShellStream(stream)
-	case "shell-ctl":
+	case ServiceShellCtl:
 		return p.shellManager.HandleShellCtlStream(stream)
-	case "webadmin":
+	case ServiceWebadmin:
 		// Use HTTP proxy for webadmin with session injection
 		return p.httpProxy.HandleStream(stream)
-	case "exec":
+	case ServiceExec:
 		// Persistent exec stream: one connection, many serialised commands.
 		// The stream stays open until the client closes it.
 		p.mu.RLock()
@@ -197,8 +230,21 @@ func DefaultOPNsenseServices(webadminPort int) []ServiceConfig {
 		webadminPort = 443
 	}
 	return []ServiceConfig{
-		{Name: "ssh", LocalHost: "127.0.0.1", LocalPort: 22},
-		{Name: "webadmin", LocalHost: "127.0.0.1", LocalPort: webadminPort},
+		{Name: ServiceSSH, LocalHost: "127.0.0.1", LocalPort: 22},
+		{Name: ServiceWebadmin, LocalHost: "127.0.0.1", LocalPort: webadminPort},
+	}
+}
+
+// ReadOnlyOPNsenseServices returns the services offered in a read-only
+// session: webadmin only. The ssh service is deliberately omitted so the
+// shell is not even advertised. (The ProxyStreamToLocal chokepoint is the
+// authoritative guard; this is defense-in-depth.)
+func ReadOnlyOPNsenseServices(webadminPort int) []ServiceConfig {
+	if webadminPort == 0 {
+		webadminPort = 443
+	}
+	return []ServiceConfig{
+		{Name: ServiceWebadmin, LocalHost: "127.0.0.1", LocalPort: webadminPort},
 	}
 }
 

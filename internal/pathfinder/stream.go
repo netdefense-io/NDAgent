@@ -116,12 +116,13 @@ func (sm *StreamManager) handleOpen(frame *Frame) {
 	sm.hadStreams = true
 	sm.streamsMu.Unlock()
 
-	// Send ACK
+	// Send ACK (via sendFrame so the sendFrameFunc test seam applies, matching
+	// Stream.Write/Close).
 	ackFrame := &Frame{
 		Type:     FrameTypeAck,
 		StreamID: frame.StreamID,
 	}
-	if err := sm.client.SendFrame(EncodeFrame(ackFrame)); err != nil {
+	if err := sm.sendFrame(ackFrame); err != nil {
 		sm.log.Errorw("Failed to send ACK", "error", err)
 		stream.Close()
 		return

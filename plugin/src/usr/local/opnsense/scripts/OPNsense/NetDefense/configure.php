@@ -49,6 +49,7 @@ require_once 'script/load_phalcon.php';
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
 
 const EXIT_OK = 0;
@@ -204,6 +205,14 @@ try {
         // Note: the actual key/secret are deliberately not propagated
         // here — they're already in config.xml and the rendered
         // ndagent.conf. The operator never needs to see them.
+
+        // Provision the shared read-only WebAdmin user in the same
+        // transaction so it exists from day one. It has no API key and
+        // no password — only the curated read-only ACL — so a failure
+        // here is non-fatal to the agent (token/API are the load-bearing
+        // halves). Report it but don't change the exit path.
+        $readonlyResult = ReadOnlyUserProvisioner::provision();
+        $result['readonly_setup'] = $readonlyResult['result'];
     }
 
     Config::getInstance()->save();
@@ -225,6 +234,10 @@ $backend = new Backend();
 
 if ($doSetupApi && isset($apiSetupResult) && $apiSetupResult['result'] === 'ok') {
     $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
+}
+
+if ($doSetupApi && isset($readonlyResult) && $readonlyResult['result'] === 'ok') {
+    $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
 }
 
 $backend->configdRun('template reload OPNsense/NetDefense');

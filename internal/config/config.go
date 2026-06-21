@@ -48,6 +48,13 @@ type Config struct {
 	WebadminUser       string `mapstructure:"webadmin_user"`
 	WebadminSessionDir string `mapstructure:"webadmin_session_dir"`
 
+	// WebadminReadOnlyUser is the locally configured OPNsense username forged
+	// into the PHP session when a CONNECT task carries read_only=true. It maps
+	// to a curated read-only ACL (group netdefense-readonly). NDAgent picks
+	// this username from local config only — the broker never supplies an
+	// arbitrary username, which would be a privilege-escalation vector.
+	WebadminReadOnlyUser string `mapstructure:"webadmin_readonly_user"`
+
 	// Detected from config.xml at startup (not from ndagent.conf)
 	WebadminPort     int    // Detected webgui port (default: 443)
 	WebadminProtocol string // Detected webgui protocol (default: "https")
@@ -91,6 +98,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pathfinder_tls_verify", true)
 	v.SetDefault("pathfinder_shell", "/usr/local/sbin/opnsense-shell")
 	v.SetDefault("webadmin_user", "root")
+	v.SetDefault("webadmin_readonly_user", "netdefense-readonly")
 	v.SetDefault("webadmin_session_dir", "/var/lib/php/sessions")
 
 	// Read config from file

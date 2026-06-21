@@ -802,6 +802,17 @@ func (w *WebSocketClient) GetWebadminUser() string {
 	return w.cfg.WebadminUser
 }
 
+// GetWebadminReadOnlyUser returns the locally configured OPNsense username
+// used for read-only webadmin sessions (CONNECT read_only=true). Falls back
+// to "netdefense-readonly" if the config value is empty so a missing conf
+// line never silently elevates to the admin user.
+func (w *WebSocketClient) GetWebadminReadOnlyUser() string {
+	if w.cfg.WebadminReadOnlyUser == "" {
+		return "netdefense-readonly"
+	}
+	return w.cfg.WebadminReadOnlyUser
+}
+
 // GetWebadminSessionDir returns the PHP session directory for webadmin.
 func (w *WebSocketClient) GetWebadminSessionDir() string {
 	return w.cfg.WebadminSessionDir

@@ -32,6 +32,7 @@ use OPNsense\Base\ApiMutableModelControllerBase;
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 
 /**
  * Class SettingsController
@@ -69,9 +70,15 @@ class SettingsController extends ApiMutableModelControllerBase
         }
 
         Config::getInstance()->lock();
+        $readonlyResult = ['result' => 'skipped'];
         try {
             $result = ApiCredsProvisioner::provision(false);
-            if ($result['result'] === 'ok') {
+            // Provision the shared read-only WebAdmin user in the same
+            // transaction so it exists from day one alongside the agent
+            // user. No API key, no password — only the curated read-only
+            // ACL. A failure here is non-fatal to API setup.
+            $readonlyResult = ReadOnlyUserProvisioner::provision();
+            if ($result['result'] === 'ok' || $readonlyResult['result'] === 'ok') {
                 Config::getInstance()->save();
             }
         } catch (\Exception $e) {
@@ -80,8 +87,12 @@ class SettingsController extends ApiMutableModelControllerBase
         }
         Config::getInstance()->unlock();
 
+        $backend = new Backend();
+        if ($readonlyResult['result'] === 'ok') {
+            $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
+        }
+
         if ($result['result'] === 'ok') {
-            $backend = new Backend();
             $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
             $backend->configdRun('template reload OPNsense/NetDefense');
 
@@ -92,6 +103,13 @@ class SettingsController extends ApiMutableModelControllerBase
                 'result' => 'ok',
                 'message' => 'API credentials configured successfully',
             ];
+        }
+
+        // API setup didn't change anything (e.g. already configured), but
+        // the read-only user may still have been (re)provisioned — reload
+        // the template so the conf reflects the current state.
+        if ($readonlyResult['result'] === 'ok') {
+            $backend->configdRun('template reload OPNsense/NetDefense');
         }
 
         return $result;

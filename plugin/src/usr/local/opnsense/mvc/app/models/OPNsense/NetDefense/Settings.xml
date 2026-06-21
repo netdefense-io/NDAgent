@@ -48,6 +48,15 @@
             <Default>/usr/local/sbin/opnsense-shell</Default>
             <Required>Y</Required>
         </pathfinderShell>
+        <webadminReadonlyUser type="TextField">
+            <!-- OPNsense username forged into the read-only "Open WebAdmin"
+                 PHP session. Maps to the curated read-only ACL provisioned
+                 by ReadOnlyUserProvisioner. -->
+            <mask>/^[a-zA-Z0-9_-]{1,32}$/</mask>
+            <ValidationMessage>Read-only user must be 1-32 chars (alphanumeric, underscore, hyphen)</ValidationMessage>
+            <Default>netdefense-readonly</Default>
+            <Required>N</Required>
+        </webadminReadonlyUser>
         <apiKey type="TextField">
             <Required>N</Required>
         </apiKey>

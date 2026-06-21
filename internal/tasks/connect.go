@@ -48,9 +48,22 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
+	// Optional read_only flag (default false → admin/root behavior preserved).
+	// The flag selects between two LOCALLY configured OPNsense usernames; the
+	// broker never supplies an arbitrary username (privilege-escalation guard).
+	readOnly := payloadBool(cmd.Payload, "read_only")
+
+	// Resolve the OPNsense username to forge into the PHP session.
+	webadminUser := ws.GetWebadminUser()
+	if readOnly {
+		webadminUser = ws.GetWebadminReadOnlyUser()
+	}
+
 	log.Debugw("Connecting to Pathfinder",
 		"session_id", sessionID,
 		"pathfinder_host", ws.GetPathfinderHost(),
+		"read_only", readOnly,
+		"webadmin_user", webadminUser,
 	)
 
 	// Check for context cancellation before connection attempt
@@ -67,7 +80,7 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	}
 
 	// Connect to Pathfinder
-	err := connectToPathfinder(ctx, ws, sessionID)
+	err := connectToPathfinder(ctx, ws, sessionID, webadminUser, readOnly)
 	if err != nil {
 		log.Errorw("Pathfinder session ended",
 			"session_id", sessionID,
@@ -93,7 +106,11 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 }
 
 // connectToPathfinder establishes a connection to the Pathfinder service.
-func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessionID string) error {
+// webadminUser is the OPNsense username forged into the auto-auth PHP session
+// (admin user for normal sessions, the read-only user when read_only=true).
+// readOnly gates the tunnel to webadmin-only (no shell/ssh/exec) — enforced
+// in the proxy regardless of what the client requests.
+func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessionID, webadminUser string, readOnly bool) error {
 	log := logging.Named("CONNECT")
 
 	// Create cancellable context for clean shutdown when streams close
@@ -137,22 +154,39 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 	streamMgr := pathfinder.NewStreamManager(client)
 	proxy := pathfinder.NewTCPProxyWithConfig(pathfinder.ProxyConfig{
 		Shell:              ws.GetPathfinderShell(),
-		WebadminUser:       ws.GetWebadminUser(),
+		WebadminUser:       webadminUser,
 		WebadminSessionDir: ws.GetWebadminSessionDir(),
 		WebadminPort:       ws.GetWebadminPort(),
+		ReadOnly:           readOnly,
 	})
 	// Provide the connect-session context to the proxy so exec streams can
 	// use it for command timeouts and cancellation.
 	proxy.SetContext(ctx)
 
-	// Disconnect when all streams close
-	streamMgr.OnAllStreamsClosed(func() {
-		log.Debugw("All streams closed, ending Pathfinder session")
-		cancel()
-	})
+	// Session lifetime is tied to the PathFinder relay connection, NOT to the
+	// open-stream count. We deliberately do NOT cancel when streams drop to
+	// zero: webadmin rides one short-lived stream per HTTP request (the
+	// browser/CLI opens and closes a stream per request), so the count
+	// legitimately returns to zero between requests and after a terminal
+	// stream closes. Tearing down on all-streams-closed would kill the
+	// webadmin tunnel mid-session (and made read-only/terminal-less sessions
+	// unusable). The session instead ends naturally when client.RunFrameLoop
+	// returns — i.e. the relay/WS disconnects (bounded by the ping/pong
+	// keepalive: pingInterval 30s / pongWait 60s in internal/pathfinder/
+	// client.go) or the parent context is cancelled (broker PathFinder
+	// session TTL / agent shutdown). CloseAll() + proxy.CloseAll() below
+	// still run on return, destroying the forged PHP session, so abandoned
+	// clients are reclaimed within the pong-wait window.
 
-	// Add default OPNsense services
-	for _, svc := range pathfinder.DefaultOPNsenseServices(ws.GetWebadminPort()) {
+	// Register the proxied services. Read-only sessions get webadmin only —
+	// the ssh service is not even advertised. The proxy's ProxyStreamToLocal
+	// chokepoint is the authoritative guard; this keeps the offered set
+	// honest as defense-in-depth.
+	services := pathfinder.DefaultOPNsenseServices(ws.GetWebadminPort())
+	if readOnly {
+		services = pathfinder.ReadOnlyOPNsenseServices(ws.GetWebadminPort())
+	}
+	for _, svc := range services {
 		proxy.AddService(svc)
 	}
 
@@ -188,6 +222,28 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 	}
 
 	return err
+}
+
+// payloadBool extracts a boolean field from a command payload, tolerating the
+// shapes a JSON decoder can produce (bool, float64 number, string). Missing or
+// unrecognized values yield false — the safe default for read_only (admin
+// behavior is the legacy default; only an explicit true downgrades the
+// session).
+func payloadBool(payload map[string]interface{}, key string) bool {
+	raw, ok := payload[key]
+	if !ok {
+		return false
+	}
+	switch v := raw.(type) {
+	case bool:
+		return v
+	case float64:
+		return v != 0
+	case string:
+		return v == "true" || v == "1"
+	default:
+		return false
+	}
 }
 
 // buildPathfinderWSURL constructs the WebSocket URL from the Pathfinder host.
