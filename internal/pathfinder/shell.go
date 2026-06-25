@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 	"go.uber.org/zap"
@@ -14,6 +15,13 @@ import (
 
 // opnsenseShell is the default shell path
 const opnsenseShell = "/usr/local/sbin/opnsense-shell"
+
+// outputDrainTimeout bounds how long run() waits for the PTY-output->client
+// copy to flush the shell's final bytes before sending the stream CLOSE. The
+// drain normally completes in microseconds once the PTY master is closed; the
+// timeout only guards against a wedged relay write so the session can still
+// tear down.
+const outputDrainTimeout = 5 * time.Second
 
 // Control message types for shell-ctl stream
 const (
@@ -29,6 +37,7 @@ type ShellSession struct {
 	cmd         *exec.Cmd
 	ptmx        *os.File
 	shell       string
+	dir         string // working directory; defaults to /root when empty (overridable in tests)
 	log         *zap.SugaredLogger
 }
 
@@ -125,8 +134,12 @@ func (sm *ShellManager) CloseAll() {
 func (s *ShellSession) run() error {
 	s.log.Debugw("Starting shell session", "shell", s.shell)
 
+	dir := s.dir
+	if dir == "" {
+		dir = "/root"
+	}
 	s.cmd = exec.Command(s.shell)
-	s.cmd.Dir = "/root"
+	s.cmd.Dir = dir
 	s.cmd.Env = append(os.Environ(), "TERM=xterm-256color", "HOME=/root", "USER=root")
 
 	var err error
@@ -144,19 +157,30 @@ func (s *ShellSession) run() error {
 	// Handle control stream (resize commands)
 	go s.handleControlStream()
 
-	// Bidirectional copy - PTY line discipline handles Ctrl+C/D/Z
-	done := make(chan struct{}, 2)
+	// Bidirectional copy - PTY line discipline handles Ctrl+C/D/Z.
+	//
+	// outputDone is signalled when the PTY-output->client copy returns, i.e.
+	// after every byte the shell wrote (including its final logout banner) has
+	// been handed to s.shellStream.Write. We MUST wait for this before closing
+	// the shell stream: on an immediate logout the shell process can exit (and
+	// cmd.Wait() return) while the output copy is still draining the PTY's last
+	// bytes. Closing the stream first sets s.shellStream.closed=true, which makes
+	// the in-flight Write fail with "stream closed" — the final output is lost,
+	// and worse, the CLOSE frame can be queued ahead of (or instead of) the last
+	// DATA, so the client's io.Copy never observes the trailing output and the
+	// stream teardown is unreliable. Draining first guarantees the client sees
+	// all output and then a single, reliably-flushed CLOSE → EOF.
+	outputDone := make(chan struct{})
 
 	// PTY output -> client
 	go func() {
 		io.Copy(s.shellStream, s.ptmx)
-		done <- struct{}{}
+		close(outputDone)
 	}()
 
 	// Client input -> PTY
 	go func() {
 		io.Copy(s.ptmx, s.shellStream)
-		done <- struct{}{}
 	}()
 
 	// Wait for shell to exit
@@ -166,9 +190,40 @@ func (s *ShellSession) run() error {
 		"error", err,
 	)
 
-	// Close both streams
-	s.shellStream.Close()
-	s.ctlStream.Close()
+	// Close the PTY master now that the process is gone. This unblocks the
+	// output copy goroutine (its Read on s.ptmx returns EOF/err) so outputDone
+	// fires, and it unblocks the input copy goroutine's Write on s.ptmx. The
+	// deferred s.ptmx.Close() would also do this, but doing it explicitly here
+	// lets us wait for the output drain below before returning.
+	s.ptmx.Close()
+
+	// Wait for the output copy to finish flushing the shell's final bytes to the
+	// client BEFORE we send the stream CLOSE. Bounded so a wedged relay write
+	// can't hang the session forever (the deferred ptmx.Close + stream Close
+	// still run on timeout).
+	select {
+	case <-outputDone:
+		s.log.Debugw("Shell output drained to client")
+	case <-time.After(outputDrainTimeout):
+		s.log.Warnw("Timed out draining shell output before close")
+	}
+
+	// Emit the CLOSE frame for both streams UNCONDITIONALLY via SendCloseFrame
+	// (not Close()). On a fast logout the client may have already closed these
+	// streams toward the agent — which marks them closed locally and would make
+	// Close() a no-op, suppressing the agent's own CLOSE. But the client's output
+	// reader only observes EOF when it receives the AGENT's CLOSE (the relay does
+	// not echo the client's own CLOSE back to it), so the agent MUST send its
+	// shell-exit CLOSE regardless of local closed state. This is the
+	// authoritative "shell process ended" signal the client needs to transition
+	// to the webadmin keep-alive. Synchronously flushed under the client write
+	// mutex; a send failure is logged rather than silent.
+	if cerr := s.shellStream.SendCloseFrame(); cerr != nil {
+		s.log.Warnw("Failed to send shell stream CLOSE frame", "error", cerr)
+	}
+	if cerr := s.ctlStream.SendCloseFrame(); cerr != nil {
+		s.log.Warnw("Failed to send shell-ctl stream CLOSE frame", "error", cerr)
+	}
 
 	return err
 }

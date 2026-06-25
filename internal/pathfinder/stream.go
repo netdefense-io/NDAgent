@@ -300,31 +300,68 @@ func (s *Stream) ServiceName() string {
 // Read implements io.Reader.
 func (s *Stream) Read(p []byte) (n int, err error) {
 	s.mu.Lock()
-	if s.closed && len(s.pending) == 0 {
-		s.mu.Unlock()
-		return 0, io.EOF
-	}
+	closed := s.closed
 	s.mu.Unlock()
 
-	// Return any pending data first
+	// Return any pending data first (partial frame from a previous Read).
 	if len(s.pending) > 0 {
 		n = copy(p, s.pending)
 		s.pending = s.pending[n:]
 		return n, nil
 	}
 
-	// Wait for data from buffer
-	data, ok := <-s.readBuf
-	if !ok {
+	// If the stream is closed, drain any data still buffered in readBuf before
+	// reporting EOF. An agent-side Close() closes closeChan but NOT readBuf, so
+	// a frame delivered just before close must not be dropped — the consumer
+	// (e.g. the client's terminal output copy) needs every byte before EOF.
+	if closed {
+		select {
+		case data, ok := <-s.readBuf:
+			if ok {
+				n = copy(p, data)
+				if n < len(data) {
+					s.pending = data[n:]
+				}
+				return n, nil
+			}
+		default:
+		}
 		return 0, io.EOF
 	}
 
-	n = copy(p, data)
-	if n < len(data) {
-		s.pending = data[n:]
+	// Wait for data from buffer, or for the stream to close. We select on
+	// closeChan as well as readBuf because there are two distinct close paths:
+	// an incoming CLOSE frame (handleClose) closes readBuf, but an agent-side
+	// Close() only closes closeChan (it cannot safely close readBuf without
+	// racing handleData's send). Without the closeChan case, a reader parked
+	// here on an agent-closed stream — e.g. the shell input copy after logout —
+	// would block forever.
+	select {
+	case data, ok := <-s.readBuf:
+		if !ok {
+			return 0, io.EOF
+		}
+		n = copy(p, data)
+		if n < len(data) {
+			s.pending = data[n:]
+		}
+		return n, nil
+	case <-s.closeChan:
+		// Drain any buffered data already delivered before the close so we don't
+		// lose a frame that raced the close signal.
+		select {
+		case data, ok := <-s.readBuf:
+			if ok {
+				n = copy(p, data)
+				if n < len(data) {
+					s.pending = data[n:]
+				}
+				return n, nil
+			}
+		default:
+		}
+		return 0, io.EOF
 	}
-
-	return n, nil
 }
 
 // Write implements io.Writer.
@@ -370,7 +407,7 @@ func (s *Stream) Close() error {
 		return nil
 	}
 	s.closed = true
-	close(s.closeChan) // Signal closure to unblock handleData
+	close(s.closeChan) // Signal closure to unblock handleData and parked Read
 	s.mu.Unlock()
 
 	s.log.Debugw("Closing stream")
@@ -381,6 +418,43 @@ func (s *Stream) Close() error {
 		StreamID: s.id,
 	}
 
+	err := s.manager.sendFrame(frame)
+	s.manager.removeStream(s.id)
+
+	return err
+}
+
+// SendCloseFrame writes a CLOSE frame for this stream to the peer regardless of
+// the local closed flag, then performs the normal local teardown (idempotent).
+//
+// Why this exists: Stream.Close() short-circuits to a no-op when the stream is
+// already marked closed — which happens when the *client* closes its end first
+// (an incoming CLOSE handled by handleClose marks the stream closed and removes
+// it). On a fast/immediate logout the client closes the shell (and shell-ctl)
+// streams toward the agent before the agent's shell goroutine — woken by the
+// shell process exiting — reaches Close(). The plain Close() then no-ops and the
+// agent never emits ITS CLOSE back toward the client. But the client's output
+// reader (io.Copy from the shell stream) only observes EOF when it receives the
+// AGENT's CLOSE — the relay does not echo the client's own CLOSE back to it. So
+// the client wedges, never transitioning to the webadmin keep-alive.
+//
+// The shell handler uses SendCloseFrame so the agent's shell-exit CLOSE is
+// delivered unconditionally — it is the authoritative "the shell process ended"
+// signal the client needs. A duplicate CLOSE (if the agent also sent one via a
+// prior Close) is harmless: the client treats CLOSE as EOF idempotently and the
+// stream is already removed from the manager.
+func (s *Stream) SendCloseFrame() error {
+	s.mu.Lock()
+	if !s.closed {
+		s.closed = true
+		close(s.closeChan)
+	}
+	s.mu.Unlock()
+
+	frame := &Frame{
+		Type:     FrameTypeClose,
+		StreamID: s.id,
+	}
 	err := s.manager.sendFrame(frame)
 	s.manager.removeStream(s.id)
 
