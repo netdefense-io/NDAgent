@@ -49,7 +49,15 @@ class ReadOnlyUserProvisioner
     const READONLY_GROUPNAME = 'netdefense-readonly';
 
     /**
-     * Curated read-only ACL allowlist.
+     * Curated read-only ACL allowlist — SINGLE SOURCE OF TRUTH.
+     *
+     * provision() performs full desired-state reconciliation against this
+     * list on every call (not just create-if-missing): a priv added here is
+     * added to the group; a priv removed here is removed from the group. The
+     * ensure_readonly.php script calls provision() from the +MANIFEST
+     * post-install hook, so editing this constant and shipping a new package
+     * propagates the change to every managed device at next upgrade —
+     * no migration, no manual repair required.
      *
      * Validated against the lab OPNsense priv catalog
      * (`(new OPNsense\Core\ACL())->getPrivList()` on 10.255.10.2). Contains
