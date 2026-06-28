@@ -49,87 +49,225 @@ class ReadOnlyUserProvisioner
     const READONLY_GROUPNAME = 'netdefense-readonly';
 
     /**
-     * Curated read-only ACL allowlist — SINGLE SOURCE OF TRUTH.
+     * Read-only ACL allowlist — SINGLE SOURCE OF TRUTH.
+     *
+     * Policy: grant access to EVERY OPNsense WebUI page so a read-only
+     * (MSSP) operator can *view* the entire firewall — firewall rules,
+     * NAT, interfaces, services, VPN, certs, system config — and rely on
+     * `user-config-readonly` ("System: Deny config write") to reject all
+     * persistent config writes. This is an inverted allowlist: it lists
+     * (almost) the whole priv catalog and SUBTRACTS only what the backstop
+     * cannot guard.
+     *
+     * Why this works (validated on lab OPNsense 26.1.9): every config write
+     * funnels through one of two guarded chokepoints, both of which check
+     * `user-config-readonly` for non-root users:
+     *   - legacy `write_config()` (config.inc) — all `.php` page saves;
+     *   - MVC `ApiMutableModelControllerBase::save()` — every model-backed
+     *     API add/set/del/toggle (firewall rules, NAT, services, ...).
+     * So edit pages render (GET) but Save/Apply is denied. Granting the
+     * `*-edit` privs is therefore safe and is what makes "list all firewall
+     * rules" (and open a rule to inspect it) work.
+     *
+     * EXCLUDED — these BYPASS the backstop (they are not config writes) or
+     * are pure destructive box-level actions, so they are deliberately NOT
+     * granted:
+     *   - page-all                          (would grant everything blanket)
+     *   - page-diagnostics-rebootsystem     (reboot — not a config write)
+     *   - page-diagnostics-haltsystem       (halt — not a config write)
+     *   - page-system-firmware-manualupdate (firmware upgrade/reinstall/reboot;
+     *                                        FirmwareController has NO backstop check)
+     *   - page-diagnostics-factorydefaults  (factory reset — destructive)
+     *   - page-snapshots                    (ZFS boot-env rollback/destroy)
+     *   - page-diagnostics-backup-restore   (one-click download of the FULL
+     *                                        config.xml incl. all secrets — bulk
+     *                                        exfil; the GET is not gated by the backstop)
+     *   - page-xmlrpclibrary                (HA config-sync XMLRPC write endpoint)
+     *   - page-wizard-system                (initial-setup wizard; not a view page)
+     *
+     * RESIDUAL (accepted): OPNsense bundles a few RUNTIME actions into the
+     * same page priv as the read view, and these bypass the backstop because
+     * they change no persistent config: service start/stop/reconfigure
+     * (page-status-services) and firewall state kill/flush
+     * (page-diagnostics-showstates). A read-only operator can therefore
+     * restart a service or drop states — runtime-only and recoverable. These
+     * cannot be separated from the view without losing the view.
+     *
+     * Maintenance: OPNsense ACL is allow-only (the sole "deny" is the
+     * `user-config-readonly` flag), so a new page priv added by a future
+     * OPNsense release must be added here for RO users to reach it. Re-run
+     * the catalog dump (`(new OPNsense\\Core\\ACL())->getPrivList()`),
+     * diff against this list, and add any new non-destructive page.
      *
      * provision() performs full desired-state reconciliation against this
-     * list on every call (not just create-if-missing): a priv added here is
-     * added to the group; a priv removed here is removed from the group. The
-     * ensure_readonly.php script calls provision() from the +MANIFEST
-     * post-install hook, so editing this constant and shipping a new package
-     * propagates the change to every managed device at next upgrade —
-     * no migration, no manual repair required.
-     *
-     * Validated against the lab OPNsense priv catalog
-     * (`(new OPNsense\Core\ACL())->getPrivList()` on 10.255.10.2). Contains
-     * ONLY dashboard / status / read-only diagnostics view pages. It
-     * deliberately excludes every `page-firewall-*`, `page-system-*` config
-     * page, `page-services-*`, `page-interfaces-*-edit`, and the destructive
-     * diagnostics (factory defaults, halt, reboot, backup/restore).
-     *
-     * `user-config-readonly` ("System: Deny config write") is the global
-     * backstop: even if a listed page exposes a POST, OPNsense rejects the
-     * write. It is the single most important entry here.
+     * list on every call (not just create-if-missing). ensure_readonly.php
+     * calls provision() from the +MANIFEST post-install hook, so editing
+     * this constant and shipping a new package propagates the change to
+     * every managed device at next upgrade — no migration, no manual repair.
      */
     const READONLY_PRIVS = [
-        // Global deny-config-write backstop (defense-in-depth).
-        'user-config-readonly',
+        // --- Backstop ---
+        'user-config-readonly',  // System: Deny config write
 
-        // Dashboard / lobby (read-only landing).
-        'page-system-login-logout',     // Lobby: Dashboard
-        'page-system-status',           // System: Status (read-only report)
+        // --- Firewall ---
+        'page-filter-api',  // Firewall: Rules [new]
+        'page-filter-snat-api',  // Firewall: NAT: Source NAT
+        'page-firewall-alias-edit',  // Firewall: Alias: Edit
+        'page-firewall-aliases',  // Firewall: Aliases
+        'page-firewall-categories',  // Firewall: Categories
+        'page-firewall-nat-1-1-edit',  // Firewall: NAT: 1:1
+        'page-firewall-nat-npt',  // Firewall: NAT: NPTv6
+        'page-firewall-nat-outbound',  // Firewall: NAT: Outbound
+        'page-firewall-nat-outbound-edit',  // Firewall: NAT: Outbound: Edit
+        'page-firewall-nat-portforward-edit',  // Firewall: NAT: Destination NAT
+        'page-firewall-rules',  // Firewall: Rules
+        'page-firewall-rules-edit',  // Firewall: Rules: Edit
+        'page-firewall-schedules',  // Firewall: Schedules
+        'page-firewall-schedules-edit',  // Firewall: Schedules: Edit
+        'page-firewall-scrub',  // Firewall: Normalization
+        'page-firewall-trafficshaper',  // Firewall: Shaper
+        'page-firewall-virtualipaddress-edit',  // Interfaces: Virtual IPs: Settings
 
-        // Status pages (read-only by design).
-        'page-status-carp',
-        'page-status-dhcpleases',
-        'page-status-dhcpv6leases',
-        'page-status-dnsoverview',
-        'page-status-habackup',
-        'page-status-interfaces',
-        'page-status-ipsec',
-        'page-status-ipsec-leases',
-        'page-status-ipsec-sad',
-        'page-status-ipsec-spd',
-        'page-status-ntp',
-        'page-status-openvpn',
-        'page-status-services',
-        'page-status-trafficgraph',     // Reporting: Traffic
-        'page-status-systemlogs-ipsecvpn',
-        'page-status-systemlogs-ntpd',
-        'page-status-systemlogs-openvpn',
-        'page-status-systemlogs-portalauth',
-        'page-status-systemlogs-ppp',
-        'page-status-systemlogs-routing',
-        'page-status-systemlogs-wireless',
-        'page-diagnostics-wirelessstatus', // Status: Wireless
+        // --- Interfaces ---
+        'page-hostdiscovery',  // Interfaces: Neighbors: Automatic discovery
+        'page-interfaces',  // Interfaces: WAN
+        'page-interfaces-assignnetworkports',  // Interfaces: Assign network ports
+        'page-interfaces-bridge-edit',  // Interfaces: Bridge
+        'page-interfaces-gif-edit',  // Interfaces: GIF
+        'page-interfaces-gre-edit',  // Interfaces: GRE
+        'page-interfaces-groups-edit',  // Firewall: Groups
+        'page-interfaces-lagg-edit',  // Interfaces: LAGG: Edit
+        'page-interfaces-loopback',  // Interfaces: Loopback
+        'page-interfaces-neighbor',  // Interfaces: Neighbors
+        'page-interfaces-ppps',  // Interfaces: PPPs
+        'page-interfaces-ppps-edit',  // Interfaces: PPPs: Edit
+        'page-interfaces-vlan-edit',  // Interfaces: VLAN
+        'page-interfaces-vxlan',  // Interfaces: VXLAN
+        'page-interfaces-wireless',  // Interfaces: Wireless
+        'page-interfaces-wireless-edit',  // Interfaces: Wireless edit
 
-        // Diagnostics — read-only views / troubleshooting only.
-        'page-diagnostics-arptable',
-        'page-diagnostics-ndptable',
-        'page-diagnostics-authentication',
-        'page-diagnostics-configurationhistory',
-        'page-diagnostics-dns_diagnostics',
-        'page-diagnostics-health',
-        'page-diagnostics-limiter-info',
-        'page-diagnostics-netstat',
-        'page-diagnostics-networkinsight',
-        'page-diagnostics-packetcapture',
-        'page-diagnostics-pf-info',
-        'page-diagnostics-ping',
-        'page-diagnostics-routingtables',
-        'page-diagnostics-showstates',
-        'page-diagnostics-system-activity',
-        'page-diagnostics-system-pftop',
-        'page-diagnostics-tables',
-        'page-diagnostics-testport',
-        'page-diagnostics-traceroute',
+        // --- Services ---
+        'page-dhcp-kea-ctrl-agent',  // Services: DHCP: Kea Ctrl Agent
+        'page-dhcp-kea-ddns',  // Services: DHCP: Kea DDNS Agent
+        'page-dhcp-kea-v4',  // Services: DHCP: Kea(v4)
+        'page-dhcp-kea-v6',  // Services: DHCP: Kea(v6)
+        'page-services-captiveportal',  // Services: Captive Portal
+        'page-services-dhcprelay',  // Services: DHCRelay
+        'page-services-dhcpserver',  // Services: ISC DHCPv4
+        'page-services-dhcpserver-editstaticmapping',  // Services: ISC DHCPv4: Edit
+        'page-services-dhcpserverv6-editstaticmapping',  // Services: ISC DHCPv6: Edit
+        'page-services-dhcpv6server',  // Services: ISC DHCPv6
+        'page-services-dnsforwarder',  // Services: Dnsmasq DNS/DHCP: Settings
+        'page-services-dnsresolver',  // Services: Unbound DNS: General
+        'page-services-dnsresolver-acls',  // Services: Unbound DNS: Access Lists
+        'page-services-dnsresolver-advanced',  // Services: Unbound DNS: Advanced
+        'page-services-dnsresolver-overrides',  // Services: Unbound DNS: Edit Host and Domain Override
+        'page-services-ids',  // Services: Intrusion Detection
+        'page-services-monit',  // WebCfg - Services: Monit System Monitoring page
+        'page-services-netdefense',  // Services: NetDefense
+        'page-services-ntp-gps',  // Services: NTP GPS
+        'page-services-ntp-pps',  // Services: NTP PPS
+        'page-services-ntpd',  // Services: NTP
+        'page-services-opendns',  // Services: DNS Filter
+        'page-services-qemuguestagent',  // Services: QEMU Guest Agent
+        'page-services-router-advertisements',  // Services: Router Advertisements: Settings
+        'page-services-unbound',  // Services: Unbound
 
-        // Log viewers (read-only).
-        'page-diagnostics-logs-firewall-dynamic',
-        'page-diagnostics-logs-firewall-general',
-        'page-diagnostics-logs-firewall-plain',
-        'page-diagnostics-logs-firewall-summary',
-        'page-diagnostics-logs-gateways',
-        'page-diagnostics-logs-system',
+        // --- VPN ---
+        'page-openvpn-client-export',  // VPN: OpenVPN: Client Export Utility
+        'page-openvpn-csc',  // VPN: OpenVPN: Client Specific Override
+        'page-openvpn-instances',  // VPN: OpenVPN: Instances
+        'page-tailscale-config',  // Tailscale
+        'page-vpn-ipsec-connections',  // VPN: IPsec: Connections
+        'page-vpn-ipsec-editkeys',  // VPN: IPsec: Edit Pre-Shared Keys
+        'page-vpn-ipsec-keypairs',  // VPN: IPsec: Key Pairs
+        'page-wireguard-config',  // VPN: WireGuard: Configuration
+        'page-wireguard-diagnostics',  // VPN: WireGuard: Status
+        'page-wireguard-logs',  // VPN: WireGuard: Log
+
+        // --- Status / Reporting ---
+        'page-status-carp',  // Interfaces: Virtual IPs: Status
+        'page-status-dhcpleases',  // Services: ISC DHCPv4: Leases
+        'page-status-dhcpv6leases',  // Status: ISC DHCPv6: Leases
+        'page-status-dnsoverview',  // Status: DNS Overview
+        'page-status-habackup',  // Status: HA backup
+        'page-status-interfaces',  // Status: Interfaces
+        'page-status-ipsec',  // Status: IPsec
+        'page-status-ipsec-leases',  // Status: IPsec: Leasespage
+        'page-status-ipsec-sad',  // Status: IPsec: SAD
+        'page-status-ipsec-spd',  // Status: IPsec: SPD
+        'page-status-ntp',  // Status: NTP
+        'page-status-openvpn',  // Status: OpenVPN
+        'page-status-services',  // Status: Services
+        'page-status-systemlogs-ipsecvpn',  // Status: System logs: IPsec VPN
+        'page-status-systemlogs-ntpd',  // Status: System logs: NTP
+        'page-status-systemlogs-openvpn',  // Status: System logs: OpenVPN
+        'page-status-systemlogs-portalauth',  // Status: System logs: Captive portal
+        'page-status-systemlogs-ppp',  // Status: System logs: PPP
+        'page-status-systemlogs-routing',  // Status: System logs: Routing
+        'page-status-systemlogs-wireless',  // Status: System logs: Wireless
+        'page-status-trafficgraph',  // Reporting: Traffic
+
+        // --- Diagnostics & Logs ---
+        'page-diagnostics-arptable',  // Diagnostics: ARP Table
+        'page-diagnostics-authentication',  // Diagnostics: Authentication
+        'page-diagnostics-configurationhistory',  // Diagnostics: Configuration History
+        'page-diagnostics-crash-reporter',  // System: Crash Reporter
+        'page-diagnostics-dns_diagnostics',  // Interfaces: Diagnostics: DNS Lookup
+        'page-diagnostics-health',  // Diagnostics: System Health
+        'page-diagnostics-limiter-info',  // Diagnostics: Shaper status
+        'page-diagnostics-logs-dhcp',  // Services: ISC DHCPv4: Log File
+        'page-diagnostics-logs-dnsmasq',  // Services: Dnsmasq DNS/DHCP: Log File
+        'page-diagnostics-logs-firewall-dynamic',  // Diagnostics: Logs: Firewall: Live View
+        'page-diagnostics-logs-firewall-general',  // Diagnostics: Log: Firewall: General
+        'page-diagnostics-logs-firewall-plain',  // Diagnostics: Logs: Firewall: Plain View
+        'page-diagnostics-logs-firewall-summary',  // Diagnostics: Logs: Firewall: Summary View
+        'page-diagnostics-logs-gateways',  // Diagnostics: Logs: Gateways
+        'page-diagnostics-logs-hostdiscovery',  // Interfaces: Neighbors: Discovery Log
+        'page-diagnostics-logs-kea',  // Services: DHCP: Kea Log File
+        'page-diagnostics-logs-resolver',  // Services: Unbound DNS: Log File
+        'page-diagnostics-logs-settings-targets',  // System: Settings: Logging
+        'page-diagnostics-logs-system',  // Diagnostics: Logs: System
+        'page-diagnostics-ndptable',  // Diagnostics: NDP Table
+        'page-diagnostics-netflow',  // Diagnostics: Netflow configuration
+        'page-diagnostics-netstat',  // Diagnostics: Netstat
+        'page-diagnostics-networkinsight',  // Diagnostics: Network Insight
+        'page-diagnostics-packetcapture',  // Diagnostics: Packet Capture
+        'page-diagnostics-pf-info',  // Diagnostics: Firewall statistics
+        'page-diagnostics-ping',  // Diagnostics: Ping
+        'page-diagnostics-routingtables',  // Diagnostics: Routing tables
+        'page-diagnostics-showstates',  // Diagnostics: Show States
+        'page-diagnostics-system-activity',  // Diagnostics: System Activity
+        'page-diagnostics-system-pftop',  // Diagnostics: Firewall sessions
+        'page-diagnostics-tables',  // Diagnostics: PF Table IP addresses
+        'page-diagnostics-testport',  // Diagnostics: Test Port
+        'page-diagnostics-traceroute',  // Diagnostics: Traceroute
+        'page-diagnostics-wirelessstatus',  // Status: Wireless
+
+        // --- System (read views; writes blocked by backstop) ---
+        'page-system-advanced-admin',  // System: Advanced: Admin Access Page
+        'page-system-advanced-firewall',  // System: Advanced: Firewall and NAT
+        'page-system-advanced-misc',  // System: Advanced: Miscellaneous
+        'page-system-advanced-network',  // Interfaces: Settings
+        'page-system-advanced-sysctl',  // System: Advanced: Tunables
+        'page-system-authservers',  // System: Authentication Servers
+        'page-system-camanager',  // System: CA Manager
+        'page-system-certmanager',  // System: Certificate Manager
+        'page-system-crlmanager',  // System: CRL Manager
+        'page-system-cron',  // System: Settings: Cron
+        'page-system-gatewaygroups',  // System: Gateway Groups
+        'page-system-gateways',  // System: Gateways
+        'page-system-gateways-editgatewaygroups',  // System: Gateways: Edit Gateway Groups
+        'page-system-generalsetup',  // System: General Setup
+        'page-system-groupmanager',  // System: Access: Groups
+        'page-system-hasync',  // System: High Availability
+        'page-system-license',  // Lobby: License
+        'page-system-login-logout',  // Lobby: Dashboard
+        'page-system-staticroutes',  // System: Static Routes
+        'page-system-status',  // System: Status
+        'page-system-usermanager',  // System: Access: Users
+        'page-system-usermanager-addprivs',  // System: Access: Privileges
+        'page-system-usermanager-passwordmg',  // Lobby: Password
     ];
 
     /**
