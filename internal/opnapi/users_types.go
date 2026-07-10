@@ -7,13 +7,23 @@ import "strings"
 const NDAgentTemplateTagPrefix = "[nd-template:"
 
 // ProtectedUsernames lists usernames that cannot be modified via SYNC.
+// netdefense-agent and netdefense-readonly are provisioned by the plugin
+// itself (API credentials and the forged-session read-only identity,
+// respectively) and must never be reachable through SYNC_API create/modify
+// or orphan-delete.
 var ProtectedUsernames = map[string]bool{
-	"root": true,
+	"root":                true,
+	"netdefense-agent":    true,
+	"netdefense-readonly": true,
 }
 
 // ProtectedGroupNames lists group names that cannot be modified via SYNC.
+// netdefense-readonly is provisioned alongside the same-named user above;
+// both the user and the group must be protected or the co-named group's
+// priv set (the read-only ACL allowlist) would remain SYNC-writable.
 var ProtectedGroupNames = map[string]bool{
-	"admins": true,
+	"admins":              true,
+	"netdefense-readonly": true,
 }
 
 // User represents an OPNsense user for API operations.

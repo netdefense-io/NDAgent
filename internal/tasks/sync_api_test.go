@@ -1,6 +1,10 @@
 package tasks
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -287,5 +291,118 @@ func TestParseAPIRules_CaseInsensitivePosition(t *testing.T) {
 		if rules[0].Position != tc.expected {
 			t.Errorf("Position %q: got %s, want %s", tc.input, rules[0].Position, tc.expected)
 		}
+	}
+}
+
+// TestParseUserContent_RejectsProtectedIdentities is revert-sensitive for the
+// SYNC_API protected-identity list: a snippet naming the agent's own
+// provisioned users must be rejected at parse time, before any add/set call.
+func TestParseUserContent_RejectsProtectedIdentities(t *testing.T) {
+	protected := []string{"root", "netdefense-agent", "netdefense-readonly"}
+
+	for _, name := range protected {
+		t.Run(name, func(t *testing.T) {
+			content := `{"name": "` + name + `", "password": "$2y$hash", "scope": "user"}`
+			_, err := parseUserContent(content, nil)
+			if err == nil {
+				t.Fatalf("parseUserContent(%q) expected error for protected user, got nil", name)
+			}
+		})
+	}
+
+	// Sanity: a non-protected user still parses fine.
+	_, err := parseUserContent(`{"name": "regularuser", "password": "$2y$hash", "scope": "user"}`, nil)
+	if err != nil {
+		t.Errorf("parseUserContent(regularuser) unexpected error: %v", err)
+	}
+}
+
+// TestParseGroupContent_RejectsProtectedIdentities mirrors the user case for
+// group snippets.
+func TestParseGroupContent_RejectsProtectedIdentities(t *testing.T) {
+	protected := []string{"admins", "netdefense-readonly"}
+
+	for _, name := range protected {
+		t.Run(name, func(t *testing.T) {
+			content := `{"name": "` + name + `", "description": "test"}`
+			_, err := parseGroupContent(content, nil)
+			if err == nil {
+				t.Fatalf("parseGroupContent(%q) expected error for protected group, got nil", name)
+			}
+		})
+	}
+
+	// Sanity: a non-protected group still parses fine.
+	_, err := parseGroupContent(`{"name": "regulargroup", "description": "test"}`, nil)
+	if err != nil {
+		t.Errorf("parseGroupContent(regulargroup) unexpected error: %v", err)
+	}
+}
+
+// TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities exercises
+// the full SYNC_API orphan-delete phase (5/6) against a fake OPNsense API
+// server: netdefense-agent and netdefense-readonly are reported as
+// "managed" (tagged) but absent from the desired set, which is exactly the
+// orphan-delete trigger condition. If ProtectedUsernames/ProtectedGroupNames
+// is reverted, this test fails by observing a DELETE call against the
+// provisioned identities.
+func TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities(t *testing.T) {
+	var userDeleteCalls, groupDeleteCalls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":  "user-uuid-1",
+					"name":  "netdefense-agent",
+					"descr": "NDAgent API user [nd-template:base]",
+					"uid":   "1001",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":        "group-uuid-1",
+					"name":        "netdefense-readonly",
+					"description": "NDAgent read-only group [nd-template:base]",
+					"gid":         "2001",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/user/del/", func(w http.ResponseWriter, r *http.Request) {
+		userDeleteCalls = append(userDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+	mux.HandleFunc("/auth/group/del/", func(w http.ResponseWriter, r *http.Request) {
+		groupDeleteCalls = append(groupDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	// Empty desired sets: both the protected user and the protected group
+	// are "managed but not desired", the exact orphan-delete condition.
+	result := executeSyncUsersGroups(context.Background(), client, nil, nil)
+
+	if len(userDeleteCalls) != 0 {
+		t.Errorf("expected no user delete calls, got %v (protected user netdefense-agent must never be orphan-deleted)", userDeleteCalls)
+	}
+	if len(groupDeleteCalls) != 0 {
+		t.Errorf("expected no group delete calls, got %v (protected group netdefense-readonly must never be orphan-deleted)", groupDeleteCalls)
+	}
+	if !result.Success {
+		t.Errorf("expected sync to succeed (protected skip is not an error), got errors: %+v", result)
 	}
 }

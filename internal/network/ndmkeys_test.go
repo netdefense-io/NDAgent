@@ -293,6 +293,41 @@ func TestLoadOrFetch_IgnoresCorruptCacheAndRefetches(t *testing.T) {
 	}
 }
 
+// TestFetchJWKS_TOFUVerifiesIndependentlyOfGlobalSSLVerify is the
+// revert guard for the TOFU/MITM fix: even with the global ssl_verify
+// disabled (dev/lab convenience), the first-connect JWKS fetch must
+// still validate the server's certificate as long as TOFUSSLVerify is
+// at its secure default (true). Against the self-signed test server
+// this must fail with a certificate error, proving the fetch no longer
+// piggybacks on cfg.GetTLSConfig()'s InsecureSkipVerify.
+func TestFetchJWKS_TOFUVerifiesIndependentlyOfGlobalSSLVerify(t *testing.T) {
+	primaryKid, _, primaryX := makeKeyPair(t)
+	emergencyKid, _, emergencyX := makeKeyPair(t)
+
+	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
+	defer cleanup()
+
+	cfg := &config.Config{
+		ServerHost:    host,
+		ServerPort:    port,
+		SSLVerify:     false, // global bypass — must NOT leak into the TOFU fetch
+		TOFUSSLVerify: true,  // secure default
+	}
+
+	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
+	_, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
+	if err == nil {
+		t.Fatal("expected TOFU fetch against a self-signed cert to fail when TOFUSSLVerify=true, got nil error")
+	}
+	if !strings.Contains(err.Error(), "x509") && !strings.Contains(err.Error(), "certificate") {
+		t.Errorf("error %q does not look like a TLS verification failure", err)
+	}
+
+	if _, err := os.Stat(cachePath); err == nil {
+		t.Error("cache file should not have been written after a failed TOFU fetch")
+	}
+}
+
 // Compile-time guard: ensure helper signatures match callers.
 var _ = ed25519.PublicKey{}
 var _ = fmt.Sprintf

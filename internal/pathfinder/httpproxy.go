@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -29,6 +30,11 @@ type HTTPProxy struct {
 	// Shared session for all webadmin streams
 	session   *Session
 	sessionMu sync.Mutex
+
+	// readOnly gates mutating runtime-action requests (service
+	// start/stop/restart/reload/reconfigure) within the webadmin HTTP
+	// stream. See isMutatingRuntimeAction.
+	readOnly bool
 }
 
 // NewHTTPProxy creates a new HTTP proxy for webadmin access.
@@ -68,6 +74,14 @@ func NewHTTPProxy(host string, port int, sessionMgr *SessionManager) *HTTPProxy 
 		httpClient:     client,
 		log:            logging.Named("pathfinder.httpproxy"),
 	}
+}
+
+// SetReadOnly configures whether this proxy blocks mutating runtime-action
+// requests (see isMutatingRuntimeAction). Left false by default so existing
+// callers of NewHTTPProxy are unaffected; NewTCPProxyWithConfig calls this
+// after construction when ProxyConfig.ReadOnly is set.
+func (p *HTTPProxy) SetReadOnly(readOnly bool) {
+	p.readOnly = readOnly
 }
 
 // getOrCreateSession returns the shared session, creating it if necessary.
@@ -166,6 +180,24 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			"method", req.Method,
 			"path", req.URL.Path,
 		)
+
+		// Read-only enforcement: block the residual mutating runtime-action
+		// routes (service start/stop/restart/reload/reconfigure; firewall
+		// state kill/flush/delete) that ACL allows through even for the
+		// forged read-only identity. This is a narrow denylist, NOT a
+		// method allowlist — OPNsense's grid/list views (firewall rules,
+		// aliases, NAT, WireGuard peers, users, certs, DNS) load via POST
+		// to search*/searchItem/search_* endpoints, so a GET/HEAD/OPTIONS-
+		// only allowlist would 405 every list page in the read-only WebUI.
+		if p.readOnly && isMutatingRuntimeAction(req.Method, req.URL.Path) {
+			p.log.Warnw("Refusing mutating runtime-action request in read-only session",
+				"stream_id", stream.ID(),
+				"method", req.Method,
+				"path", req.URL.Path,
+			)
+			p.sendErrorResponse(stream, http.StatusMethodNotAllowed, "Method Not Allowed (read-only session)")
+			continue
+		}
 
 		// Forward request to local OPNsense
 		resp, err := p.forwardRequest(ctx, req, session)
@@ -286,6 +318,40 @@ func removeExistingPHPSESSID(cookies string) string {
 // splitCookies splits a cookie header value into individual cookies.
 func splitCookies(cookies string) []string {
 	return strings.Split(cookies, ";")
+}
+
+// serviceActionPattern matches the OPNsense MVC service-control route family
+// (e.g. /api/core/service/restart/openvpn, /api/openvpn/service/reconfigure)
+// on any plugin namespace. This is the one runtime-action family confirmed
+// against the opnapi client / OPNsense MVC controller convention:
+// /api/<module>/service/<start|stop|restart|reload|reconfigure>[/<id>].
+var serviceActionPattern = regexp.MustCompile(`^/api/[^/]+/service/(start|stop|restart|reload|reconfigure)(/|$)`)
+
+// firewallStateActionPattern matches the diagnostics firewall-state mutators
+// exposed by OPNsense\Diagnostics\Api\FirewallController: killStates (kill by
+// filter/ruleid), flushStates (reset all states), and delState/<id>/<creator>
+// (delete a single row). These are runtime actions, not config writes, so
+// they bypass the user-config-readonly backstop the same way the
+// service-action family does. The grid itself loads via a separate
+// search-named endpoint (e.g. searchState), which this pattern's exact
+// action-name anchoring never matches.
+var firewallStateActionPattern = regexp.MustCompile(`^/api/diagnostics/firewall/(killStates|flushStates|delState)(/|$)`)
+
+// isMutatingRuntimeAction reports whether the given method+path is a
+// mutating request to a runtime-action route that OPNsense's ACL model
+// permits even for a read-only operator (see the ACL split documented in
+// CLAUDE.md: service start/stop/restart/reload/reconfigure, and firewall
+// state kill/flush, bypass the user-config-readonly backstop because they
+// are not config writes). GET/HEAD/OPTIONS are never mutating and must pass
+// through untouched — in particular, every OPNsense grid/list view loads via
+// POST to search*/searchItem/search_* endpoints, which this function does
+// not match.
+func isMutatingRuntimeAction(method, path string) bool {
+	switch method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return false
+	}
+	return serviceActionPattern.MatchString(path) || firewallStateActionPattern.MatchString(path)
 }
 
 // sendErrorResponse sends an HTTP error response to the stream.

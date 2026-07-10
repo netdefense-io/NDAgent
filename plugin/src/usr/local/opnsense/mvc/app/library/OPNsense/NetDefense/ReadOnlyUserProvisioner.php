@@ -84,6 +84,40 @@ class ReadOnlyUserProvisioner
      *                                        exfil; the GET is not gated by the backstop)
      *   - page-xmlrpclibrary                (HA config-sync XMLRPC write endpoint)
      *   - page-wizard-system                (initial-setup wizard; not a view page)
+     *   - page-services-netdefense          (this plugin's OWN full-admin priv;
+     *                                        its api/netdefense/* wildcard covers
+     *                                        settings/get — cleartext apiKey/apiSecret
+     *                                        in the model — plus settings/setupApiCreds,
+     *                                        settings/regenerateApiCreds, and
+     *                                        service/(start|stop|restart|reconfigure).
+     *                                        None of those routes are config-write
+     *                                        calls the ApiMutableModelControllerBase
+     *                                        backstop can see, so the backstop does not
+     *                                        protect them. Use the narrow
+     *                                        page-services-netdefense-status priv below
+     *                                        instead — explicit non-wildcard patterns
+     *                                        covering only the status/log routes an RO
+     *                                        operator needs.)
+     *
+     * INCLUDED (narrow substitute): page-services-netdefense-status grants only
+     * the status/log routes of this plugin (API status check, agent version /
+     * WS-connection status, ndagent service run state, ndagent log viewer)
+     * via explicit non-wildcard patterns in ACL.xml — no settings, no
+     * credentials, no service control (start/stop/restart/reconfigure). This
+     * also includes the plugin's own settings page route
+     * (ui/netdefense/settings*) — without it the page itself 403s before an
+     * RO session ever reaches the JS that fires the status calls above, so
+     * the page-level route is required for the status view to be reachable
+     * at all. It also includes api/netdefense/service/status* — the plain
+     * run-state read (ApiMutableServiceControllerBase::statusAction(),
+     * "Service running/stopped") the settings page polls on load; the
+     * pattern is a literal prefix match so it cannot collide with the
+     * mutating service/(start|stop|restart|reconfigure) routes (verified via
+     * the ACL::urlMatch() port in the priv-drift test). Safe to grant:
+     * SettingsController::indexAction() only renders the form shell, and the
+     * getAction() strip + setupApiCreds/regenerate guards below still gate
+     * the underlying data/mutation regardless of which page privs the caller
+     * holds. See ACL.xml for the exact pattern list.
      *
      * RESIDUAL (accepted): OPNsense bundles a few RUNTIME actions into the
      * same page priv as the read view, and these bypass the backstop because
@@ -164,7 +198,7 @@ class ReadOnlyUserProvisioner
         'page-services-dnsresolver-overrides',  // Services: Unbound DNS: Edit Host and Domain Override
         'page-services-ids',  // Services: Intrusion Detection
         'page-services-monit',  // WebCfg - Services: Monit System Monitoring page
-        'page-services-netdefense',  // Services: NetDefense
+        'page-services-netdefense-status',  // Services: NetDefense (status only)
         'page-services-ntp-gps',  // Services: NTP GPS
         'page-services-ntp-pps',  // Services: NTP PPS
         'page-services-ntpd',  // Services: NTP

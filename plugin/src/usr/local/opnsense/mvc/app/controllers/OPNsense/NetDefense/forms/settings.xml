@@ -34,6 +34,13 @@
         <advanced>true</advanced>
     </field>
     <field>
+        <id>settings.tofuSslVerify</id>
+        <label>TOFU Key Fetch SSL Verification</label>
+        <type>checkbox</type>
+        <help>Enable SSL certificate verification for the first-connect trust key fetch. Kept on even if SSL Verification above is disabled, so it stays independently protected against a rogue key being planted before anything is pinned.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
         <id>settings.logLevel</id>
         <label>Log Level</label>
         <type>dropdown</type>

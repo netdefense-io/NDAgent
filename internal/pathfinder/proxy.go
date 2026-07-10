@@ -53,7 +53,9 @@ type ProxyConfig struct {
 	// proxies only the read-only webadmin HTTP service. This is the
 	// server-side enforcement of read-only sessions: it holds regardless
 	// of which stream/service the (possibly modified) client requests, so
-	// an RO caller can never obtain a terminal/shell.
+	// an RO caller can never obtain a terminal/shell. It is also threaded
+	// into the HTTPProxy itself (see HTTPProxy.SetReadOnly) so mutating
+	// runtime-action requests within the webadmin stream are denylisted.
 	ReadOnly bool
 }
 
@@ -71,6 +73,7 @@ func NewTCPProxyWithConfig(cfg ProxyConfig) *TCPProxy {
 	}
 	sessionMgr := NewSessionManager(cfg.WebadminUser, cfg.WebadminSessionDir)
 	httpProxy := NewHTTPProxy("127.0.0.1", port, sessionMgr)
+	httpProxy.SetReadOnly(cfg.ReadOnly)
 
 	return &TCPProxy{
 		ctx:          context.Background(),

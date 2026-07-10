@@ -585,6 +585,15 @@
                         </td>
                     </tr>
                     <tr>
+                        <td><strong>{{ lang._('TOFU Key Fetch SSL Verification') }}</strong></td>
+                        <td>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.tofuSslVerify" name="settings.tofuSslVerify" checked> {{ lang._('Enable SSL certificate verification for the first-connect trust key fetch') }}
+                            </label>
+                            <div class="help-block">{{ lang._('Kept on even if SSL Verification above is disabled, so the one-time trust key fetch stays protected against a rogue key being planted before anything is pinned.') }}</div>
+                        </td>
+                    </tr>
+                    <tr>
                         <td><strong>{{ lang._('Pathfinder Address') }}</strong></td>
                         <td>
                             <input type="text" class="form-control" id="settings.pathfinderHost" name="settings.pathfinderHost" placeholder="https://pathfinder.netdefense.io">

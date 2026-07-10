@@ -17,6 +17,12 @@ server_port=8443
 # SSL certificate verification (disable only for testing)
 ssl_verify=true
 
+# SSL certificate verification for the first-connect trust key fetch
+# (TOFU). Independent of ssl_verify above — defaults to true even when
+# ssl_verify is disabled, so that toggle alone can't be used to plant a
+# rogue key before anything is pinned. Disable only for testing.
+tofu_ssl_verify=true
+
 # Path to OPNsense config.xml file
 config_xml_path=/conf/config.xml
 

@@ -8,6 +8,7 @@
 // `rm /var/db/ndagent/ndm-keys.json && service ndagent restart` to force a
 // re-TOFU against the current broker JWKS.
 package network
+
 import (
 	"context"
 	"crypto/ed25519"
@@ -31,17 +32,17 @@ import (
 const DefaultNDMKeysCachePath = "/var/db/ndagent/ndm-keys.json"
 
 const (
-	ndmKeysFetchTimeout    = 10 * time.Second
-	ndmKeysFetchRetries    = 3
+	ndmKeysFetchTimeout        = 10 * time.Second
+	ndmKeysFetchRetries        = 3
 	ndmKeysFetchInitialBackoff = 1 * time.Second
-	ndmKeysCacheVersion    = 1
+	ndmKeysCacheVersion        = 1
 )
 
 // ndmKeysCacheFile is the persistent on-disk shape.
 type ndmKeysCacheFile struct {
-	Version    int    `json:"version"`
-	FetchedAt  string `json:"fetched_at"`
-	BrokerHost string `json:"broker_host"`
+	Version    int         `json:"version"`
+	FetchedAt  string      `json:"fetched_at"`
+	BrokerHost string      `json:"broker_host"`
 	Primary    ndmKeyEntry `json:"primary"`
 	Emergency  ndmKeyEntry `json:"emergency"`
 }
@@ -103,12 +104,21 @@ func LoadOrFetchNDMKeys(
 	if err := writeCache(cachePath, cached); err != nil {
 		return nil, nil, fmt.Errorf("ndm trust set cache write: %w", err)
 	}
-	log.Warnw("TOFU pinned NDM trust set on first fetch",
-		"primary_kid", cached.Primary.KID,
-		"emergency_kid", cached.Emergency.KID,
-		"broker_host", cfg.ServerHost,
-		"cache_path", cachePath,
-	)
+	if !cfg.TOFUSSLVerify {
+		log.Warnw("TOFU JWKS fetch performed with TLS verification DISABLED — vulnerable to MITM key-planting",
+			"primary_kid", cached.Primary.KID,
+			"emergency_kid", cached.Emergency.KID,
+			"broker_host", cfg.ServerHost,
+			"cache_path", cachePath,
+		)
+	} else {
+		log.Warnw("TOFU pinned NDM trust set on first fetch",
+			"primary_kid", cached.Primary.KID,
+			"emergency_kid", cached.Emergency.KID,
+			"broker_host", cfg.ServerHost,
+			"cache_path", cachePath,
+		)
+	}
 	return cacheToMaps(cached, log)
 }
 
@@ -159,7 +169,7 @@ func fetchJWKSWithRetry(ctx context.Context, cfg *config.Config) (*jwksResponse,
 	client := &http.Client{
 		Timeout: ndmKeysFetchTimeout,
 		Transport: &http.Transport{
-			TLSClientConfig: cfg.GetTLSConfig(),
+			TLSClientConfig: cfg.GetTOFUTLSConfig(),
 		},
 	}
 	backoff := ndmKeysFetchInitialBackoff

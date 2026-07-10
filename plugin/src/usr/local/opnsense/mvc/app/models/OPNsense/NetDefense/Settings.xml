@@ -26,6 +26,15 @@
             <Default>1</Default>
             <Required>Y</Required>
         </sslVerify>
+        <tofuSslVerify type="BooleanField">
+            <!-- Governs TLS verification for the first-connect NDM JWKS
+                 fetch (TOFU key pinning), independently of sslVerify.
+                 Stays on even when sslVerify is disabled for lab/dev use,
+                 so that toggle can't be used to plant a rogue key at the
+                 one moment nothing is pinned yet. -->
+            <Default>1</Default>
+            <Required>Y</Required>
+        </tofuSslVerify>
         <logLevel type="OptionField">
             <Default>INFO</Default>
             <Required>Y</Required>

@@ -10,4 +10,16 @@
             <pattern>api/diagnostics/log/core/ndagent/*</pattern>
         </patterns>
     </page-services-netdefense>
+    <page-services-netdefense-status>
+        <name>Services: NetDefense (status only)</name>
+        <description>Read-only NetDefense Agent status: API credential status, agent version/connection status, ndagent service run state, and log diagnostics. No settings, credentials, or service control (start/stop/restart/reconfigure).</description>
+        <patterns>
+            <pattern>ui/netdefense/settings*</pattern>
+            <pattern>api/netdefense/settings/getApiStatus*</pattern>
+            <pattern>api/netdefense/service/agentStatus*</pattern>
+            <pattern>api/netdefense/service/status*</pattern>
+            <pattern>ui/diagnostics/log/core/ndagent/*</pattern>
+            <pattern>api/diagnostics/log/core/ndagent/*</pattern>
+        </patterns>
+    </page-services-netdefense-status>
 </acl>

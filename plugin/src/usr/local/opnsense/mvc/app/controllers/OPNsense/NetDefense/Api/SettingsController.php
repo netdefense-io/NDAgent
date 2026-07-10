@@ -29,6 +29,7 @@
 namespace OPNsense\NetDefense\Api;
 
 use OPNsense\Base\ApiMutableModelControllerBase;
+use OPNsense\Core\ACL;
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
@@ -42,6 +43,26 @@ class SettingsController extends ApiMutableModelControllerBase
 {
     protected static $internalModelName = 'settings';
     protected static $internalModelClass = '\OPNsense\NetDefense\Settings';
+
+    /**
+     * Retrieve model settings, omitting the OPNsense API credentials.
+     * apiKey/apiSecret are never read back by settings.volt (the web UI
+     * doesn't bind them to any form field), so this is zero UI impact.
+     * Defense-in-depth on top of the ACL split: this route is gated by the
+     * full-admin page-services-netdefense priv (api/netdefense/* wildcard),
+     * but a future manual ACL misgrant should not be able to read secrets
+     * off this endpoint regardless of caller.
+     * @return array settings
+     */
+    public function getAction()
+    {
+        $result = parent::getAction();
+        if (isset($result[static::$internalModelName])) {
+            unset($result[static::$internalModelName]['apiKey']);
+            unset($result[static::$internalModelName]['apiSecret']);
+        }
+        return $result;
+    }
 
     /**
      * Check if API credentials are configured
@@ -67,6 +88,13 @@ class SettingsController extends ApiMutableModelControllerBase
     {
         if (!$this->request->isPost()) {
             return ["result" => "failed", "message" => "POST request required"];
+        }
+
+        // Explicit read-only guard, on top of the ACL split: mirrors the
+        // same check ApiMutableModelControllerBase::save() uses so a
+        // future manual ACL misgrant can't reach Config::save() below.
+        if ((new ACL())->hasPrivilege($this->getUserName(), 'user-config-readonly')) {
+            return ["result" => "failed", "message" => "Read-only session: write denied"];
         }
 
         Config::getInstance()->lock();
@@ -123,6 +151,13 @@ class SettingsController extends ApiMutableModelControllerBase
     {
         if (!$this->request->isPost()) {
             return ["result" => "failed", "message" => "POST request required"];
+        }
+
+        // Explicit read-only guard, on top of the ACL split: mirrors the
+        // same check ApiMutableModelControllerBase::save() uses so a
+        // future manual ACL misgrant can't reach Config::save() below.
+        if ((new ACL())->hasPrivilege($this->getUserName(), 'user-config-readonly')) {
+            return ["result" => "failed", "message" => "Read-only session: write denied"];
         }
 
         Config::getInstance()->lock();

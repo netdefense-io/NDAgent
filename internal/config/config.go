@@ -24,6 +24,13 @@ type Config struct {
 	// SSL settings
 	SSLVerify bool `mapstructure:"ssl_verify"`
 
+	// TOFUSSLVerify governs TLS verification for the first-connect NDM
+	// JWKS fetch (TOFU key pinning) independently of SSLVerify. It
+	// defaults to true even when ssl_verify=false is set for dev/lab
+	// convenience, so a MITM can't plant a rogue key at the one moment
+	// nothing is pinned yet.
+	TOFUSSLVerify bool `mapstructure:"tofu_ssl_verify"`
+
 	// File paths
 	ConfigXMLPath string `mapstructure:"config_xml_path"`
 	PIDFile       string `mapstructure:"pid_file"`
@@ -88,6 +95,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("server_host", "localhost")
 	v.SetDefault("server_port", 8443)
 	v.SetDefault("ssl_verify", true)
+	v.SetDefault("tofu_ssl_verify", true)
 	v.SetDefault("config_xml_path", "/conf/config.xml")
 	v.SetDefault("pid_file", "/var/run/ndagent.pid")
 	v.SetDefault("log_level", "INFO")
@@ -270,6 +278,25 @@ func (c *Config) computeURIs() {
 // GetTLSConfig returns a TLS configuration based on the ssl_verify setting.
 func (c *Config) GetTLSConfig() *tls.Config {
 	if c.SSLVerify {
+		return &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
+	// Warning: Insecure - skips certificate verification
+	return &tls.Config{
+		InsecureSkipVerify: true,
+		MinVersion:         tls.VersionTLS12,
+	}
+}
+
+// GetTOFUTLSConfig returns a TLS configuration for the first-connect NDM
+// JWKS fetch (TOFU key pinning). It honors TOFUSSLVerify independently of
+// SSLVerify — the global toggle is not permitted to weaken the one fetch
+// where nothing is pinned yet, so ssl_verify=false alone never disables
+// verification here.
+func (c *Config) GetTOFUTLSConfig() *tls.Config {
+	if c.TOFUSSLVerify {
 		return &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		}
