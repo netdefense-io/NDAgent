@@ -35,6 +35,13 @@ log_level=INFO
 # Test mode: blocks dangerous operations (SHUTDOWN, REBOOT)
 test_mode=false
 
+# Device-local defense-in-depth: reject individual USER/GROUP/ZABBIX_*
+# SYNC_API snippet elements carrying a dangerous field (broad priv,
+# scope=system, interactive shell, authorizedkeys, Zabbix remote
+# commands, sudo_root) instead of applying them. Default false — the
+# primary control is NDManager's producer-side org:su gate.
+reject_dangerous_snippets=false
+
 # Pathfinder settings (for remote access via CONNECT task)
 # pathfinder_host=https://pathfinder.netdefense.io
 # pathfinder_tls_verify=true

@@ -360,7 +360,7 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 
 	// Execute sync for users and groups if present
 	if len(users) > 0 || len(groups) > 0 {
-		userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups)
+		userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups, ws.RejectDangerousSnippets())
 		syncResult.Results = append(syncResult.Results, userGroupResult.Results...)
 		syncResult.Errors = append(syncResult.Errors, userGroupResult.Errors...)
 		if !userGroupResult.Success {
@@ -393,7 +393,7 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 
 	// Execute sync for Zabbix entities. Same orphan-cleanup-always
 	// semantics, with graceful skip when os-zabbix-agent isn't installed.
-	zabbixResult := executeSyncZabbix(ctx, apiClient, zabbixSettings, zabbixUserParams, zabbixAliases)
+	zabbixResult := executeSyncZabbix(ctx, apiClient, zabbixSettings, zabbixUserParams, zabbixAliases, ws.RejectDangerousSnippets())
 	syncResult.Results = append(syncResult.Results, zabbixResult.Results...)
 	syncResult.Errors = append(syncResult.Errors, zabbixResult.Errors...)
 	if !zabbixResult.Success {
@@ -1349,11 +1349,67 @@ func parseBoolField(v interface{}) bool {
 
 // executeSyncUsersGroups performs sync for users and groups.
 // Groups are synced first (users may reference groups).
-func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload) SyncAPIResult {
+//
+// rejectDangerous is the device-local opt-in gate (config: reject_dangerous_
+// snippets, default false). When true, any USER/GROUP element carrying a
+// dangerous field (see opnapi.DangerousUserFields/DangerousGroupFields) is
+// rejected instead of created/updated: it's dropped from the create/update
+// pass and recorded as a "rejected" result, but left OUT of the orphan-
+// delete decision below — the gate refuses new dangerous mutations, it does
+// not delete pre-existing device state that happens to match the same
+// criteria. When false, behavior is unchanged from before this gate existed.
+func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload, rejectDangerous bool) SyncAPIResult {
 	log := logging.Named("SYNC_API")
 
 	var results []SyncAPIItemResult
 	var errors []string
+
+	// Dangerous-field gate. applyUsers/applyGroups (the accepted subset)
+	// drive the create/update phases below; the full, unfiltered users/
+	// groups slices still drive the desired-name sets used for orphan
+	// deletion further down, so a rejected element is neither applied nor
+	// deleted — it's simply left alone.
+	applyUsers := users
+	applyGroups := groups
+	if rejectDangerous {
+		applyUsers = make([]opnapi.APIUserPayload, 0, len(users))
+		for _, u := range users {
+			if fields := opnapi.DangerousUserFields(u); len(fields) > 0 {
+				log.Warnw("SYNC_API: rejected USER snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
+					"name", u.Name,
+					"fields", fields,
+				)
+				results = append(results, SyncAPIItemResult{
+					Type:   "user",
+					Name:   u.Name,
+					Action: "rejected",
+					Status: "blocked",
+					Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+				})
+				continue
+			}
+			applyUsers = append(applyUsers, u)
+		}
+
+		applyGroups = make([]opnapi.APIGroupPayload, 0, len(groups))
+		for _, g := range groups {
+			if fields := opnapi.DangerousGroupFields(g); len(fields) > 0 {
+				log.Warnw("SYNC_API: rejected GROUP snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
+					"name", g.Name,
+					"fields", fields,
+				)
+				results = append(results, SyncAPIItemResult{
+					Type:   "group",
+					Name:   g.Name,
+					Action: "rejected",
+					Status: "blocked",
+					Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+				})
+				continue
+			}
+			applyGroups = append(applyGroups, g)
+		}
+	}
 
 	// Phase 1: Get all users and groups for lookups
 	allUsers, err := client.ListAllUsers(ctx)
@@ -1401,7 +1457,7 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	}
 
 	// Phase 2: Create/Update groups first (users depend on groups)
-	for _, groupPayload := range groups {
+	for _, groupPayload := range applyGroups {
 		existingUUID, exists := groupUUIDLookup[groupPayload.Name]
 
 		action := "created"
@@ -1445,7 +1501,7 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	groupUUIDLookup = opnapi.BuildGroupUUIDLookup(allGroups)
 
 	// Phase 3: Create/Update users (after groups exist)
-	for _, userPayload := range users {
+	for _, userPayload := range applyUsers {
 		existingUUID, exists := userUUIDLookup[userPayload.Name]
 
 		action := "created"
@@ -1497,8 +1553,10 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	userUUIDLookup = opnapi.BuildUserUUIDLookup(allUsers)
 	managedUsers = opnapi.FilterManagedUsers(allUsers)
 
-	// Phase 4: Update groups with member UIDs (now that users exist)
-	for _, groupPayload := range groups {
+	// Phase 4: Update groups with member UIDs (now that users exist). Uses
+	// applyGroups, not groups — a rejected group's full priv/description
+	// must not get re-pushed here under cover of "just updating members".
+	for _, groupPayload := range applyGroups {
 		if len(groupPayload.Members) == 0 {
 			continue // No members to update
 		}

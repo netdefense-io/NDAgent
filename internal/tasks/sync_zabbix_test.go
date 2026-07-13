@@ -1,7 +1,14 @@
 package tasks
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
 
 func TestParseAPIZabbixSettings_Singleton(t *testing.T) {
@@ -199,5 +206,288 @@ func TestZabbixParsersIgnoreOtherTypes(t *testing.T) {
 	aliases, err := parseAPIZabbixAliases(payload)
 	if err != nil || len(aliases) != 0 {
 		t.Errorf("zabbix alias parser leaked: aliases=%+v err=%v", aliases, err)
+	}
+}
+
+// newZabbixTestServer stands up a fake OPNsense zabbixagent API sufficient
+// for executeSyncZabbix's happy path: empty search results (no pre-existing
+// managed rows), settings/get returns an empty baseline, and every mutating
+// endpoint succeeds. Returns the client plus counters/capture slices tests
+// assert on.
+func newZabbixTestServer(t *testing.T) (client *opnapi.Client, setSettingsCalls *int, addedUserParamKeys *[]string, reconfigureCalls *int) {
+	t.Helper()
+	var setCalls int
+	var ups []string
+	var reconfigures int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zabbixagent/settings/searchUserparameters/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/get", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/set", func(w http.ResponseWriter, r *http.Request) {
+		setCalls++
+		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
+	})
+	mux.HandleFunc("/zabbixagent/settings/addUserparameter", func(w http.ResponseWriter, r *http.Request) {
+		var wrapper opnapi.ZabbixUserParameterWrapper
+		_ = json.NewDecoder(r.Body).Decode(&wrapper)
+		ups = append(ups, wrapper.UserParameter.Key)
+		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved", UUID: "up-" + wrapper.UserParameter.Key})
+	})
+	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		reconfigures++
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return opnapi.NewClient(server.URL, "key", "secret", true), &setCalls, &ups, &reconfigures
+}
+
+// TestExecuteSyncZabbix_DangerousUserParameterCommandGate is the revert
+// guard for the ZABBIX_USERPARAMETER half of the device-local dangerous-
+// field gate. With the gate off, a userparameter carrying a command is applied as
+// today. With the gate on, it's rejected (never reaches addUserparameter)
+// while an unrelated safe userparameter (empty command) in the same sync is
+// still applied.
+func TestExecuteSyncZabbix_DangerousUserParameterCommandGate(t *testing.T) {
+	safe := opnapi.APIZabbixUserParameterPayload{Key: "nd-safe-check", Command: ""}
+	dangerous := opnapi.APIZabbixUserParameterPayload{Key: "nd-dangerous-check", Command: "rm -rf /tmp/x"}
+
+	for _, rejectDangerous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reject=%v", rejectDangerous), func(t *testing.T) {
+			client, _, addedKeys, _ := newZabbixTestServer(t)
+
+			result := executeSyncZabbix(context.Background(), client, nil,
+				[]opnapi.APIZabbixUserParameterPayload{safe, dangerous}, nil, rejectDangerous)
+
+			if !result.Success {
+				t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+			}
+
+			var wantKeys []string
+			if rejectDangerous {
+				wantKeys = []string{safe.Key}
+			} else {
+				wantKeys = []string{safe.Key, dangerous.Key}
+			}
+			if got, want := sortedCopy(*addedKeys), sortedCopy(wantKeys); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("addUserparameter calls = %v, want %v", got, want)
+			}
+
+			var rejected []string
+			for _, r := range result.Results {
+				if r.Action == "rejected" {
+					rejected = append(rejected, r.Name)
+				}
+			}
+			if rejectDangerous {
+				if fmt.Sprint(rejected) != fmt.Sprint([]string{dangerous.Key}) {
+					t.Errorf("rejected results = %v, want [%s]", rejected, dangerous.Key)
+				}
+			} else if len(rejected) != 0 {
+				t.Errorf("gate off must never produce a rejected result, got %v", rejected)
+			}
+		})
+	}
+}
+
+// TestExecuteSyncZabbix_DangerousSettingsFieldGate is the revert guard for
+// the ZABBIX_SETTINGS half of the gate: enable_remote_commands and
+// sudo_root each individually trigger rejection when the gate is on, and
+// leave settings/set unhit; with the gate off, settings/set is called as
+// today.
+func TestExecuteSyncZabbix_DangerousSettingsFieldGate(t *testing.T) {
+	tests := []struct {
+		name     string
+		settings opnapi.APIZabbixSettingsPayload
+	}{
+		{"enable_remote_commands", opnapi.APIZabbixSettingsPayload{Hostname: "fw1", ServerList: []string{"zbx.example.com"}, EnableRemoteCommands: true}},
+		{"sudo_root", opnapi.APIZabbixSettingsPayload{Hostname: "fw1", ServerList: []string{"zbx.example.com"}, SudoRoot: true}},
+	}
+
+	for _, tt := range tests {
+		for _, rejectDangerous := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reject=%v", tt.name, rejectDangerous), func(t *testing.T) {
+				client, setCalls, _, _ := newZabbixTestServer(t)
+
+				settings := tt.settings
+				result := executeSyncZabbix(context.Background(), client, &settings, nil, nil, rejectDangerous)
+
+				if !result.Success {
+					t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+				}
+
+				wantSetCalls := 1
+				if rejectDangerous {
+					wantSetCalls = 0
+				}
+				if *setCalls != wantSetCalls {
+					t.Errorf("settings/set calls = %d, want %d", *setCalls, wantSetCalls)
+				}
+
+				var rejected []string
+				for _, r := range result.Results {
+					if r.Action == "rejected" {
+						rejected = append(rejected, r.Name)
+					}
+				}
+				if rejectDangerous {
+					if len(rejected) != 1 || rejected[0] != tt.settings.Hostname {
+						t.Errorf("rejected results = %v, want [%s]", rejected, tt.settings.Hostname)
+					}
+				} else if len(rejected) != 0 {
+					t.Errorf("gate off must never produce a rejected result, got %v", rejected)
+				}
+			})
+		}
+	}
+}
+
+// TestExecuteSyncZabbix_ServerListNotConstrained confirms server_list is
+// never treated as dangerous, even off-LAN — a legitimate MSSP monitoring
+// deployment. The gate must not reject on server_list alone.
+func TestExecuteSyncZabbix_ServerListNotConstrained(t *testing.T) {
+	client, setCalls, _, _ := newZabbixTestServer(t)
+
+	settings := opnapi.APIZabbixSettingsPayload{
+		Hostname:   "fw1",
+		ServerList: []string{"monitor.mssp.example.com"},
+	}
+	result := executeSyncZabbix(context.Background(), client, &settings, nil, nil, true /* gate on */)
+
+	if !result.Success {
+		t.Errorf("expected success, got errors: %+v", result.Errors)
+	}
+	if *setCalls != 1 {
+		t.Errorf("settings/set calls = %d, want 1 (off-LAN server_list alone must not be rejected)", *setCalls)
+	}
+	for _, r := range result.Results {
+		if r.Action == "rejected" {
+			t.Errorf("unexpected rejection for server_list-only settings: %+v", r)
+		}
+	}
+}
+
+// TestExecuteSyncZabbix_RejectOnlySyncDoesNotReconfigure locks the "no
+// service bounce" half of the dangerous-field gate's safety contract: a
+// sync whose only Zabbix change is a rejected element must never call
+// ReconfigureZabbix. The "touched" gate in executeSyncZabbix only flips to
+// true on a Status=="success" result, and a rejection is recorded with
+// Status=="blocked" — this test fails if that ever regresses (e.g. a
+// rejection being miscounted as a change).
+func TestExecuteSyncZabbix_RejectOnlySyncDoesNotReconfigure(t *testing.T) {
+	client, _, addedKeys, reconfigureCalls := newZabbixTestServer(t)
+
+	dangerous := opnapi.APIZabbixUserParameterPayload{Key: "nd-dangerous-check", Command: "rm -rf /tmp/x"}
+
+	result := executeSyncZabbix(context.Background(), client, nil,
+		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
+
+	if !result.Success {
+		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	}
+	if len(*addedKeys) != 0 {
+		t.Errorf("expected no addUserparameter calls, got %v", *addedKeys)
+	}
+	if *reconfigureCalls != 0 {
+		t.Errorf("expected zero ReconfigureZabbix calls on a reject-only sync, got %d", *reconfigureCalls)
+	}
+
+	var rejected []string
+	for _, r := range result.Results {
+		if r.Action == "rejected" {
+			rejected = append(rejected, r.Name)
+		}
+	}
+	if fmt.Sprint(rejected) != fmt.Sprint([]string{dangerous.Key}) {
+		t.Errorf("rejected results = %v, want [%s]", rejected, dangerous.Key)
+	}
+}
+
+// TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePreExisting
+// is the ZABBIX_USERPARAMETER counterpart of the USER/GROUP orphan-delete
+// regression test in sync_api_test.go: a pre-existing managed userparameter
+// must survive a sync where the only desired element with that key is
+// rejected for carrying a dangerous `command`. desiredKeys[up.Key] is set
+// before the dangerous-field check runs, which is what keeps the rejected
+// key out of the delete-orphans loop below — this test fails if that
+// ordering ever regresses.
+func TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePreExisting(t *testing.T) {
+	var deleteCalls []string
+	var reconfigureCalls int
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zabbixagent/settings/searchUserparameters/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid": "up-uuid-1",
+					"key":  "nd-dangerous-check",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/delUserparameter/", func(w http.ResponseWriter, r *http.Request) {
+		deleteCalls = append(deleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		reconfigureCalls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	// add/set handlers are wired defensively: if a regression let the
+	// rejected element through, the test fails on a clean "wrong calls
+	// happened" assertion rather than a 404 from an unhandled route.
+	mux.HandleFunc("/zabbixagent/settings/addUserparameter", func(w http.ResponseWriter, r *http.Request) {
+		var wrapper opnapi.ZabbixUserParameterWrapper
+		_ = json.NewDecoder(r.Body).Decode(&wrapper)
+		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved", UUID: "up-" + wrapper.UserParameter.Key})
+	})
+	mux.HandleFunc("/zabbixagent/settings/setUserparameter/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	// Same key as the pre-existing managed row above; carries a command so
+	// the gate rejects it.
+	dangerous := opnapi.APIZabbixUserParameterPayload{Key: "nd-dangerous-check", Command: "rm -rf /tmp/x"}
+
+	result := executeSyncZabbix(context.Background(), client, nil,
+		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
+
+	if !result.Success {
+		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	}
+	if len(deleteCalls) != 0 {
+		t.Errorf("expected no delUserparameter calls, got %v (pre-existing managed userparameter with a rejected dangerous field must survive the sync)", deleteCalls)
+	}
+	if reconfigureCalls != 0 {
+		t.Errorf("expected zero ReconfigureZabbix calls, got %d", reconfigureCalls)
+	}
+
+	var rejected []string
+	for _, r := range result.Results {
+		if r.Action == "rejected" {
+			rejected = append(rejected, r.Name)
+		}
+	}
+	if fmt.Sprint(rejected) != fmt.Sprint([]string{dangerous.Key}) {
+		t.Errorf("rejected results = %v, want [%s]", rejected, dangerous.Key)
 	}
 }

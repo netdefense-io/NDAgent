@@ -57,6 +57,20 @@
             <Default>/usr/local/sbin/opnsense-shell</Default>
             <Required>Y</Required>
         </pathfinderShell>
+        <rejectDangerousSnippets type="BooleanField">
+            <!-- Device-local defense-in-depth opt-in gate.
+                 When enabled, SYNC_API rejects individual USER/GROUP/
+                 ZABBIX_* snippet elements that carry a dangerous field
+                 (broad priv, scope=system, non-nologin shell,
+                 authorizedkeys, Zabbix remote commands, sudo_root)
+                 instead of applying them. Default off: the primary
+                 control is NDManager's producer-side org:su gate, and a
+                 default-on device gate risks rejecting legitimate
+                 service-account/monitoring snippets already in
+                 production. -->
+            <Default>0</Default>
+            <Required>Y</Required>
+        </rejectDangerousSnippets>
         <webadminReadonlyUser type="TextField">
             <!-- OPNsense username forged into the read-only "Open WebAdmin"
                  PHP session. Maps to the curated read-only ACL provisioned

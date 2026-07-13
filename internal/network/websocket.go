@@ -663,6 +663,15 @@ func (w *WebSocketClient) IsTestMode() bool {
 	return w.cfg.IsTestMode()
 }
 
+// RejectDangerousSnippets returns whether the device-local dangerous-
+// snippet-field gate is enabled (default false/permissive). When true,
+// SYNC_API rejects individual USER/GROUP/ZABBIX_* snippet elements that
+// carry a dangerous field instead of applying them — see
+// internal/opnapi.DangerousUserFields and friends for the field set.
+func (w *WebSocketClient) RejectDangerousSnippets() bool {
+	return w.cfg.RejectDangerousSnippets
+}
+
 // GetConfigXMLPath returns the path to the OPNsense config.xml file.
 func (w *WebSocketClient) GetConfigXMLPath() string {
 	return w.cfg.ConfigXMLPath

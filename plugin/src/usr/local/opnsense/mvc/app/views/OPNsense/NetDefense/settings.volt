@@ -631,6 +631,15 @@
                         </td>
                     </tr>
                     <tr>
+                        <td><strong>{{ lang._('Reject Dangerous Snippet Content') }}</strong></td>
+                        <td>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.rejectDangerousSnippets" name="settings.rejectDangerousSnippets"> {{ lang._('Reject dangerous USER/GROUP/Zabbix snippet content') }}
+                            </label>
+                            <div class="help-block">{{ lang._('Device-local defense-in-depth: reject individual snippet elements carrying a dangerous field (broad privileges, system scope, interactive shell, authorized keys, Zabbix remote commands, sudo) instead of applying them. Off by default. Enabling this can reject legitimate service-account or monitoring snippets already in use — review agent logs after enabling.') }}</div>
+                        </td>
+                    </tr>
+                    <tr>
                         <td><strong>{{ lang._('Re-bind Token') }}</strong></td>
                         <td>
                             <input type="text" class="form-control" id="settings.bootstrapToken" name="settings.bootstrapToken" placeholder="" autocomplete="off">

@@ -173,6 +173,48 @@ server_host=localhost
 	if cfg.Enabled {
 		t.Error("Enabled default should be false")
 	}
+	if cfg.RejectDangerousSnippets {
+		t.Error("RejectDangerousSnippets default should be false (permissive)")
+	}
+}
+
+// TestLoad_RejectDangerousSnippetsDefaultsFalse guards the device-local
+// dangerous-snippet gate's permissive default: an omitted config line must never
+// silently start rejecting dangerous SYNC_API snippet content, since that
+// would be a behavior change for every existing device on upgrade.
+func TestLoad_RejectDangerousSnippetsDefaultsFalse(t *testing.T) {
+	content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+`
+	configPath := createTempConfigFile(t, content)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RejectDangerousSnippets {
+		t.Error("RejectDangerousSnippets should default to false when omitted")
+	}
+}
+
+// TestLoad_RejectDangerousSnippetsExplicitlyEnabled confirms the opt-in
+// still works when an operator turns it on.
+func TestLoad_RejectDangerousSnippetsExplicitlyEnabled(t *testing.T) {
+	content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+reject_dangerous_snippets=true
+`
+	configPath := createTempConfigFile(t, content)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !cfg.RejectDangerousSnippets {
+		t.Error("expected reject_dangerous_snippets=true to be honored when explicitly set")
+	}
 }
 
 // TestLoad_TOFUSSLVerifyDefaultsTrueEvenWhenSSLVerifyDisabled guards against

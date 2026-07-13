@@ -62,6 +62,13 @@
         <advanced>true</advanced>
     </field>
     <field>
+        <id>settings.rejectDangerousSnippets</id>
+        <label>Reject Dangerous Snippet Content</label>
+        <type>checkbox</type>
+        <help>Device-local defense-in-depth: reject individual USER/GROUP/Zabbix snippet elements that carry a dangerous field (broad privileges, system scope, interactive shell, authorized keys, Zabbix remote commands, sudo) instead of applying them. Off by default — the primary control is server-side. Enabling this can reject legitimate service-account or monitoring snippets already in use; review agent logs after enabling.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
         <id>settings.bootstrapToken</id>
         <label>Re-bind Token</label>
         <type>text</type>

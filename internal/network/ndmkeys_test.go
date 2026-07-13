@@ -22,6 +22,8 @@ import (
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 )
 
 func init() {
@@ -325,6 +327,154 @@ func TestFetchJWKS_TOFUVerifiesIndependentlyOfGlobalSSLVerify(t *testing.T) {
 
 	if _, err := os.Stat(cachePath); err == nil {
 		t.Error("cache file should not have been written after a failed TOFU fetch")
+	}
+}
+
+// withObservedLogger swaps ndmKeysLoggerFactory for a logger backed by a
+// zaptest/observer core so tests can assert on exactly what
+// LoadOrFetchNDMKeys would log, and restores the production factory on
+// cleanup. This is the re-pin WARN's revert guard: if the alert regresses
+// to silence (or loses its distinguishing fields), these tests fail.
+func withObservedLogger(t *testing.T) *observer.ObservedLogs {
+	t.Helper()
+	core, logs := observer.New(zap.DebugLevel)
+	orig := ndmKeysLoggerFactory
+	ndmKeysLoggerFactory = func() *zap.SugaredLogger { return zap.New(core).Sugar() }
+	t.Cleanup(func() { ndmKeysLoggerFactory = orig })
+	return logs
+}
+
+// TestLoadOrFetch_RePinWarnsWithPriorAndNewKidOnCorruptCache is the core
+// revert guard for the re-pin alert: a cache file existed (so this is NOT a
+// fresh install) but fails to load because it's corrupt, so
+// LoadOrFetchNDMKeys re-TOFUs. The WARN must fire and must not be silent
+// about the fact that this replaces an earlier pin.
+func TestLoadOrFetch_RePinWarnsOnCorruptCache(t *testing.T) {
+	primaryKid, _, primaryX := makeKeyPair(t)
+	emergencyKid, _, emergencyX := makeKeyPair(t)
+
+	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
+	defer cleanup()
+
+	cfg := newTestConfig(host, port)
+	patchTestTLS(cfg)
+
+	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
+	if err := os.WriteFile(cachePath, []byte("not valid json"), 0o600); err != nil {
+		t.Fatalf("write corrupt cache: %v", err)
+	}
+
+	logs := withObservedLogger(t)
+
+	if _, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath); err != nil {
+		t.Fatalf("LoadOrFetchNDMKeys: %v", err)
+	}
+
+	entries := logs.FilterMessageSnippet("RE-PINNED").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 RE-PINNED warning, got %d: %+v", len(entries), entries)
+	}
+	entry := entries[0]
+	if entry.Level != zap.WarnLevel {
+		t.Errorf("RE-PINNED entry level = %v, want WARN", entry.Level)
+	}
+	fields := entry.ContextMap()
+	if fields["new_primary_kid"] != primaryKid {
+		t.Errorf("new_primary_kid = %v, want %s", fields["new_primary_kid"], primaryKid)
+	}
+	// Corrupt (unparseable) cache: no prior kid was recoverable, so the
+	// entry must not fabricate one.
+	if _, ok := fields["prior_primary_kid"]; ok {
+		t.Errorf("prior_primary_kid should be absent for an unparseable prior cache, got %v", fields["prior_primary_kid"])
+	}
+}
+
+// TestLoadOrFetch_RePinWarnsWithPriorAndNewKidOnVersionMismatch exercises the
+// case the escalation specifically calls out: a prior pin WAS present and
+// parseable (just a stale cache-format version), so the WARN must carry both
+// the previous and new primary kid, and correctly flag whether the kid
+// itself changed.
+func TestLoadOrFetch_RePinWarnsWithPriorAndNewKidOnVersionMismatch(t *testing.T) {
+	primaryKid, _, primaryX := makeKeyPair(t)
+	emergencyKid, _, emergencyX := makeKeyPair(t)
+
+	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
+	defer cleanup()
+
+	cfg := newTestConfig(host, port)
+	patchTestTLS(cfg)
+
+	priorKid := "deadbeefdeadbeefdeadbeefdeadbeef"
+	staleCache := ndmKeysCacheFile{
+		Version:    ndmKeysCacheVersion + 1, // forces tryLoadCache to reject it
+		FetchedAt:  "2020-01-01T00:00:00Z",
+		BrokerHost: "https://old-broker.example",
+		Primary:    ndmKeyEntry{KID: priorKid, PubkeyB64: "irrelevant"},
+		Emergency:  ndmKeyEntry{KID: "also-irrelevant", PubkeyB64: "irrelevant"},
+	}
+	raw, err := json.Marshal(staleCache)
+	if err != nil {
+		t.Fatalf("marshal stale cache: %v", err)
+	}
+	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
+	if err := os.WriteFile(cachePath, raw, 0o600); err != nil {
+		t.Fatalf("write stale cache: %v", err)
+	}
+
+	logs := withObservedLogger(t)
+
+	if _, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath); err != nil {
+		t.Fatalf("LoadOrFetchNDMKeys: %v", err)
+	}
+
+	entries := logs.FilterMessageSnippet("RE-PINNED").All()
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly 1 RE-PINNED warning, got %d: %+v", len(entries), entries)
+	}
+	fields := entries[0].ContextMap()
+	if fields["prior_primary_kid"] != priorKid {
+		t.Errorf("prior_primary_kid = %v, want %s", fields["prior_primary_kid"], priorKid)
+	}
+	if fields["new_primary_kid"] != primaryKid {
+		t.Errorf("new_primary_kid = %v, want %s", fields["new_primary_kid"], primaryKid)
+	}
+	changed, ok := fields["primary_kid_changed"].(bool)
+	if !ok || !changed {
+		t.Errorf("primary_kid_changed = %v (ok=%v), want true (prior %s != new %s)", fields["primary_kid_changed"], ok, priorKid, primaryKid)
+	}
+}
+
+// TestLoadOrFetch_FreshInstallDoesNotWarnRePin is the negative case: a
+// brand-new device has never had a cache file, so the first-ever TOFU must
+// NOT trip the re-pin alert (that would make every fresh install look like
+// an anomaly).
+func TestLoadOrFetch_FreshInstallDoesNotWarnRePin(t *testing.T) {
+	primaryKid, _, primaryX := makeKeyPair(t)
+	emergencyKid, _, emergencyX := makeKeyPair(t)
+
+	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
+	defer cleanup()
+
+	cfg := newTestConfig(host, port)
+	patchTestTLS(cfg)
+
+	// No file written at cachePath — genuine fresh install.
+	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
+
+	logs := withObservedLogger(t)
+
+	if _, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath); err != nil {
+		t.Fatalf("LoadOrFetchNDMKeys: %v", err)
+	}
+
+	if entries := logs.FilterMessageSnippet("RE-PINNED").All(); len(entries) != 0 {
+		t.Errorf("fresh install must not log a RE-PINNED warning, got %+v", entries)
+	}
+	// Sanity: the normal first-pin log still fires (exact wording depends on
+	// cfg.TOFUSSLVerify — newTestConfig leaves it at the zero value, so this
+	// is the "TLS verification DISABLED" variant, not "on first fetch").
+	if entries := logs.FilterField(zap.String("primary_kid", primaryKid)).All(); len(entries) != 1 {
+		t.Errorf("expected exactly 1 first-pin log carrying primary_kid=%s, got %d", primaryKid, len(entries))
 	}
 }
 

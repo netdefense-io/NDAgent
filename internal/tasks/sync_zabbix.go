@@ -184,12 +184,22 @@ func validateZabbixManagedKey(key string) error {
 // settings may be nil if no ZABBIX_SETTINGS snippet was in the payload —
 // in that case userparameters/aliases are applied against whatever main
 // settings already exist on the device.
+//
+// rejectDangerous is the device-local opt-in gate (config: reject_dangerous_
+// snippets, default false). When true, a ZABBIX_SETTINGS snippet with
+// enable_remote_commands or sudo_root set, or a ZABBIX_USERPARAMETER with a
+// non-empty command, is rejected instead of applied — see
+// opnapi.DangerousZabbixSettingsFields/DangerousZabbixUserParameterFields.
+// A rejected userparameter is still counted as "desired" so it isn't
+// orphan-deleted; the gate refuses new dangerous mutations, it doesn't
+// delete pre-existing device state.
 func executeSyncZabbix(
 	ctx context.Context,
 	client *opnapi.Client,
 	settings *opnapi.APIZabbixSettingsPayload,
 	userParams []opnapi.APIZabbixUserParameterPayload,
 	aliases []opnapi.APIZabbixAliasPayload,
+	rejectDangerous bool,
 ) SyncAPIResult {
 	log := logging.Named("SYNC_API")
 
@@ -230,6 +240,22 @@ func executeSyncZabbix(
 	// state first and use it as a baseline; any non-empty snippet field
 	// overrides. Net effect: the snippet's value always wins; omitted
 	// fields keep whatever the device currently has.
+	if settings != nil && rejectDangerous {
+		if fields := opnapi.DangerousZabbixSettingsFields(*settings); len(fields) > 0 {
+			log.Warnw("SYNC_API: rejected ZABBIX_SETTINGS snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
+				"hostname", settings.Hostname,
+				"fields", fields,
+			)
+			results = append(results, SyncAPIItemResult{
+				Type:   "zabbix_settings",
+				Name:   settings.Hostname,
+				Action: "rejected",
+				Status: "blocked",
+				Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+			})
+			settings = nil
+		}
+	}
 	if settings != nil {
 		currentRaw, err := client.GetZabbixSettings(ctx)
 		if err != nil {
@@ -292,6 +318,23 @@ func executeSyncZabbix(
 				continue
 			}
 			desiredKeys[up.Key] = true
+
+			if rejectDangerous {
+				if fields := opnapi.DangerousZabbixUserParameterFields(up); len(fields) > 0 {
+					log.Warnw("SYNC_API: rejected ZABBIX_USERPARAMETER snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
+						"key", up.Key,
+						"fields", fields,
+					)
+					results = append(results, SyncAPIItemResult{
+						Type:   "zabbix_userparameter",
+						Name:   up.Key,
+						Action: "rejected",
+						Status: "blocked",
+						Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+					})
+					continue
+				}
+			}
 
 			wire := opnapi.ConvertToOPNZabbixUserParameter(up)
 			action := "created"
@@ -434,9 +477,16 @@ func executeSyncZabbix(
 
 	// Phase 6: Apply changes. Skip the reconfigure call if nothing
 	// actually changed on the device — saves a service bounce on no-op
-	// syncs (no settings push, no creates, no updates, no deletes). The
-	// item count in `results` captures all four.
-	touched := len(results) > 0
+	// syncs (no settings push, no creates, no updates, no deletes). A
+	// rejected element (Status "blocked") is not a device change, so a
+	// sync consisting only of rejections must not trigger a reconfigure.
+	touched := false
+	for _, r := range results {
+		if r.Status == "success" {
+			touched = true
+			break
+		}
+	}
 	if touched {
 		if err := client.ReconfigureZabbix(ctx); err != nil {
 			errors = append(errors, fmt.Sprintf("Zabbix reconfigure: %v", err))

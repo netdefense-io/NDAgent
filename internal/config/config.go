@@ -41,6 +41,19 @@ type Config struct {
 	// Test mode
 	TestMode bool `mapstructure:"test_mode"`
 
+	// RejectDangerousSnippets is an opt-in, device-local defense-in-depth
+	// gate against dangerous USER/GROUP/ZABBIX_* SYNC_API snippet content
+	// (privileged priv, scope=system, non-nologin shell, authorizedkeys,
+	// Zabbix remote commands, sudo_root). It mirrors NDManager's producer-
+	// side dangerous-field validators (the primary control, gated by
+	// org:su) — this is a second, local line of defense an operator can
+	// enable. Default false (permissive/unchanged behavior): a default-on
+	// gate risks rejecting legitimate service-account/monitoring snippet
+	// content already applied on production devices. See
+	// internal/opnapi's DangerousUserFields and friends for the exact
+	// field set this gate checks.
+	RejectDangerousSnippets bool `mapstructure:"reject_dangerous_snippets"`
+
 	// OPNsense API credentials (for SYNC_API/PULL_API)
 	APIKey         string `mapstructure:"api_key"`
 	APISecret      string `mapstructure:"api_secret"`
@@ -100,6 +113,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pid_file", "/var/run/ndagent.pid")
 	v.SetDefault("log_level", "INFO")
 	v.SetDefault("test_mode", false)
+	v.SetDefault("reject_dangerous_snippets", false)
 	v.SetDefault("enabled", false)
 	v.SetDefault("opnsense_api_url", "https://127.0.0.1/api")
 	v.SetDefault("pathfinder_host", "https://pathfinder.netdefense.io")

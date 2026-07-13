@@ -38,6 +38,12 @@ const (
 	ndmKeysCacheVersion        = 1
 )
 
+// ndmKeysLoggerFactory builds the logger LoadOrFetchNDMKeys uses. Test seam:
+// production always resolves to logging.Named("ndmkeys"); tests substitute a
+// logger backed by a zaptest/observer core to assert on the re-pin WARN
+// below without needing real syslog/stdout plumbing.
+var ndmKeysLoggerFactory = func() *zap.SugaredLogger { return logging.Named("ndmkeys") }
+
 // ndmKeysCacheFile is the persistent on-disk shape.
 type ndmKeysCacheFile struct {
 	Version    int         `json:"version"`
@@ -82,11 +88,18 @@ func LoadOrFetchNDMKeys(
 	if cachePath == "" {
 		cachePath = DefaultNDMKeysCachePath
 	}
-	log := logging.Named("ndmkeys")
+	log := ndmKeysLoggerFactory()
 
 	if cached, ok := tryLoadCache(cachePath, log); ok {
 		return cacheToMaps(cached, log)
 	}
+
+	// About to re-TOFU (fetch + re-pin). Capture whatever prior primary kid
+	// can be recovered before the cache file is overwritten below, so a
+	// re-pin WARN can report the previous vs new kid — this is visibility
+	// only, it never influences the trust decision (already made by
+	// fetchJWKSWithRetry/GetTOFUTLSConfig above tryLoadCache's failure).
+	priorPrimaryKID, hadPriorCacheFile := recoverPriorPrimaryKID(cachePath)
 
 	log.Infow("NDM trust set cache absent; fetching from broker via TOFU",
 		"broker_host", cfg.ServerHost,
@@ -104,6 +117,29 @@ func LoadOrFetchNDMKeys(
 	if err := writeCache(cachePath, cached); err != nil {
 		return nil, nil, fmt.Errorf("ndm trust set cache write: %w", err)
 	}
+
+	// Distinct, greppable re-pin alert. Fires only when a prior cache file
+	// existed (even if it failed to load — unreadable, corrupt, version
+	// mismatch, missing kids); a genuine first-ever TOFU on a fresh install
+	// has no prior file and stays on the existing "TOFU pinned ... on first
+	// fetch" INFO/WARN path below instead. Does not change any trust
+	// decision — the fetch has already happened and was already verified.
+	if hadPriorCacheFile {
+		fields := []interface{}{
+			"cache_path", cachePath,
+			"new_primary_kid", cached.Primary.KID,
+			"new_emergency_kid", cached.Emergency.KID,
+			"broker_host", cfg.ServerHost,
+		}
+		if priorPrimaryKID != "" {
+			fields = append(fields,
+				"prior_primary_kid", priorPrimaryKID,
+				"primary_kid_changed", priorPrimaryKID != cached.Primary.KID,
+			)
+		}
+		log.Warnw("NDM trust set RE-PINNED: previous local pin could not be loaded — verify this was expected", fields...)
+	}
+
 	if !cfg.TOFUSSLVerify {
 		log.Warnw("TOFU JWKS fetch performed with TLS verification DISABLED — vulnerable to MITM key-planting",
 			"primary_kid", cached.Primary.KID,
@@ -162,6 +198,27 @@ func tryLoadCache(cachePath string, log *zap.SugaredLogger) (*ndmKeysCacheFile, 
 		"fetched_at", cached.FetchedAt,
 	)
 	return &cached, true
+}
+
+// recoverPriorPrimaryKID makes a best-effort attempt to read whatever prior
+// primary kid a stale/corrupt/version-mismatched cache file recorded. It
+// duplicates tryLoadCache's read+unmarshal rather than threading state
+// through it, keeping this purely additive: tryLoadCache's existing
+// behavior and logging are untouched. hadFile reports whether a cache file
+// existed at cachePath at all (even if unparseable) — that's what
+// distinguishes a genuine first-ever TOFU on a fresh install (no prior
+// pin, no alert warranted) from a re-TOFU where some prior pin existed and
+// is now being replaced (alert). This never influences the trust decision.
+func recoverPriorPrimaryKID(cachePath string) (kid string, hadFile bool) {
+	raw, err := os.ReadFile(cachePath)
+	if err != nil {
+		return "", false
+	}
+	var prior ndmKeysCacheFile
+	if err := json.Unmarshal(raw, &prior); err != nil {
+		return "", true
+	}
+	return prior.Primary.KID, true
 }
 
 func fetchJWKSWithRetry(ctx context.Context, cfg *config.Config) (*jwksResponse, error) {

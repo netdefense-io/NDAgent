@@ -3,8 +3,10 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -394,7 +396,7 @@ func TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities(t *testing.
 
 	// Empty desired sets: both the protected user and the protected group
 	// are "managed but not desired", the exact orphan-delete condition.
-	result := executeSyncUsersGroups(context.Background(), client, nil, nil)
+	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false)
 
 	if len(userDeleteCalls) != 0 {
 		t.Errorf("expected no user delete calls, got %v (protected user netdefense-agent must never be orphan-deleted)", userDeleteCalls)
@@ -404,5 +406,247 @@ func TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities(t *testing.
 	}
 	if !result.Success {
 		t.Errorf("expected sync to succeed (protected skip is not an error), got errors: %+v", result)
+	}
+}
+
+func sortedCopy(s []string) []string {
+	out := append([]string(nil), s...)
+	sort.Strings(out)
+	return out
+}
+
+// newUserGroupTestServer stands up a fake OPNsense API that supports the
+// create path (empty search results, add always succeeds) executeSyncUsersGroups
+// needs. Returns the server plus slices capturing every name passed to
+// AddUser/AddGroup, in call order.
+func newUserGroupTestServer(t *testing.T) (client *opnapi.Client, addedUsers, addedGroups *[]string) {
+	t.Helper()
+	var users, groups []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/auth/user/add", func(w http.ResponseWriter, r *http.Request) {
+		var wrapper opnapi.UserWrapper
+		_ = json.NewDecoder(r.Body).Decode(&wrapper)
+		users = append(users, wrapper.User.Name)
+		_ = json.NewEncoder(w).Encode(opnapi.SetUserResponse{Result: "saved", UUID: "u-" + wrapper.User.Name})
+	})
+	mux.HandleFunc("/auth/group/add", func(w http.ResponseWriter, r *http.Request) {
+		var wrapper opnapi.GroupWrapper
+		_ = json.NewDecoder(r.Body).Decode(&wrapper)
+		groups = append(groups, wrapper.Group.Name)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved", UUID: "g-" + wrapper.Group.Name})
+	})
+
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+
+	return opnapi.NewClient(server.URL, "key", "secret", true), &users, &groups
+}
+
+// TestExecuteSyncUsersGroups_DangerousFieldGate is the revert guard for the
+// device-local dangerous-field opt-in gate. Table-driven over each dangerous USER
+// field individually (mirrors NDManager's producer-side dangerous-field set):
+// with the gate OFF, a dangerous user is applied same as any other (no
+// regression versus pre-gate behavior); with the gate ON, the dangerous user
+// is rejected (never reaches AddUser) while an unrelated safe user in the
+// same sync is still applied, and the rejection shows up as a telemetry-
+// visible "rejected" result.
+func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
+	safeUser := opnapi.APIUserPayload{
+		Name:     "safe-user",
+		Password: "$2y$hash",
+		Scope:    "user",
+		Shell:    "/usr/sbin/nologin",
+	}
+
+	dangerousUsers := []struct {
+		field string
+		user  opnapi.APIUserPayload
+	}{
+		{"priv", opnapi.APIUserPayload{Name: "priv-user", Password: "$2y$hash", Scope: "user", Priv: []string{"page-all"}}},
+		{"scope", opnapi.APIUserPayload{Name: "scope-user", Password: "$2y$hash", Scope: "system"}},
+		{"shell", opnapi.APIUserPayload{Name: "shell-user", Password: "$2y$hash", Scope: "user", Shell: "/bin/sh"}},
+		{"authorizedkeys", opnapi.APIUserPayload{Name: "keys-user", Password: "$2y$hash", Scope: "user", AuthorizedKeys: "ssh-ed25519 AAAAtest"}},
+	}
+
+	for _, du := range dangerousUsers {
+		for _, rejectDangerous := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/reject=%v", du.field, rejectDangerous), func(t *testing.T) {
+				client, addedUsers, _ := newUserGroupTestServer(t)
+
+				users := []opnapi.APIUserPayload{safeUser, du.user}
+				result := executeSyncUsersGroups(context.Background(), client, users, nil, rejectDangerous)
+
+				if !result.Success {
+					t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+				}
+
+				var wantAdded []string
+				if rejectDangerous {
+					wantAdded = []string{safeUser.Name}
+				} else {
+					wantAdded = []string{safeUser.Name, du.user.Name}
+				}
+				if got, want := sortedCopy(*addedUsers), sortedCopy(wantAdded); fmt.Sprint(got) != fmt.Sprint(want) {
+					t.Errorf("AddUser calls = %v, want %v", got, want)
+				}
+
+				var rejectedNames []string
+				for _, r := range result.Results {
+					if r.Action == "rejected" {
+						rejectedNames = append(rejectedNames, r.Name)
+					}
+				}
+				if rejectDangerous {
+					if fmt.Sprint(rejectedNames) != fmt.Sprint([]string{du.user.Name}) {
+						t.Errorf("rejected results = %v, want [%s]", rejectedNames, du.user.Name)
+					}
+				} else if len(rejectedNames) != 0 {
+					t.Errorf("gate off must never produce a rejected result, got %v", rejectedNames)
+				}
+			})
+		}
+	}
+}
+
+// TestExecuteSyncUsersGroups_DangerousGroupPrivGate mirrors the USER case
+// for GROUP snippets: a group carrying a page-all/all-pages/system-admin
+// priv is rejected only when the gate is on, and a safe group in the same
+// sync is unaffected either way.
+func TestExecuteSyncUsersGroups_DangerousGroupPrivGate(t *testing.T) {
+	safeGroup := opnapi.APIGroupPayload{Name: "safe-group", Priv: []string{"page-status-services"}}
+	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}}
+
+	for _, rejectDangerous := range []bool{false, true} {
+		t.Run(fmt.Sprintf("reject=%v", rejectDangerous), func(t *testing.T) {
+			client, _, addedGroups := newUserGroupTestServer(t)
+
+			groups := []opnapi.APIGroupPayload{safeGroup, dangerousGroup}
+			result := executeSyncUsersGroups(context.Background(), client, nil, groups, rejectDangerous)
+
+			if !result.Success {
+				t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+			}
+
+			var wantAdded []string
+			if rejectDangerous {
+				wantAdded = []string{safeGroup.Name}
+			} else {
+				wantAdded = []string{safeGroup.Name, dangerousGroup.Name}
+			}
+			if got, want := sortedCopy(*addedGroups), sortedCopy(wantAdded); fmt.Sprint(got) != fmt.Sprint(want) {
+				t.Errorf("AddGroup calls = %v, want %v", got, want)
+			}
+		})
+	}
+}
+
+// TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExisting
+// locks the "no silent deletion" half of the dangerous-field gate's safety
+// contract: a USER/GROUP element that carries a dangerous field is rejected
+// (never reaches AddUser/AddGroup/SetUser/SetGroup) but must not be treated
+// as absent-from-desired either — a pre-existing managed object of the same
+// name has to survive the orphan-delete phase untouched. If the gate ever
+// stopped counting a rejected element as "desired" (e.g. by building the
+// orphan-delete desired-set from the post-filter applyUsers/applyGroups
+// slice instead of the full users/groups slice), this test would observe a
+// DELETE call against device state the sync never touched.
+func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExisting(t *testing.T) {
+	var userDeleteCalls, groupDeleteCalls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":  "user-uuid-1",
+					"name":  "priv-user",
+					"descr": "svc account [nd-template:base]",
+					"uid":   "1001",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":        "group-uuid-1",
+					"name":        "dangerous-group",
+					"description": "svc group [nd-template:base]",
+					"gid":         "2001",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/user/del/", func(w http.ResponseWriter, r *http.Request) {
+		userDeleteCalls = append(userDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+	mux.HandleFunc("/auth/group/del/", func(w http.ResponseWriter, r *http.Request) {
+		groupDeleteCalls = append(groupDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+	// Add/Set handlers are wired defensively: if a regression let the
+	// rejected element through, the test fails on a clean "wrong calls
+	// happened" assertion rather than a 404 from an unhandled route.
+	mux.HandleFunc("/auth/user/add", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SetUserResponse{Result: "saved", UUID: "new-user"})
+	})
+	mux.HandleFunc("/auth/group/add", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved", UUID: "new-group"})
+	})
+	mux.HandleFunc("/auth/user/set/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SetUserResponse{Result: "saved"})
+	})
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	// Same names as the pre-existing managed rows above; both carry a
+	// dangerous priv so the gate rejects them.
+	dangerousUser := opnapi.APIUserPayload{Name: "priv-user", Password: "$2y$hash", Scope: "user", Priv: []string{"page-all"}}
+	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}}
+
+	result := executeSyncUsersGroups(context.Background(), client,
+		[]opnapi.APIUserPayload{dangerousUser},
+		[]opnapi.APIGroupPayload{dangerousGroup},
+		true, /* gate on */
+	)
+
+	if !result.Success {
+		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	}
+	if len(userDeleteCalls) != 0 {
+		t.Errorf("expected no user delete calls, got %v (pre-existing managed user with a rejected dangerous field must survive the sync)", userDeleteCalls)
+	}
+	if len(groupDeleteCalls) != 0 {
+		t.Errorf("expected no group delete calls, got %v (pre-existing managed group with a rejected dangerous field must survive the sync)", groupDeleteCalls)
+	}
+
+	var rejectedNames []string
+	for _, r := range result.Results {
+		if r.Action == "rejected" {
+			rejectedNames = append(rejectedNames, r.Name)
+		}
+	}
+	wantRejected := []string{"dangerous-group", "priv-user"}
+	if got := sortedCopy(rejectedNames); fmt.Sprint(got) != fmt.Sprint(wantRejected) {
+		t.Errorf("rejected results = %v, want %v", got, wantRejected)
 	}
 }
