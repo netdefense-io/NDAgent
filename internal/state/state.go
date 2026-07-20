@@ -1,8 +1,17 @@
 // Package state persists durable agent state across restarts.
 //
-// Two counters are tracked:
-//   - `last_executed_task_id`: replay barrier for inbound dispatch envelopes
-//     (NDManager → agent).
+// Three counters are tracked:
+//   - `last_executed_task_id`: legacy replay barrier for inbound dispatch
+//     envelopes (NDManager → agent), keyed on the global monotonic task_id.
+//     Used only as a fallback when an envelope carries no dispatch_seq (see
+//     last_dispatch_seq below) — kept for compatibility with an
+//     un-upgraded NDManager that never mints one.
+//   - `last_dispatch_seq`: per-device monotonic replay barrier for inbound
+//     dispatch envelopes, minted+signed by NDManager and carried in the
+//     envelope's protected header (HdrDispatchSeq). Preferred over
+//     last_executed_task_id when present — fixes the case where a
+//     scheduled task's global task_id is lower than an already-executed
+//     immediate task's id (XM-12).
 //   - `next_response_seq`: device-monotonic counter included in the protected
 //     header of every outbound response envelope. Distinct from task_id
 //     because IN_PROGRESS and final responses share a task_id.
@@ -10,10 +19,10 @@
 // The agent acquires a fresh seq under a mutex that also covers the WS write
 // (see internal/network/websocket.go) so seq order matches wire order.
 //
-// State-loss recovery: if /var/db/ndagent/state is wiped, both counters
-// reset to zero. The operator's bootstrap-token rebind flow on the broker
-// side also resets Device.last_response_seq=0, so the two stay aligned and
-// the first response after recovery is accepted with seq=1.
+// State-loss recovery: if /var/db/ndagent/state is wiped, all three
+// counters reset to zero. The operator's bootstrap-token rebind flow on the
+// broker side also resets Device.last_response_seq=0, so the two stay
+// aligned and the first response after recovery is accepted with seq=1.
 package state
 
 import (
@@ -30,8 +39,15 @@ import (
 const DefaultStatePath = "/var/db/ndagent/state"
 
 type onDisk struct {
-	LastExecutedTaskID  int64  `json:"last_executed_task_id"`
-	NextResponseSeq     uint64 `json:"next_response_seq"`
+	LastExecutedTaskID int64  `json:"last_executed_task_id"`
+	NextResponseSeq    uint64 `json:"next_response_seq"`
+	// LastDispatchSeq is the highest per-device dispatch sequence number
+	// (HdrDispatchSeq) we've accepted from a verified dispatch envelope.
+	// Zero-valued (never seen a dispatch_seq) until the first envelope
+	// that carries one arrives — mirrors NextResponseSeq's reset-on-
+	// state-loss behavior. See internal/network/dispatcher.go for the
+	// enforcement.
+	LastDispatchSeq uint64 `json:"last_dispatch_seq"`
 	// LastRebindTokenHash is the SHA-256 hex of the most recent
 	// `bootstrap_token=` value the agent used to rotate its keypair.
 	// Stored so a restart that still has the same (now-consumed) token
@@ -97,6 +113,35 @@ func (s *Store) SetLastExecutedTaskID(taskID int64) error {
 		return fmt.Errorf("refusing to set last_executed_task_id %d <= current %d", taskID, s.data.LastExecutedTaskID)
 	}
 	s.data.LastExecutedTaskID = taskID
+	return s.persist()
+}
+
+// LastDispatchSeq returns the last per-device dispatch_seq we've accepted
+// under a verified envelope (0 if none has been seen yet — either a fresh
+// state file or an un-upgraded NDManager that never mints one). Compare
+// against an inbound envelope's protected-header dispatch_seq with strict
+// `>` to enforce the replay barrier.
+func (s *Store) LastDispatchSeq() uint64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.data.LastDispatchSeq
+}
+
+// SetLastDispatchSeq atomically updates the persisted last dispatch_seq.
+//
+// Persists ahead of dispatch (before the handler runs) to be conservative
+// against duplicate execution if the agent crashes mid-handler — replay
+// of the same dispatch_seq would be rejected because we already advanced
+// the counter, and the operator would notice via the orphaned IN_PROGRESS
+// task on the broker side. Mirrors SetLastExecutedTaskID.
+func (s *Store) SetLastDispatchSeq(seq uint64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if seq <= s.data.LastDispatchSeq {
+		// Refuse to go backwards (shouldn't happen — caller already gates)
+		return fmt.Errorf("refusing to set last_dispatch_seq %d <= current %d", seq, s.data.LastDispatchSeq)
+	}
+	s.data.LastDispatchSeq = seq
 	return s.persist()
 }
 

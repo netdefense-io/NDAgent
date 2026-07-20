@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"sync"
@@ -16,6 +17,11 @@ import (
 	"github.com/netdefense-io/ndagent/internal/state"
 	"github.com/netdefense-io/ndagent/internal/taskstore"
 )
+
+// errDispatchReplay is the sentinel wrapped by checkDispatchReplayBarrier
+// when an envelope is rejected as a replay (as opposed to a state-persist
+// failure) — callers use errors.Is to pick the right log level.
+var errDispatchReplay = errors.New("dispatch replay rejected")
 
 // LifecycleResolver maps a task_type string to its taskstore Lifecycle
 // category. The dispatcher uses it at Begin time so the boot-time drain
@@ -107,10 +113,15 @@ func (d *CommandDispatcher) RegisterHandler(taskType string, handler TaskHandler
 //     ONLY (primary). Emergency is loaded into a separate map for rotation
 //     directives and is never consulted here.
 //  3. Validate header bindings: v=2, iss=ndmanager, device_uuid matches
-//     own UUID, signed exp not yet expired, task_id strictly greater than
-//     the persisted last_executed_task_id.
-//  4. Persist the new last_executed_task_id BEFORE dispatching the
-//     handler so a mid-handler crash + replay is rejected.
+//     own UUID, signed exp not yet expired, then the replay barrier: if
+//     the envelope carries a signed dispatch_seq (HdrDispatchSeq), that
+//     per-device monotonic counter gates it (strictly greater than
+//     last_dispatch_seq); otherwise fall back to the legacy task_id
+//     barrier (strictly greater than last_executed_task_id). Never both
+//     — see the barrier block below for why.
+//  4. Persist the new last_dispatch_seq (or last_executed_task_id, in the
+//     fallback case) BEFORE dispatching the handler so a mid-handler
+//     crash + replay is rejected.
 //  5. Reconstruct the verified Command using the SIGNED task_type
 //     (decoded.Type), never the raw outer frame field. Payload comes
 //     from the verified envelope; pathfinder_session for CONNECT lives
@@ -204,16 +215,25 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 			continue
 		}
 
-		// Replay barrier (dispatch-side; per-NDM monotonic task_id).
-		last := d.state.LastExecutedTaskID()
-		if decoded.TaskID <= last {
-			log.Warnw("Envelope replay rejected",
-				"task_id", decoded.TaskID, "last_executed", last)
-			continue
-		}
-		if err := d.state.SetLastExecutedTaskID(decoded.TaskID); err != nil {
-			log.Errorw("Failed to persist last_executed_task_id",
-				"task_id", decoded.TaskID, "error", err)
+		// Replay barrier (dispatch-side). See checkDispatchReplayBarrier
+		// for the per-envelope either/or rule (dispatch_seq when present,
+		// else the legacy task_id barrier — never both).
+		if err := d.checkDispatchReplayBarrier(decoded); err != nil {
+			if errors.Is(err, errDispatchReplay) {
+				log.Warnw("Envelope replay rejected",
+					"task_id", decoded.TaskID,
+					"has_dispatch_seq", decoded.HasDispatchSeq,
+					"dispatch_seq", decoded.DispatchSeq,
+					"error", err,
+				)
+			} else {
+				log.Errorw("Failed to persist dispatch replay barrier",
+					"task_id", decoded.TaskID,
+					"has_dispatch_seq", decoded.HasDispatchSeq,
+					"dispatch_seq", decoded.DispatchSeq,
+					"error", err,
+				)
+			}
 			continue
 		}
 
@@ -246,6 +266,57 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 		// Dispatch command in a goroutine
 		go d.dispatchCommand(ctx, ws, cmd)
 	}
+}
+
+// checkDispatchReplayBarrier enforces the dispatch-side replay barrier and
+// advances the winning counter, persisted BEFORE the caller dispatches the
+// handler goroutine (conservative against duplicate execution on a
+// mid-handler crash — see SetLastDispatchSeq / SetLastExecutedTaskID).
+//
+// Per-envelope either/or — NEVER both barriers on the same envelope:
+//   - If decoded carries a signed dispatch_seq (HasDispatchSeq==true, i.e.
+//     NDManager minted signing.HdrDispatchSeq into the protected header),
+//     that per-device monotonic counter is authoritative and the legacy
+//     task_id barrier is skipped entirely for this envelope. This is the
+//     XM-12 fix: task_id is the GLOBAL autoincrement row id, so a
+//     scheduled task activated later can legitimately carry a lower
+//     task_id than an already-executed immediate task; gating on task_id
+//     in that case would silently drop a valid dispatch. Running both
+//     barriers on the same envelope would reintroduce exactly that drop
+//     whenever a valid dispatch_seq arrives alongside a stale task_id, so
+//     the fallback below must never also run in this branch.
+//   - Absent (an un-upgraded NDManager that hasn't started minting
+//     dispatch_seq yet) falls back to the legacy task_id barrier,
+//     unchanged from pre-XM-12 behavior. This is what makes the fix safe
+//     to ship ahead of the NDManager/NDBroker side.
+//
+// Both barriers use strict `>` (gap-tolerant — a dropped or reordered-then-
+// caught-up sequence number is fine; only non-increasing is rejected).
+//
+// Returns an error wrapping errDispatchReplay when the envelope must be
+// dropped as a replay (caller: log.Warnw + continue); any other error is a
+// state-persist failure (caller: log.Errorw + continue). Returns nil only
+// when the winning counter was successfully advanced and persisted.
+func (d *CommandDispatcher) checkDispatchReplayBarrier(decoded *signing.DecodedEnvelope) error {
+	if decoded.HasDispatchSeq {
+		last := d.state.LastDispatchSeq()
+		if decoded.DispatchSeq <= last {
+			return fmt.Errorf("%w: dispatch_seq %d <= last_dispatch_seq %d", errDispatchReplay, decoded.DispatchSeq, last)
+		}
+		if err := d.state.SetLastDispatchSeq(decoded.DispatchSeq); err != nil {
+			return fmt.Errorf("persist last_dispatch_seq: %w", err)
+		}
+		return nil
+	}
+
+	last := d.state.LastExecutedTaskID()
+	if decoded.TaskID <= last {
+		return fmt.Errorf("%w: task_id %d <= last_executed_task_id %d", errDispatchReplay, decoded.TaskID, last)
+	}
+	if err := d.state.SetLastExecutedTaskID(decoded.TaskID); err != nil {
+		return fmt.Errorf("persist last_executed_task_id: %w", err)
+	}
+	return nil
 }
 
 func (d *CommandDispatcher) lookupNDMKey(kid []byte) (ed25519.PublicKey, error) {

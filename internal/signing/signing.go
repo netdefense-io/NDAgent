@@ -22,12 +22,20 @@ const (
 	HdrKid        = int64(4)
 	HdrIss        = int64(-65537)
 	HdrIat        = int64(-65538)
-	HdrTaskID    = int64(-65539)
+	HdrTaskID     = int64(-65539)
 	HdrDeviceUUID = int64(-65540)
-	HdrVersion   = int64(-65541)
-	HdrTaskType = int64(-65542) // dispatch envelopes only
-	HdrSeq      = int64(-65543) // response envelopes only
-	HdrExp      = int64(-65544) // dispatch envelopes only
+	HdrVersion    = int64(-65541)
+	HdrTaskType   = int64(-65542) // dispatch envelopes only
+	HdrSeq        = int64(-65543) // response envelopes only
+	HdrExp        = int64(-65544) // dispatch envelopes only
+	// HdrDispatchSeq carries NDManager's per-device monotonic dispatch
+	// sequence (distinct from the global task_id). Dispatch envelopes
+	// only. OPTIONAL — an un-upgraded NDManager never mints one, so its
+	// absence must be tolerated; see DecodedEnvelope.HasDispatchSeq and
+	// the barrier logic in internal/network/dispatcher.go. First minted
+	// value is 1 (0 never appears), so presence in the protected header
+	// is itself the signal, independent of the flag.
+	HdrDispatchSeq = int64(-65545) // dispatch envelopes only, optional
 
 	// Verifiers reject anything other than the current envelope version.
 	EnvelopeVersion = 2
@@ -105,18 +113,26 @@ type VerifyKeyByKid func(kid []byte) (ed25519.PublicKey, error)
 // Type and Exp are populated on dispatch envelopes (NDManager → agent);
 // Seq is populated on response envelopes (agent → broker). The other side
 // of each pair is left at the zero value.
+//
+// DispatchSeq/HasDispatchSeq are dispatch-only and OPTIONAL — a dispatch
+// envelope from an un-upgraded NDManager will never carry HdrDispatchSeq,
+// so HasDispatchSeq distinguishes "absent" (fall back to the task_id
+// barrier) from "present with value 0" (which never actually occurs: the
+// first minted value is 1, but the flag is authoritative regardless).
 type DecodedEnvelope struct {
-	Payload    []byte
-	Alg        int64
-	Kid        []byte
-	Iss        string
-	Iat        int64
-	TaskID     int64
-	DeviceUUID string
-	Version    int64
-	Type       string // dispatch only
-	Exp        int64  // dispatch only
-	Seq        uint64 // response only
+	Payload        []byte
+	Alg            int64
+	Kid            []byte
+	Iss            string
+	Iat            int64
+	TaskID         int64
+	DeviceUUID     string
+	Version        int64
+	Type           string // dispatch only
+	Exp            int64  // dispatch only
+	Seq            uint64 // response only
+	DispatchSeq    uint64 // dispatch only, valid iff HasDispatchSeq
+	HasDispatchSeq bool   // dispatch only — presence of HdrDispatchSeq
 }
 
 // BuildResponseEnvelope signs `payload` with the device's private key
@@ -317,6 +333,17 @@ func protectedHeaderToDecoded(phdr cose.ProtectedHeader, payload []byte) (*Decod
 			return nil, fmt.Errorf("envelope seq must be non-negative, got %d", i)
 		}
 		dec.Seq = uint64(i)
+	}
+	if raw, ok := phdr[HdrDispatchSeq]; ok {
+		i, err := coerceInt64(raw)
+		if err != nil {
+			return nil, fmt.Errorf("envelope dispatch_seq: %w", err)
+		}
+		if i < 0 {
+			return nil, fmt.Errorf("envelope dispatch_seq must be non-negative, got %d", i)
+		}
+		dec.DispatchSeq = uint64(i)
+		dec.HasDispatchSeq = true
 	}
 	return dec, nil
 }
