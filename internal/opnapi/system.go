@@ -117,16 +117,16 @@ func (c *Client) GetFirmwareStatus(ctx context.Context) (*FirmwareStatus, error)
 		return nil, fmt.Errorf("firmware status: %w", err)
 	}
 	var resp struct {
-		Status       string `json:"status"`
-		StatusMsg    string `json:"status_msg"`
-		LastCheck    string `json:"last_check"`
-		Connection   string `json:"connection"`
-		Repository   string `json:"repository"`
-		NeedsReboot  string `json:"needs_reboot"`
-		Upgrade      []json.RawMessage `json:"upgrade_packages"`
-		New          []json.RawMessage `json:"new_packages"`
-		Reinstall    []json.RawMessage `json:"reinstall_packages"`
-		Remove       []json.RawMessage `json:"remove_packages"`
+		Status      string            `json:"status"`
+		StatusMsg   string            `json:"status_msg"`
+		LastCheck   string            `json:"last_check"`
+		Connection  string            `json:"connection"`
+		Repository  string            `json:"repository"`
+		NeedsReboot string            `json:"needs_reboot"`
+		Upgrade     []json.RawMessage `json:"upgrade_packages"`
+		New         []json.RawMessage `json:"new_packages"`
+		Reinstall   []json.RawMessage `json:"reinstall_packages"`
+		Remove      []json.RawMessage `json:"remove_packages"`
 		// OPNsense returns its current + upstream version inside a
 		// `product` block. Both fields are present when the catalog
 		// has been fetched at least once; OPNsenseLatest is only set
@@ -289,7 +289,7 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 	var raw struct {
 		Status              string            `json:"status"`
 		StatusMsg           string            `json:"status_msg"`
-		NeedsReboot         string            `json:"needs_reboot"`          // "0" or "1"
+		NeedsReboot         string            `json:"needs_reboot"`         // "0" or "1"
 		UpgradeNeedsReboot  string            `json:"upgrade_needs_reboot"` // "0" or "1"
 		UpgradePackages     []json.RawMessage `json:"upgrade_packages"`
 		UpgradeSets         []json.RawMessage `json:"upgrade_sets"`

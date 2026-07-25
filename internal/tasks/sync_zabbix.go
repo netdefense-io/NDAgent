@@ -174,12 +174,12 @@ func validateZabbixManagedKey(key string) error {
 // ============================================================================
 //
 // Apply order:
-//   1. Settings (whole-tree replace; admin owns enabled/server/PSK/etc).
-//   2. UserParameter upsert by `key` (server-assigned UUIDs).
-//   3. UserParameter delete-orphans (managed entries no longer in desired).
-//   4. Alias upsert by `key`.
-//   5. Alias delete-orphans.
-//   6. Single ReconfigureZabbix at the end.
+//  1. Settings (whole-tree replace; admin owns enabled/server/PSK/etc).
+//  2. UserParameter upsert by `key` (server-assigned UUIDs).
+//  3. UserParameter delete-orphans (managed entries no longer in desired).
+//  4. Alias upsert by `key`.
+//  5. Alias delete-orphans.
+//  6. Single ReconfigureZabbix at the end.
 //
 // settings may be nil if no ZABBIX_SETTINGS snippet was in the payload —
 // in that case userparameters/aliases are applied against whatever main
@@ -246,13 +246,15 @@ func executeSyncZabbix(
 				"hostname", settings.Hostname,
 				"fields", fields,
 			)
+			msg := dangerousSnippetRejectionMessage("zabbix_settings", settings.Hostname, fields)
 			results = append(results, SyncAPIItemResult{
 				Type:   "zabbix_settings",
 				Name:   settings.Hostname,
 				Action: "rejected",
 				Status: "blocked",
-				Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+				Error:  msg,
 			})
+			errors = append(errors, msg)
 			settings = nil
 		}
 	}
@@ -325,13 +327,15 @@ func executeSyncZabbix(
 						"key", up.Key,
 						"fields", fields,
 					)
+					msg := dangerousSnippetRejectionMessage("zabbix_userparameter", up.Key, fields)
 					results = append(results, SyncAPIItemResult{
 						Type:   "zabbix_userparameter",
 						Name:   up.Key,
 						Action: "rejected",
 						Status: "blocked",
-						Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+						Error:  msg,
 					})
+					errors = append(errors, msg)
 					continue
 				}
 			}

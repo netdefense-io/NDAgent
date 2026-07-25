@@ -11,10 +11,10 @@ func TestParseVPNNetworks(t *testing.T) {
 			map[string]interface{}{
 				"network_name": "site-to-site",
 				"interface": map[string]interface{}{
-					"private_key":  "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
-					"address":      "10.200.0.1/24",
-					"listen_port":  float64(51820),
-					"mtu":          float64(1420),
+					"private_key": "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
+					"address":     "10.200.0.1/24",
+					"listen_port": float64(51820),
+					"mtu":         float64(1420),
 				},
 				"peers": []interface{}{
 					map[string]interface{}{
@@ -175,18 +175,18 @@ func TestParseVPNNetworksMultiple(t *testing.T) {
 			map[string]interface{}{
 				"network_name": "net1",
 				"interface": map[string]interface{}{
-					"private_key":  "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
-					"address":      "10.200.0.1/24",
-					"listen_port":  float64(51820),
+					"private_key": "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
+					"address":     "10.200.0.1/24",
+					"listen_port": float64(51820),
 				},
 				"peers": []interface{}{},
 			},
 			map[string]interface{}{
 				"network_name": "net2",
 				"interface": map[string]interface{}{
-					"private_key":  "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
-					"address":      "10.201.0.1/24",
-					"listen_port":  float64(51821),
+					"private_key": "YAnezQfXMJPGbZhHJJwLaBZWGmJMMJoQdS0JA35Oyms=",
+					"address":     "10.201.0.1/24",
+					"listen_port": float64(51821),
 				},
 				"peers": []interface{}{},
 			},

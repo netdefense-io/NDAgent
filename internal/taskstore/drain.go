@@ -56,7 +56,7 @@ var pluginInstallDropWait = 5 * time.Second
 //     the on-device pkg(8) for the installed version and compare it to the
 //     target version stored at Begin time:
 //     - installed == target (or target is "" and package is installed) →
-//       COMPLETED (the pkg upgrade succeeded; helper write raced the restart)
+//     COMPLETED (the pkg upgrade succeeded; helper write raced the restart)
 //     - installed != target or package absent → FAILED
 //
 // When checker is nil (tests that don't wire pkg) or meta is absent, the

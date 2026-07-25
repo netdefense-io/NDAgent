@@ -2,33 +2,38 @@ package opnapi
 
 import "strings"
 
-// Dangerous-field detection for the device-local SYNC_API opt-in gate
-// (config: reject_dangerous_snippets, default false/permissive).
+// Dangerous-field detection for the device-local SYNC_API gate (config:
+// reject_dangerous_snippets, default true/secure — see config.Config's doc
+// comment on that field for the grandfathering story on upgrade).
 //
 // This mirrors NDManager's producer-side dangerous-field validators (the
 // primary control there is an org:su gate). The device-side gate is
 // defense-in-depth only: detection here never blocks anything by itself —
 // callers in internal/tasks consult ws.RejectDangerousSnippets() and only
-// reject an element when the operator has explicitly opted in.
+// reject an element when the gate is on.
 //
 // Field set (kept in sync with the producer's definition so the two don't
 // drift):
-//   - USER/GROUP: priv containing page-all/all-pages/system-admin;
-//     scope=="system"; non-empty shell outside the nologin allowlist;
-//     non-empty authorizedkeys.
+//   - USER/GROUP: priv granting blanket access — exact "page-all", any
+//     token ending in "-all" (category-wide grant), any token containing
+//     both "system" and "admin", or the agent-only "all-pages" alias (see
+//     privGrantsBlanketAccess and agentOnlyDangerousPrivs); scope=="system";
+//     non-empty shell outside the nologin allowlist; non-empty
+//     authorizedkeys.
 //   - ZABBIX_USERPARAMETER: non-empty command.
 //   - ZABBIX_SETTINGS: enable_remote_commands==true; sudo_root==true.
 //     server_list is deliberately NOT constrained (legitimate MSSP
 //     off-LAN Zabbix servers).
 
-// dangerousUserPrivs are the OPNsense priv tokens that grant broad/admin
-// access. page-all is the real OPNsense priv (see the read-only ACL
-// gotchas in CLAUDE.md); all-pages and system-admin are additional
-// aliases mirrored from the producer-side validator's dangerous-priv set.
-var dangerousUserPrivs = map[string]bool{
-	"page-all":     true,
-	"all-pages":    true,
-	"system-admin": true,
+// agentOnlyDangerousPrivs are additional priv tokens flagged dangerous on
+// the agent side only, beyond the canonical pattern in privGrantsBlanketAccess.
+// all-pages does not match any of that pattern's rules (it's not exactly
+// "page-all", does not end in "-all", and doesn't contain both "system"
+// and "admin") but was part of this gate's original literal set, so it's
+// kept as a union addition — this keeps the agent at least as strict as
+// the canonical NDManager-side check, never less.
+var agentOnlyDangerousPrivs = map[string]bool{
+	"all-pages": true,
 }
 
 // nologinShells are shell values that do NOT count as dangerous — an empty
@@ -105,10 +110,43 @@ func DangerousZabbixSettingsFields(p APIZabbixSettingsPayload) []string {
 func hasDangerousPriv(privs []string) bool {
 	for _, p := range privs {
 		for _, tok := range strings.Split(p, ",") {
-			if dangerousUserPrivs[strings.TrimSpace(tok)] {
+			t := strings.ToLower(strings.TrimSpace(tok))
+			if t == "" {
+				continue
+			}
+			if privGrantsBlanketAccess(t) || agentOnlyDangerousPrivs[t] {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// privGrantsBlanketAccess reports whether a single (already lowercased and
+// trimmed) OPNsense ACL privilege token grants blanket page/system access.
+//
+// This is a faithful port of NDManager's canonical, producer-side check —
+// NDDataModels/NDDataModels/Schema.py's _priv_grants_blanket_access — kept
+// in sync manually since there's no shared library between the Python
+// service and this Go agent. Do not let the two drift: the agent's gate is
+// defense-in-depth, but it should catch at least everything the primary,
+// server-side control catches.
+//
+// "page-all" is OPNsense's literal "full system administrator" ACL ID: it
+// grants every "page-*" privilege at once, i.e. root-equivalent access on
+// the web GUI. Any token ending in "-all" (a category-wide grant) and any
+// token mentioning both "system" and "admin" are also flagged, as a
+// conservative catch-all — a false positive here only costs an extra
+// clearance check; a false negative is a privilege escalation.
+func privGrantsBlanketAccess(tok string) bool {
+	if tok == "page-all" {
+		return true
+	}
+	if strings.HasSuffix(tok, "-all") {
+		return true
+	}
+	if strings.Contains(tok, "system") && strings.Contains(tok, "admin") {
+		return true
 	}
 	return false
 }

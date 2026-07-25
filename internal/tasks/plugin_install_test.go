@@ -12,13 +12,13 @@ import (
 
 func TestAlreadyAtTargetVersion(t *testing.T) {
 	cases := []struct {
-		name             string
-		runningVersion   string
-		runningPackage   string
-		target           string
-		stubAvailable    string // empty → query stub returns no AvailableVersion
-		wantAlready      bool
-		wantMsgContains  string
+		name            string
+		runningVersion  string
+		runningPackage  string
+		target          string
+		stubAvailable   string // empty → query stub returns no AvailableVersion
+		wantAlready     bool
+		wantMsgContains string
 	}{
 		{
 			name:            "explicit target matches running",

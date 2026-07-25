@@ -70,8 +70,8 @@ type ZabbixFeatures struct {
 // ZabbixSettingsBody is the full `zabbixagent` subtree, used for
 // /settings/set writes.
 type ZabbixSettingsBody struct {
-	Local    ZabbixLocal     `json:"local"`
-	Settings ZabbixSettings  `json:"settings"`
+	Local    ZabbixLocal    `json:"local"`
+	Settings ZabbixSettings `json:"settings"`
 }
 
 // ZabbixSettings groups the main/tuning/features blocks.

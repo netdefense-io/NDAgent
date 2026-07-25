@@ -92,8 +92,10 @@ func Delete(ctx context.Context, name string) MutateOutcome {
 // pkgInstallFreeBSD is the production implementation. Captures stderr so
 // we can distinguish "no package matching" (NOT_FOUND) from other failures
 // (ERROR). pkg's not-found message has been stable across versions:
-//   "pkg: No packages available to install matching '<name>' have been found in the repositories"
-//   "pkg: No packages matching '<name>' available in the repositories"
+//
+//	"pkg: No packages available to install matching '<name>' have been found in the repositories"
+//	"pkg: No packages matching '<name>' available in the repositories"
+//
 // We match on the prefix substring.
 func pkgInstallFreeBSD(ctx context.Context, name string) MutateOutcome {
 	stderr, err := runPkgCaptureStderr(ctx, "install", "-y", name)

@@ -78,6 +78,49 @@ func TestDangerousUserFields(t *testing.T) {
 			want: nil,
 		},
 		{
+			// Divergence case: matches the canonical NDManager-side
+			// pattern (_priv_grants_blanket_access) via the "-all" suffix
+			// rule, which the agent's old exact-match set missed.
+			name: "network-all priv is dangerous (canonical -all suffix rule)",
+			user: APIUserPayload{Name: "u", Priv: []string{"network-all"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "page-firewall-all priv is dangerous (canonical -all suffix rule)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-firewall-all"}},
+			want: []string{"priv"},
+		},
+		{
+			// Divergence case: matches via the canonical "contains both
+			// system and admin" rule, not an exact match.
+			name: "admin-system-full priv is dangerous (canonical system+admin rule)",
+			user: APIUserPayload{Name: "u", Priv: []string{"admin-system-full"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "system-super-admin priv is dangerous (canonical system+admin rule)",
+			user: APIUserPayload{Name: "u", Priv: []string{"system-super-admin"}},
+			want: []string{"priv"},
+		},
+		{
+			// Negative: contains "system" but not "admin" — must NOT match
+			// the system+admin rule, and matches neither of the other two
+			// canonical rules either.
+			name: "page-system-information priv is safe (system without admin)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-system-information"}},
+			want: nil,
+		},
+		{
+			name: "priv matching is case-insensitive",
+			user: APIUserPayload{Name: "u", Priv: []string{"PAGE-ALL"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "priv matching trims whitespace before the system+admin rule",
+			user: APIUserPayload{Name: "u", Priv: []string{"  system-admin  "}},
+			want: []string{"priv"},
+		},
+		{
 			name: "system scope is dangerous",
 			user: APIUserPayload{Name: "u", Scope: "system"},
 			want: []string{"scope"},
@@ -151,6 +194,21 @@ func TestDangerousGroupFields(t *testing.T) {
 			name:  "comma-joined priv element containing page-all is dangerous",
 			group: APIGroupPayload{Name: "g", Priv: []string{"page-all,other"}},
 			want:  []string{"priv"},
+		},
+		{
+			name:  "network-all is dangerous (canonical -all suffix rule)",
+			group: APIGroupPayload{Name: "g", Priv: []string{"network-all"}},
+			want:  []string{"priv"},
+		},
+		{
+			name:  "admin-system-full is dangerous (canonical system+admin rule)",
+			group: APIGroupPayload{Name: "g", Priv: []string{"admin-system-full"}},
+			want:  []string{"priv"},
+		},
+		{
+			name:  "page-system-information is safe (system without admin)",
+			group: APIGroupPayload{Name: "g", Priv: []string{"page-system-information"}},
+			want:  nil,
 		},
 	}
 

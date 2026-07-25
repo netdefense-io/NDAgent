@@ -42,13 +42,13 @@ func TestFilterManagedZabbixAliases(t *testing.T) {
 
 func TestZabbixDebugLevelToWire(t *testing.T) {
 	cases := map[string]string{
-		"":       "",
-		"0":      "val_0",
-		"3":      "val_3",
-		"5":      "val_5",
-		"val_2":  "val_2",
-		"bogus":  "val_3", // safe default = warnings
-		"42":     "val_3",
+		"":      "",
+		"0":     "val_0",
+		"3":     "val_3",
+		"5":     "val_5",
+		"val_2": "val_2",
+		"bogus": "val_3", // safe default = warnings
+		"42":    "val_3",
 	}
 	for in, want := range cases {
 		if got := ZabbixDebugLevelToWire(in); got != want {
@@ -190,16 +190,16 @@ func TestMergeZabbixSettings_OverlaysOntoCurrent(t *testing.T) {
 			"local": map[string]interface{}{"hostname": "preexisting"},
 			"settings": map[string]interface{}{
 				"main": map[string]interface{}{
-					"enabled":      "1",
-					"serverList":   map[string]interface{}{"old.example.com": map[string]interface{}{"value": "old.example.com", "selected": float64(1)}},
-					"listenPort":   "10050",
-					"listenIP":     map[string]interface{}{"0.0.0.0": map[string]interface{}{"value": "0.0.0.0", "selected": float64(1)}},
-					"sourceIP":     "",
+					"enabled":       "1",
+					"serverList":    map[string]interface{}{"old.example.com": map[string]interface{}{"value": "old.example.com", "selected": float64(1)}},
+					"listenPort":    "10050",
+					"listenIP":      map[string]interface{}{"0.0.0.0": map[string]interface{}{"value": "0.0.0.0", "selected": float64(1)}},
+					"sourceIP":      "",
 					"listenBacklog": "",
-					"syslogEnable": "0",
-					"logFileSize":  "100",
-					"debugLevel":   map[string]interface{}{"val_3": map[string]interface{}{"value": "warnings", "selected": float64(1)}},
-					"sudoRoot":     "1",
+					"syslogEnable":  "0",
+					"logFileSize":   "100",
+					"debugLevel":    map[string]interface{}{"val_3": map[string]interface{}{"value": "warnings", "selected": float64(1)}},
+					"sudoRoot":      "1",
 				},
 				"tuning": map[string]interface{}{
 					"startAgents": "0", "bufferSend": "5", "bufferSize": "100",
@@ -270,7 +270,7 @@ func TestMergeZabbixSettings_OverlaysOntoCurrent(t *testing.T) {
 func TestMergeZabbixSettings_SnippetDebugLevelWins(t *testing.T) {
 	currentRaw := map[string]interface{}{
 		"zabbixagent": map[string]interface{}{
-			"local":    map[string]interface{}{"hostname": "h"},
+			"local": map[string]interface{}{"hostname": "h"},
 			"settings": map[string]interface{}{
 				"main": map[string]interface{}{
 					"logFileSize": "100",

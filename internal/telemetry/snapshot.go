@@ -22,26 +22,26 @@ import (
 // Heavy fields (pending_updates, cert_expiry, services) are intentionally
 // not present yet — adding them is an additive wire change.
 type Snapshot struct {
-	UptimeSec    uint64         `json:"uptime_sec"`
-	Load1        float64        `json:"load1"`
-	Load5        float64        `json:"load5"`
-	Load15       float64        `json:"load15"`
-	CPUCount     int            `json:"cpu_count"`
-	MemUsedPct   float64        `json:"mem_used_pct"`
-	MemTotalKB   uint64         `json:"mem_total_kb"`
-	SwapUsedPct  float64        `json:"swap_used_pct"`
-	SwapTotalKB  uint64         `json:"swap_total_kb"`
-	Disks        []DiskUsage    `json:"disks"`
-	Hostname     string         `json:"hostname,omitempty"`
-	OSPlatform   string         `json:"os_platform,omitempty"`
-	OSVersion    string         `json:"os_version,omitempty"`
-	CollectedAt  float64        `json:"collected_at"`
-	CollectionMs int64          `json:"collection_ms"`
+	UptimeSec    uint64      `json:"uptime_sec"`
+	Load1        float64     `json:"load1"`
+	Load5        float64     `json:"load5"`
+	Load15       float64     `json:"load15"`
+	CPUCount     int         `json:"cpu_count"`
+	MemUsedPct   float64     `json:"mem_used_pct"`
+	MemTotalKB   uint64      `json:"mem_total_kb"`
+	SwapUsedPct  float64     `json:"swap_used_pct"`
+	SwapTotalKB  uint64      `json:"swap_total_kb"`
+	Disks        []DiskUsage `json:"disks"`
+	Hostname     string      `json:"hostname,omitempty"`
+	OSPlatform   string      `json:"os_platform,omitempty"`
+	OSVersion    string      `json:"os_version,omitempty"`
+	CollectedAt  float64     `json:"collected_at"`
+	CollectionMs int64       `json:"collection_ms"`
 	// Heavy holds OPNsense-API-derived fields refreshed every 15 min by
 	// HeavyCollector. Absent until the collector's first refresh succeeds
 	// and on agents where the OPNsense API client wasn't configured (no
 	// SYNC creds). Older brokers ignore the unknown field.
-	Heavy        *HeavySnapshot `json:"heavy,omitempty"`
+	Heavy *HeavySnapshot `json:"heavy,omitempty"`
 }
 
 // DiskUsage is one mountpoint slice of the snapshot. We report mountpoints

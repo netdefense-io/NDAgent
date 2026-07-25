@@ -433,4 +433,3 @@ func reconcileFirmwareUpgradeRows(ctx context.Context, store *taskstore.Store, a
 		logf("firmware-reconcile: task %s: marked COMPLETED (version=%s)", row.TaskID, currentVersion)
 	}
 }
-

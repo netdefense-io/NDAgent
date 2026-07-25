@@ -321,4 +321,3 @@ func TestDrain_PluginInstall_OtherTypesUnaffected(t *testing.T) {
 		t.Fatal("pkg checker was called for a non-PLUGIN_INSTALL task type — violates scope constraint")
 	}
 }
-

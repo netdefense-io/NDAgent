@@ -18,8 +18,9 @@
 
 /**
  * Token-free entry point: idempotently reconcile the netdefense-readonly
- * OPNsense user + group to the desired state (READONLY_PRIVS) on every
- * package install or upgrade.
+ * OPNsense user + group to the desired state (READONLY_PRIVS), and
+ * grandfather any Settings field whose default changed after a device's
+ * config.xml was last saved — on every package install or upgrade.
  *
  * This script is invoked directly from the +MANIFEST post-install hook
  * after configd restarts, so it runs on every `pkg install` AND every
@@ -29,17 +30,31 @@
  * device at next upgrade without any manual intervention.
  *
  * Does NOT require --token. Does NOT touch the agent token, device_uuid,
- * API key/secret, or any other Settings field. Only calls
- * ReadOnlyUserProvisioner::provision() and fires the necessary backend
- * triggers.
+ * API key/secret, or any other Settings field beyond the two narrow
+ * default-migrations below. Only calls ReadOnlyUserProvisioner::provision()
+ * and fires the necessary backend triggers.
  *
- * Also persists the webadminReadonlyUser default XML node into config.xml
- * when the plugin is already configured (token present) but the node is
- * absent (upgrade from a version that predates the field). This ensures
- * the Volt template renders the webadmin_readonly_user= line in
- * ndagent.conf. NDAgent's Go fallback in GetWebadminReadOnlyUser() already
- * handles the absent-line case, so this is belt-and-suspenders to keep
- * the conf self-documenting.
+ * Config-default migrations performed here. Both follow the same shape:
+ * only touch config.xml when the plugin is already configured (token
+ * present) AND the specific field's XML node is absent — i.e. this
+ * device's saved config predates the field. A genuinely fresh,
+ * never-configured device is left untouched here and picks up
+ * Settings.xml's current <Default> the first time it IS configured (GUI
+ * Apply or the unattended configure.php helper), so neither migration ever
+ * fires for a real fresh install.
+ *
+ *   - webadminReadonlyUser: persists the read-only WebAdmin username
+ *     default so the Volt template renders webadmin_readonly_user= in
+ *     ndagent.conf on an upgrade from a version that predates the field.
+ *   - rejectDangerousSnippets: persists an explicit "0" (off) so a device
+ *     that was already relying on the old permissive default doesn't
+ *     silently start rejecting dangerous SYNC_API snippet content it was
+ *     already applying, now that Settings.xml's <Default> for this field
+ *     is "1" (secure-by-default). This is the grandfathering mechanism for
+ *     the reject_dangerous_snippets default flip — see CLAUDE.md's
+ *     "Device-local dangerous-snippet gate" section for the full story
+ *     (the Go-side default, this reconcile, and the rejection message
+ *     format all need to stay in sync).
  *
  * Usage:
  *   ensure_readonly.php [--json]
@@ -81,19 +96,32 @@ try {
     // Reconcile user + group + priv set to desired state.
     $roResult = ReadOnlyUserProvisioner::provision();
 
-    // Persist webadminReadonlyUser default to config.xml when the plugin
-    // is configured (token present) but the XML node is absent. We write
-    // the node directly rather than calling serializeToConfig() to avoid
-    // rewriting every Settings field (which would overwrite an
+    // Persist per-field defaults to config.xml when the plugin is
+    // configured (token present) but a given field's XML node is absent.
+    // We write the node directly rather than calling serializeToConfig()
+    // to avoid rewriting every Settings field (which would overwrite an
     // unconfigured install's required-but-empty fields).
     $cfg = Config::getInstance()->object();
+    $isConfigured = isset($cfg->OPNsense->netdefense->settings)
+        && (string)$cfg->OPNsense->netdefense->settings->token !== '';
+
     if (
-        isset($cfg->OPNsense->netdefense->settings)
-        && (string)$cfg->OPNsense->netdefense->settings->token !== ''
+        $isConfigured
         && !isset($cfg->OPNsense->netdefense->settings->webadminReadonlyUser)
     ) {
         $cfg->OPNsense->netdefense->settings->webadminReadonlyUser =
             ReadOnlyUserProvisioner::READONLY_USERNAME;
+        $settingsChanged = true;
+    }
+
+    // Grandfather the previous permissive reject_dangerous_snippets
+    // default (see the header docblock) for any device already configured
+    // before this field existed in its saved config.xml.
+    if (
+        $isConfigured
+        && !isset($cfg->OPNsense->netdefense->settings->rejectDangerousSnippets)
+    ) {
+        $cfg->OPNsense->netdefense->settings->rejectDangerousSnippets = '0';
         $settingsChanged = true;
     }
 
@@ -122,8 +150,9 @@ if ($roResult['result'] === 'ok') {
 }
 
 // Always reload the template so ndagent.conf reflects any state change —
-// either the read-only user was just created/repaired, or the
-// webadminReadonlyUser default was just written to config.xml.
+// the read-only user was just created/repaired, or one of the
+// webadminReadonlyUser / rejectDangerousSnippets defaults was just
+// written to config.xml.
 $backend->configdRun('template reload OPNsense/NetDefense');
 
 $messages = [

@@ -174,6 +174,26 @@ type SyncAPIItemResult struct {
 	Error  string `json:"error,omitempty"`
 }
 
+// dangerousSnippetRejectionMessage builds the explicit, actionable error
+// text for a USER/GROUP/ZABBIX_* snippet element rejected by the
+// reject_dangerous_snippets gate. Used for both the per-item
+// SyncAPIItemResult.Error and the task-level errors slice (see
+// executeSyncUsersGroups and executeSyncZabbix) — a rejection now fails the
+// overall SYNC_API task rather than only showing up as a "blocked" item
+// buried in an otherwise-COMPLETED result, per the house rule that a
+// policy rejection is a FAILED task with a clear reason.
+//
+// snippetType matches the SyncAPIItemResult.Type values already in use
+// ("user", "group", "zabbix_settings", "zabbix_userparameter") so the
+// message and the structured result line up; name is the element's
+// identity (username, group name, Zabbix hostname, or userparameter key).
+func dangerousSnippetRejectionMessage(snippetType, name string, fields []string) string {
+	return fmt.Sprintf(
+		"rejected by local policy reject_dangerous_snippets: %s in %s %q; set reject_dangerous_snippets=false in the agent's local configuration to allow",
+		strings.Join(fields, ", "), snippetType, name,
+	)
+}
+
 // HandleSyncAPI handles the SYNC_API task using OPNsense REST API.
 func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network.Command) error {
 	log := logging.Named("SYNC_API")
@@ -1379,13 +1399,15 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 					"name", u.Name,
 					"fields", fields,
 				)
+				msg := dangerousSnippetRejectionMessage("user", u.Name, fields)
 				results = append(results, SyncAPIItemResult{
 					Type:   "user",
 					Name:   u.Name,
 					Action: "rejected",
 					Status: "blocked",
-					Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+					Error:  msg,
 				})
+				errors = append(errors, msg)
 				continue
 			}
 			applyUsers = append(applyUsers, u)
@@ -1398,13 +1420,15 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 					"name", g.Name,
 					"fields", fields,
 				)
+				msg := dangerousSnippetRejectionMessage("group", g.Name, fields)
 				results = append(results, SyncAPIItemResult{
 					Type:   "group",
 					Name:   g.Name,
 					Action: "rejected",
 					Status: "blocked",
-					Error:  fmt.Sprintf("dangerous field(s) %v blocked by reject_dangerous_snippets", fields),
+					Error:  msg,
 				})
+				errors = append(errors, msg)
 				continue
 			}
 			applyGroups = append(applyGroups, g)

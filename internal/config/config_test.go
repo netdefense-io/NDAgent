@@ -173,16 +173,22 @@ server_host=localhost
 	if cfg.Enabled {
 		t.Error("Enabled default should be false")
 	}
-	if cfg.RejectDangerousSnippets {
-		t.Error("RejectDangerousSnippets default should be false (permissive)")
+	if !cfg.RejectDangerousSnippets {
+		t.Error("RejectDangerousSnippets default should be true (secure-by-default)")
 	}
 }
 
-// TestLoad_RejectDangerousSnippetsDefaultsFalse guards the device-local
-// dangerous-snippet gate's permissive default: an omitted config line must never
-// silently start rejecting dangerous SYNC_API snippet content, since that
-// would be a behavior change for every existing device on upgrade.
-func TestLoad_RejectDangerousSnippetsDefaultsFalse(t *testing.T) {
+// TestLoad_RejectDangerousSnippetsDefaultsTrue guards the device-local
+// dangerous-snippet gate's secure-by-default posture: an omitted config
+// line must reject dangerous SYNC_API snippet content. Fleets that relied
+// on the previous permissive default are grandfathered by the OPNsense
+// plugin's post-install reconcile writing an explicit
+// reject_dangerous_snippets=false into ndagent.conf on upgrade — that
+// grandfathering lives outside this Go binary (see ensure_readonly.php),
+// so it isn't exercised by this test. This test only pins the Go-level
+// default for a config that genuinely omits the line (e.g. a fresh install,
+// or any config predating the grandfathering mechanism).
+func TestLoad_RejectDangerousSnippetsDefaultsTrue(t *testing.T) {
 	content := `
 token=test-token
 device_uuid=test-device
@@ -193,13 +199,14 @@ server_host=localhost
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if cfg.RejectDangerousSnippets {
-		t.Error("RejectDangerousSnippets should default to false when omitted")
+	if !cfg.RejectDangerousSnippets {
+		t.Error("RejectDangerousSnippets should default to true when omitted")
 	}
 }
 
-// TestLoad_RejectDangerousSnippetsExplicitlyEnabled confirms the opt-in
-// still works when an operator turns it on.
+// TestLoad_RejectDangerousSnippetsExplicitlyEnabled confirms the setting
+// still works when explicitly set to true (redundant with the default, but
+// an operator or the grandfathering reconcile may write it explicitly).
 func TestLoad_RejectDangerousSnippetsExplicitlyEnabled(t *testing.T) {
 	content := `
 token=test-token
@@ -214,6 +221,27 @@ reject_dangerous_snippets=true
 	}
 	if !cfg.RejectDangerousSnippets {
 		t.Error("expected reject_dangerous_snippets=true to be honored when explicitly set")
+	}
+}
+
+// TestLoad_RejectDangerousSnippetsExplicitlyDisabled is the grandfathering
+// escape hatch: a fleet upgrading from the previous permissive default must
+// be able to carry an explicit reject_dangerous_snippets=false and have it
+// honored, overriding the new secure-by-default.
+func TestLoad_RejectDangerousSnippetsExplicitlyDisabled(t *testing.T) {
+	content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+reject_dangerous_snippets=false
+`
+	configPath := createTempConfigFile(t, content)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RejectDangerousSnippets {
+		t.Error("expected reject_dangerous_snippets=false to be honored when explicitly set (grandfathering escape hatch)")
 	}
 }
 

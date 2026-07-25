@@ -64,7 +64,7 @@ type AuthResponse struct {
 // fields below from the verified bytes. Outer task_id is reconciled
 // against the protected-header task_id for tamper-resistance.
 type Command struct {
-	TaskID            string                 // numeric, stringified for backwards compatibility
+	TaskID            string // numeric, stringified for backwards compatibility
 	TaskType          string
 	Payload           map[string]interface{} // verified payload bytes parsed as JSON object
 	PathfinderSession string                 // CONNECT only; outer-frame routing token
@@ -664,10 +664,12 @@ func (w *WebSocketClient) IsTestMode() bool {
 }
 
 // RejectDangerousSnippets returns whether the device-local dangerous-
-// snippet-field gate is enabled (default false/permissive). When true,
-// SYNC_API rejects individual USER/GROUP/ZABBIX_* snippet elements that
-// carry a dangerous field instead of applying them — see
-// internal/opnapi.DangerousUserFields and friends for the field set.
+// snippet-field gate is enabled (default true/secure — grandfathered
+// fleets carry an explicit false in ndagent.conf, see config.Config's
+// RejectDangerousSnippets doc comment). When true, SYNC_API rejects
+// individual USER/GROUP/ZABBIX_* snippet elements that carry a dangerous
+// field instead of applying them — see internal/opnapi.DangerousUserFields
+// and friends for the field set.
 func (w *WebSocketClient) RejectDangerousSnippets() bool {
 	return w.cfg.RejectDangerousSnippets
 }

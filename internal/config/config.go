@@ -41,15 +41,22 @@ type Config struct {
 	// Test mode
 	TestMode bool `mapstructure:"test_mode"`
 
-	// RejectDangerousSnippets is an opt-in, device-local defense-in-depth
-	// gate against dangerous USER/GROUP/ZABBIX_* SYNC_API snippet content
+	// RejectDangerousSnippets is a device-local defense-in-depth gate
+	// against dangerous USER/GROUP/ZABBIX_* SYNC_API snippet content
 	// (privileged priv, scope=system, non-nologin shell, authorizedkeys,
 	// Zabbix remote commands, sudo_root). It mirrors NDManager's producer-
 	// side dangerous-field validators (the primary control, gated by
-	// org:su) — this is a second, local line of defense an operator can
-	// enable. Default false (permissive/unchanged behavior): a default-on
-	// gate risks rejecting legitimate service-account/monitoring snippet
-	// content already applied on production devices. See
+	// org:su) — this is a second, local line of defense.
+	//
+	// Default true (secure-by-default) as of the flip in this field's
+	// history: an omitted config line now means "reject". Fleets that were
+	// already relying on the previous permissive default are grandfathered
+	// via the OPNsense plugin's post-install reconcile
+	// (ensure_readonly.php), which writes an explicit "false" into
+	// config.xml for already-configured devices whose config predates this
+	// field, on package upgrade — see that script and Settings.xml's
+	// <rejectDangerousSnippets> Default for the other half of the
+	// mechanism. Fresh installs get true with nothing to grandfather. See
 	// internal/opnapi's DangerousUserFields and friends for the exact
 	// field set this gate checks.
 	RejectDangerousSnippets bool `mapstructure:"reject_dangerous_snippets"`
@@ -113,7 +120,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pid_file", "/var/run/ndagent.pid")
 	v.SetDefault("log_level", "INFO")
 	v.SetDefault("test_mode", false)
-	v.SetDefault("reject_dangerous_snippets", false)
+	v.SetDefault("reject_dangerous_snippets", true)
 	v.SetDefault("enabled", false)
 	v.SetDefault("opnsense_api_url", "https://127.0.0.1/api")
 	v.SetDefault("pathfinder_host", "https://pathfinder.netdefense.io")

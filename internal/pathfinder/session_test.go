@@ -42,7 +42,7 @@ func TestIsValidSessionID(t *testing.T) {
 	}{
 		{"f6737f4c3759186bf3a7a2a34295e8f8", true},
 		{"ABCDEF0123456789abcdef0123456789", true},
-		{"f6737f4c3759186bf3a7a2a34295e8f", false},  // Too short
+		{"f6737f4c3759186bf3a7a2a34295e8f", false},   // Too short
 		{"f6737f4c3759186bf3a7a2a34295e8f88", false}, // Too long
 		{"g6737f4c3759186bf3a7a2a34295e8f8", false},  // Invalid char 'g'
 		{"f6737f4c3759186bf3a7a2a34295e8f!", false},  // Invalid char '!'

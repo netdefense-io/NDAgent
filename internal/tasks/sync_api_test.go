@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -450,13 +451,15 @@ func newUserGroupTestServer(t *testing.T) (client *opnapi.Client, addedUsers, ad
 }
 
 // TestExecuteSyncUsersGroups_DangerousFieldGate is the revert guard for the
-// device-local dangerous-field opt-in gate. Table-driven over each dangerous USER
+// device-local dangerous-field gate. Table-driven over each dangerous USER
 // field individually (mirrors NDManager's producer-side dangerous-field set):
 // with the gate OFF, a dangerous user is applied same as any other (no
 // regression versus pre-gate behavior); with the gate ON, the dangerous user
 // is rejected (never reaches AddUser) while an unrelated safe user in the
-// same sync is still applied, and the rejection shows up as a telemetry-
-// visible "rejected" result.
+// same sync is still applied, the rejection shows up as a telemetry-visible
+// "rejected" result, and the overall task result is a FAILED sync (a policy
+// rejection is a FAILED task with a clear reason, not a silently-successful
+// one with a buried "blocked" item).
 func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 	safeUser := opnapi.APIUserPayload{
 		Name:     "safe-user",
@@ -483,8 +486,12 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 				users := []opnapi.APIUserPayload{safeUser, du.user}
 				result := executeSyncUsersGroups(context.Background(), client, users, nil, rejectDangerous)
 
-				if !result.Success {
-					t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+				if rejectDangerous {
+					if result.Success {
+						t.Error("expected failure: a dangerous-field rejection must fail the task")
+					}
+				} else if !result.Success {
+					t.Errorf("expected success (gate off, nothing rejected), got errors: %+v", result.Errors)
 				}
 
 				var wantAdded []string
@@ -506,6 +513,12 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 				if rejectDangerous {
 					if fmt.Sprint(rejectedNames) != fmt.Sprint([]string{du.user.Name}) {
 						t.Errorf("rejected results = %v, want [%s]", rejectedNames, du.user.Name)
+					}
+					if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "rejected by local policy reject_dangerous_snippets") {
+						t.Errorf("errors = %v, want a policy-rejection message naming reject_dangerous_snippets", result.Errors)
+					}
+					if !strings.Contains(result.Errors[0], "reject_dangerous_snippets=false") {
+						t.Errorf("errors = %v, want the message to name the opt-out (reject_dangerous_snippets=false)", result.Errors)
 					}
 				} else if len(rejectedNames) != 0 {
 					t.Errorf("gate off must never produce a rejected result, got %v", rejectedNames)
@@ -530,8 +543,12 @@ func TestExecuteSyncUsersGroups_DangerousGroupPrivGate(t *testing.T) {
 			groups := []opnapi.APIGroupPayload{safeGroup, dangerousGroup}
 			result := executeSyncUsersGroups(context.Background(), client, nil, groups, rejectDangerous)
 
-			if !result.Success {
-				t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+			if rejectDangerous {
+				if result.Success {
+					t.Error("expected failure: a dangerous-field rejection must fail the task")
+				}
+			} else if !result.Success {
+				t.Errorf("expected success (gate off, nothing rejected), got errors: %+v", result.Errors)
 			}
 
 			var wantAdded []string
@@ -629,8 +646,8 @@ func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExi
 		true, /* gate on */
 	)
 
-	if !result.Success {
-		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	if result.Success {
+		t.Error("expected failure: a dangerous-field rejection must fail the task")
 	}
 	if len(userDeleteCalls) != 0 {
 		t.Errorf("expected no user delete calls, got %v (pre-existing managed user with a rejected dangerous field must survive the sync)", userDeleteCalls)

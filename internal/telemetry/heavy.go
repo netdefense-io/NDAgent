@@ -31,8 +31,8 @@ type HeavySnapshot struct {
 }
 
 type ServicesBlock struct {
-	Items  []opnapi.ServiceEntry `json:"items"`
-	AsOf   float64               `json:"as_of"`
+	Items []opnapi.ServiceEntry `json:"items"`
+	AsOf  float64               `json:"as_of"`
 }
 
 type UpdatesBlock struct {

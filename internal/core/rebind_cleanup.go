@@ -24,7 +24,8 @@ import (
 // OPNsense Settings model and triggers a template reload so the next
 // rendering of /usr/local/etc/ndagent.conf drops the
 // `bootstrap_token=` line. See:
-//   plugin/src/usr/local/opnsense/scripts/OPNsense/NetDefense/clear_rebind_token.php
+//
+//	plugin/src/usr/local/opnsense/scripts/OPNsense/NetDefense/clear_rebind_token.php
 const (
 	clearRebindTokenScript = "/usr/local/opnsense/scripts/OPNsense/NetDefense/clear_rebind_token.php"
 	phpInterpreter         = "/usr/local/bin/php"

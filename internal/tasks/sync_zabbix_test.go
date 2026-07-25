@@ -153,12 +153,12 @@ func TestParseAPIZabbixAliases(t *testing.T) {
 
 func TestValidateZabbixManagedKey(t *testing.T) {
 	cases := map[string]bool{
-		"nd-cpu":         true,
-		"nd-foo-bar":     true,
-		"test.key.name":  false, // admin-owned, no prefix → must fail
-		"vfs.fs.size":    false,
-		"":               false,
-		"prefix-nd-foo":  false, // prefix must be at start
+		"nd-cpu":        true,
+		"nd-foo-bar":    true,
+		"test.key.name": false, // admin-owned, no prefix → must fail
+		"vfs.fs.size":   false,
+		"":              false,
+		"prefix-nd-foo": false, // prefix must be at start
 	}
 	for key, shouldPass := range cases {
 		err := validateZabbixManagedKey(key)
@@ -267,8 +267,12 @@ func TestExecuteSyncZabbix_DangerousUserParameterCommandGate(t *testing.T) {
 			result := executeSyncZabbix(context.Background(), client, nil,
 				[]opnapi.APIZabbixUserParameterPayload{safe, dangerous}, nil, rejectDangerous)
 
-			if !result.Success {
-				t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+			if rejectDangerous {
+				if result.Success {
+					t.Error("expected failure: a dangerous-field rejection must fail the task")
+				}
+			} else if !result.Success {
+				t.Errorf("expected success (gate off, nothing rejected), got errors: %+v", result.Errors)
 			}
 
 			var wantKeys []string
@@ -320,8 +324,12 @@ func TestExecuteSyncZabbix_DangerousSettingsFieldGate(t *testing.T) {
 				settings := tt.settings
 				result := executeSyncZabbix(context.Background(), client, &settings, nil, nil, rejectDangerous)
 
-				if !result.Success {
-					t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+				if rejectDangerous {
+					if result.Success {
+						t.Error("expected failure: a dangerous-field rejection must fail the task")
+					}
+				} else if !result.Success {
+					t.Errorf("expected success (gate off, nothing rejected), got errors: %+v", result.Errors)
 				}
 
 				wantSetCalls := 1
@@ -390,8 +398,8 @@ func TestExecuteSyncZabbix_RejectOnlySyncDoesNotReconfigure(t *testing.T) {
 	result := executeSyncZabbix(context.Background(), client, nil,
 		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
 
-	if !result.Success {
-		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	if result.Success {
+		t.Error("expected failure: a dangerous-field rejection must fail the task")
 	}
 	if len(*addedKeys) != 0 {
 		t.Errorf("expected no addUserparameter calls, got %v", *addedKeys)
@@ -471,8 +479,8 @@ func TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePre
 	result := executeSyncZabbix(context.Background(), client, nil,
 		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
 
-	if !result.Success {
-		t.Errorf("expected success (a rejection is not a sync error), got errors: %+v", result.Errors)
+	if result.Success {
+		t.Error("expected failure: a dangerous-field rejection must fail the task")
 	}
 	if len(deleteCalls) != 0 {
 		t.Errorf("expected no delUserparameter calls, got %v (pre-existing managed userparameter with a rejected dangerous field must survive the sync)", deleteCalls)
