@@ -410,6 +410,94 @@ func TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities(t *testing.
 	}
 }
 
+// TestExecuteSyncUsersGroups_OrphanDeleteAtZeroDesiredCount reproduces the
+// "detach the last USER/GROUP template" scenario: a device carries a
+// previously-applied, non-protected managed user and group (e.g. from a
+// permissive sync before the template was removed), and the current sync
+// carries zero desired users and zero desired groups. executeSyncUsersGroups
+// itself has always handled an empty desired set correctly (see
+// TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities, which
+// calls it directly with nil/nil) -- the bug lived one level up, in
+// HandleSyncAPI's now-removed `if len(users) > 0 || len(groups) > 0` gate,
+// which skipped calling this function at all when the payload had zero
+// user/group entries, so the orphan-delete pass never ran and stale managed
+// identities were left stranded on the device. This test guards the
+// function-level contract that a future regression (e.g. reintroducing a
+// count-based gate anywhere in the call chain) would violate: given a
+// zero-count desired set, a pre-existing non-protected managed user/group
+// must be deleted, not silently skipped.
+func TestExecuteSyncUsersGroups_OrphanDeleteAtZeroDesiredCount(t *testing.T) {
+	var userDeleteCalls, groupDeleteCalls []string
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":  "user-uuid-1",
+					"name":  "svc-monitor",
+					"descr": "Monitoring service account [nd-template:base]",
+					"uid":   "1005",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{
+					"uuid":        "group-uuid-1",
+					"name":        "svc-monitors",
+					"description": "Monitoring service group [nd-template:base]",
+					"gid":         "2005",
+				},
+			},
+			RowCount: 1,
+			Total:    1,
+		})
+	})
+	mux.HandleFunc("/auth/user/del/", func(w http.ResponseWriter, r *http.Request) {
+		userDeleteCalls = append(userDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+	mux.HandleFunc("/auth/group/del/", func(w http.ResponseWriter, r *http.Request) {
+		groupDeleteCalls = append(groupDeleteCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	// Zero desired users and zero desired groups -- the exact payload
+	// shape produced by detaching the last USER/GROUP template.
+	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false)
+
+	if len(userDeleteCalls) != 1 || !strings.Contains(userDeleteCalls[0], "user-uuid-1") {
+		t.Errorf("expected exactly one delete call for orphaned user user-uuid-1, got %v", userDeleteCalls)
+	}
+	if len(groupDeleteCalls) != 1 || !strings.Contains(groupDeleteCalls[0], "group-uuid-1") {
+		t.Errorf("expected exactly one delete call for orphaned group group-uuid-1, got %v", groupDeleteCalls)
+	}
+	if !result.Success {
+		t.Errorf("expected sync to succeed, got errors: %+v", result.Errors)
+	}
+
+	var deletedNames []string
+	for _, r := range result.Results {
+		if r.Action == "deleted" && r.Status == "success" {
+			deletedNames = append(deletedNames, r.Name)
+		}
+	}
+	wantDeleted := []string{"svc-monitor", "svc-monitors"}
+	if got, want := sortedCopy(deletedNames), sortedCopy(wantDeleted); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("deleted names = %v, want %v", got, want)
+	}
+}
+
 func sortedCopy(s []string) []string {
 	out := append([]string(nil), s...)
 	sort.Strings(out)

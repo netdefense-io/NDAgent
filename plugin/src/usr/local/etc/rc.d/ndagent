@@ -21,6 +21,20 @@
 name=ndagent
 rcvar=ndagent_enable
 
+# The Go binary only installs handlers for SIGINT/SIGTERM (see
+# internal/core/shutdown.go) -- it does not catch SIGHUP. rc.subr's
+# default reload_cmd sends `kill -HUP $rc_pid`, and daemon(8) is run
+# without -r (no auto-restart on child exit), so an unhandled SIGHUP
+# would simply kill the agent and leave it down instead of reloading
+# its configuration. Override reload to do a full restart instead --
+# config changes always require a fresh process anyway, and the
+# OPNsense plugin's own "Apply" button already goes through this same
+# restart path via ApiMutableServiceControllerBase::reconfigureAction()
+# (reconfigureForceRestart() is not overridden, so it defaults to a
+# forced stop/start rather than a soft reload).
+extra_commands="reload"
+reload_cmd="ndagent_reload"
+
 load_rc_config $name
 
 : ${ndagent_enable:="NO"}
@@ -75,6 +89,11 @@ ndagent_status()
         echo "NetDefense Agent is not running"
         return 1
     fi
+}
+
+ndagent_reload()
+{
+    run_rc_command "restart"
 }
 
 start_precmd=ndagent_prestart

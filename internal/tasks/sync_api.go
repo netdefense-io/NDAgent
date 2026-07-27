@@ -378,14 +378,19 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Execute sync for aliases and rules
 	syncResult := executeSyncAPI(ctx, apiClient, aliases, rules)
 
-	// Execute sync for users and groups if present
-	if len(users) > 0 || len(groups) > 0 {
-		userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups, ws.RejectDangerousSnippets())
-		syncResult.Results = append(syncResult.Results, userGroupResult.Results...)
-		syncResult.Errors = append(syncResult.Errors, userGroupResult.Errors...)
-		if !userGroupResult.Success {
-			syncResult.Success = false
-		}
+	// Execute sync for users and groups. Runs every sync (no len-based
+	// gate) so that managed-but-undesired identities are reliably swept
+	// off the device -- same "empty desired list means delete everything
+	// managed" semantics as the firewall ALIAS/RULE path, and the same
+	// fix already applied to Unbound/VPN/Zabbix (see the len-based gates
+	// removed below). Detaching the last USER/GROUP template and
+	// re-syncing must still orphan-delete previously-applied managed
+	// users/groups, not leave them stranded on the device.
+	userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups, ws.RejectDangerousSnippets())
+	syncResult.Results = append(syncResult.Results, userGroupResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, userGroupResult.Errors...)
+	if !userGroupResult.Success {
+		syncResult.Success = false
 	}
 
 	// Execute sync for Unbound DNS entities.

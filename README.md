@@ -45,7 +45,7 @@ For headless/scripted provisioning (registers, provisions OPNsense API credentia
 curl -sSL https://repo.netdefense.io/install.sh | sh -s -- --auto-setup=<org-registration-token>
 ```
 
-Requirements: **FreeBSD 14 / amd64**, **OPNsense 25.7+**. The Go binary is identical across environments — this repo builds it from source; the packages above are what's actually signed and shipped.
+Requirements: **FreeBSD 14 or FreeBSD 15 / amd64** — OPNsense 25.7 through 26.1 run FreeBSD 14, OPNsense 26.7+ runs FreeBSD 15. The Go binary is identical across environments — this repo builds it from source; the packages above are what's actually signed and shipped.
 
 ## What it talks to
 
