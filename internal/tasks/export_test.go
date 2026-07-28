@@ -88,3 +88,16 @@ func SetFirmwareExecFuncForTest(f func(ctx context.Context, args ...string) ([]b
 	firmwareExecFunc = f
 	return func() { firmwareExecFunc = old }
 }
+
+// ── Remote-access ceiling test exports ─────────────────────────────────────
+
+// SetConnectSendResponseForTest replaces the terminal-response sender used by
+// HandleConnect's remote-access-policy refusal path and returns a restore
+// function. Lets a test assert the refusal result without a live WebSocket.
+func SetConnectSendResponseForTest(
+	f func(ws *network.WebSocketClient, taskID string, result TaskResult) error,
+) (restore func()) {
+	old := connectSendResponse
+	connectSendResponse = f
+	return func() { connectSendResponse = old }
+}

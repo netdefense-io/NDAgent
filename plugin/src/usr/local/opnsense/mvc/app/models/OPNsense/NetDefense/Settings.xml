@@ -57,6 +57,51 @@
             <Default>/usr/local/sbin/opnsense-shell</Default>
             <Required>Y</Required>
         </pathfinderShell>
+        <remoteAccessPolicy type="OptionField">
+            <!-- Device-local ceiling on NetDefense-mediated remote access
+                 (CONNECT sessions). This is the device's final word: the
+                 control plane may request a session at or below this
+                 ceiling and never above it.
+
+                 full     - permit whatever is requested: shell, SSH, exec
+                            stream, and web UI.
+                 readonly - clamp every session to read-only regardless of
+                            what the control plane asks for: web UI only,
+                            no shell, no SSH, no exec stream.
+                 disabled - refuse remote sessions outright; no relay is
+                            dialed and no stream is served.
+
+                 Nothing reachable from the control plane can raise this
+                 value. It lives here in config.xml, and the agent's
+                 OPNsense REST client has no writer for the
+                 netdefense/settings node (its endpoints are hardcoded
+                 per-plugin: unbound/*, zabbixagent/*, wireguard/*,
+                 core/service/search), so a configuration sync cannot flip
+                 it. Changing it requires access to this device.
+
+                 Default "full" — identical to behavior before the ceiling
+                 existed. Unlike rejectDangerousSnippets, this default
+                 matches the legacy behavior exactly, so no grandfathering
+                 migration is needed in ensure_readonly.php: an absent
+                 config.xml node, an absent ndagent.conf line, and an
+                 explicit "full" all mean the same thing. A package upgrade
+                 therefore can never silently disable remote access on an
+                 existing fleet.
+
+                 Enforced twice in the agent, deliberately: HandleConnect
+                 (internal/tasks/connect.go) refuses or clamps before the
+                 relay is dialed, and the pathfinder proxy's per-stream
+                 chokepoint (internal/pathfinder/proxy.go) re-checks so the
+                 guarantee does not depend on a single caller. See CLAUDE.md's
+                 "Device-local remote-access ceiling" section. -->
+            <Default>full</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <full>Full access (shell, SSH and web UI)</full>
+                <readonly>Read-only web UI only (no shell)</readonly>
+                <disabled>Disabled (refuse all remote sessions)</disabled>
+            </OptionValues>
+        </remoteAccessPolicy>
         <rejectDangerousSnippets type="BooleanField">
             <!-- Device-local defense-in-depth gate. When enabled, SYNC_API
                  rejects individual USER/GROUP/ZABBIX_* snippet elements

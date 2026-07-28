@@ -10,6 +10,42 @@ import (
 	"github.com/spf13/viper"
 )
 
+// RemoteAccessPolicy is the device-local ceiling on NetDefense-mediated
+// remote access (CONNECT sessions). It is the device's final word: the
+// control plane may request a session at or below this ceiling, never
+// above it. Nothing reachable from the control plane can raise it — the
+// value lives in the OPNsense Settings model, and the agent's OPNsense
+// REST client has no writer for the netdefense/settings node (its
+// endpoints are hardcoded per-plugin: unbound/*, zabbixagent/*,
+// wireguard/*, core/service/search). Changing it requires access to the
+// device itself.
+type RemoteAccessPolicy string
+
+const (
+	// RemoteAccessFull permits whatever the control plane asks for:
+	// shell, SSH, exec, and webadmin. This is the default and matches
+	// behavior before the ceiling existed.
+	RemoteAccessFull RemoteAccessPolicy = "full"
+
+	// RemoteAccessReadOnly clamps every session to read-only regardless
+	// of the CONNECT payload's read_only flag: webadmin only, no shell,
+	// no SSH, no exec stream.
+	RemoteAccessReadOnly RemoteAccessPolicy = "readonly"
+
+	// RemoteAccessDisabled refuses CONNECT outright — no relay is dialed
+	// and no stream is served.
+	RemoteAccessDisabled RemoteAccessPolicy = "disabled"
+)
+
+// Valid reports whether p is one of the three defined policies.
+func (p RemoteAccessPolicy) Valid() bool {
+	switch p {
+	case RemoteAccessFull, RemoteAccessReadOnly, RemoteAccessDisabled:
+		return true
+	}
+	return false
+}
+
 // Config holds the NDAgent configuration.
 type Config struct {
 	// Required fields
@@ -71,6 +107,29 @@ type Config struct {
 	PathfinderTLSVerify bool   `mapstructure:"pathfinder_tls_verify"`
 	PathfinderShell     string `mapstructure:"pathfinder_shell"`
 
+	// RemoteAccessPolicy is the device-local ceiling on CONNECT sessions:
+	// "full" (default), "readonly", or "disabled". See the
+	// RemoteAccessPolicy type for the trust argument. Enforced in two
+	// places, deliberately: internal/tasks.HandleConnect refuses or clamps
+	// before the relay is dialed, and internal/pathfinder's
+	// ProxyStreamToLocal chokepoint re-checks per stream so no future
+	// caller path can bypass the first gate.
+	//
+	// Default "full" — identical to pre-ceiling behavior, so a package
+	// upgrade never silently disables remote access on an existing fleet.
+	// The OPNsense Settings model's <Default> and the conf template's
+	// helpers.exists guard agree with this default, so an absent config.xml
+	// node, an absent conf line, and an explicit "full" all mean the same
+	// thing and no grandfathering migration is needed.
+	RemoteAccessPolicy RemoteAccessPolicy `mapstructure:"remote_access_policy"`
+
+	// RemoteAccessPolicyInvalid carries the raw remote_access_policy value
+	// when it failed validation and was clamped to "disabled". Empty when
+	// the configured value was valid. Config loading happens before logging
+	// is initialized, so validate() cannot warn; main logs this once the
+	// logger exists.
+	RemoteAccessPolicyInvalid string
+
 	// Webadmin proxy settings (for pre-authenticated webadmin access)
 	WebadminUser       string `mapstructure:"webadmin_user"`
 	WebadminSessionDir string `mapstructure:"webadmin_session_dir"`
@@ -127,6 +186,7 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("pathfinder_tls_verify", true)
 	v.SetDefault("pathfinder_shell", "/usr/local/sbin/opnsense-shell")
 	v.SetDefault("webadmin_user", "root")
+	v.SetDefault("remote_access_policy", string(RemoteAccessFull))
 	v.SetDefault("webadmin_readonly_user", "netdefense-readonly")
 	v.SetDefault("webadmin_session_dir", "/var/lib/php/sessions")
 
@@ -279,6 +339,31 @@ func (c *Config) validate() error {
 	}
 	if !validLevels[c.LogLevel] {
 		return fmt.Errorf("invalid log_level: %s (must be DEBUG, INFO, WARNING, ERROR, or CRITICAL)", c.LogLevel)
+	}
+
+	// Normalize and validate the remote-access ceiling.
+	//
+	// Deliberate deviation from every other setting here: an unparseable
+	// value does NOT abort startup, it clamps to the most restrictive
+	// policy. Two reasons. A security ceiling that cannot be read should
+	// be the tightest one, not the loosest. And refusing to start would
+	// take the device entirely offline — no SYNC, no telemetry, no
+	// firmware — precisely because remote access is the thing that broke,
+	// leaving no way to observe or repair it short of physical access. A
+	// clamped device stays manageable for everything else and surfaces the
+	// bad value in its logs.
+	//
+	// The GUI renders this as a dropdown, so a bad value requires
+	// hand-editing ndagent.conf, which is documented as unsupported (the
+	// file is rendered from config.xml by the plugin's Volt template).
+	rawPolicy := strings.TrimSpace(string(c.RemoteAccessPolicy))
+	c.RemoteAccessPolicy = RemoteAccessPolicy(strings.ToLower(rawPolicy))
+	if c.RemoteAccessPolicy == "" {
+		c.RemoteAccessPolicy = RemoteAccessFull
+	}
+	if !c.RemoteAccessPolicy.Valid() {
+		c.RemoteAccessPolicyInvalid = rawPolicy
+		c.RemoteAccessPolicy = RemoteAccessDisabled
 	}
 
 	// DevicePrivKey is loaded by lifecycle from /var/db/ndagent/device.key;

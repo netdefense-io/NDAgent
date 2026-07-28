@@ -674,6 +674,22 @@ func (w *WebSocketClient) RejectDangerousSnippets() bool {
 	return w.cfg.RejectDangerousSnippets
 }
 
+// GetRemoteAccessPolicy returns the device-local ceiling on CONNECT
+// sessions ("full", "readonly", or "disabled"; default "full"). The
+// control plane may request a session at or below this ceiling and never
+// above it — see config.RemoteAccessPolicy for why this value is not
+// reachable from the control plane. Falls back to the most restrictive
+// policy if the value is somehow empty at this point, so a missing value
+// can never silently permit more than the operator asked for (validate()
+// already normalizes, this is the same belt-and-suspenders shape as
+// GetWebadminReadOnlyUser).
+func (w *WebSocketClient) GetRemoteAccessPolicy() config.RemoteAccessPolicy {
+	if !w.cfg.RemoteAccessPolicy.Valid() {
+		return config.RemoteAccessDisabled
+	}
+	return w.cfg.RemoteAccessPolicy
+}
+
 // GetConfigXMLPath returns the path to the OPNsense config.xml file.
 func (w *WebSocketClient) GetConfigXMLPath() string {
 	return w.cfg.ConfigXMLPath

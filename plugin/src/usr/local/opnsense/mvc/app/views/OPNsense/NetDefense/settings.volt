@@ -631,6 +631,17 @@
                         </td>
                     </tr>
                     <tr>
+                        <td><strong>{{ lang._('Remote Access Policy') }}</strong></td>
+                        <td>
+                            <select class="form-control selectpicker" id="settings.remoteAccessPolicy" name="settings.remoteAccessPolicy">
+                                <option value="full" selected>{{ lang._('Full access (shell, SSH and web UI)') }}</option>
+                                <option value="readonly">{{ lang._('Read-only web UI only (no shell)') }}</option>
+                                <option value="disabled">{{ lang._('Disabled (refuse all remote sessions)') }}</option>
+                            </select>
+                            <div class="help-block">{{ lang._('Device-local ceiling on remote access. "Read-only web UI only" clamps every remote session to the web UI with no shell, whatever privilege the requester holds. "Disabled" refuses remote sessions outright. This is the final word and is enforced here on the firewall: the ceiling cannot be raised remotely — not by an operator account, not by a configuration sync, not by the NetDefense platform. It governs NetDefense remote sessions only; configuration sync is gated separately by "Reject Dangerous Snippet Content" below.') }}</div>
+                        </td>
+                    </tr>
+                    <tr>
                         <td><strong>{{ lang._('Reject Dangerous Snippet Content') }}</strong></td>
                         <td>
                             <label class="checkbox-inline">

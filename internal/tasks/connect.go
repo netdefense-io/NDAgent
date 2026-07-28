@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/pathfinder"
@@ -13,6 +14,41 @@ import (
 
 // Default timeout for waiting for client to pair
 const defaultPairingTimeout = 5 * time.Minute
+
+// connectSendResponse is the terminal-response sender used by HandleConnect's
+// policy refusal path. Indirected so tests can assert the refusal without a
+// live WebSocket, mirroring firmwareNoRebootSendResponse.
+var connectSendResponse = SendTaskResponse
+
+// effectiveReadOnly applies the device-local ceiling to the session the
+// control plane asked for. The clamp is one-way by construction: a
+// "readonly" ceiling forces read-only on, and no policy can turn it off
+// once the caller has requested it. "disabled" never reaches here —
+// HandleConnect refuses that before the payload is parsed.
+func effectiveReadOnly(policy config.RemoteAccessPolicy, requested bool) bool {
+	if policy == config.RemoteAccessReadOnly {
+		return true
+	}
+	return requested
+}
+
+// remoteAccessRefusalMessage builds the operator-facing reason for a
+// CONNECT refused by the device-local ceiling. It follows the same shape
+// as dangerousSnippetRejectionMessage: name the policy, name the value,
+// and state where to change it. A policy rejection is a FAILED task with
+// an actionable reason, never a silently-COMPLETED one — the operator
+// should see why their session was refused, not a timeout.
+//
+// The remedy is deliberately stated as a device-side action: this setting
+// exists precisely because it cannot be changed from the control plane.
+func remoteAccessRefusalMessage(policy config.RemoteAccessPolicy) string {
+	return fmt.Sprintf(
+		"remote access refused by local policy remote_access_policy=%s; "+
+			"change it on the device under Services → NetDefense → Settings "+
+			"(Remote Access Policy) — it cannot be changed remotely",
+		string(policy),
+	)
+}
 
 // HandleConnect handles the CONNECT task.
 // It establishes a connection to Pathfinder for remote access sessions.
@@ -28,6 +64,32 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	log.Infow("Received CONNECT command",
 		"task_id", cmd.TaskID,
 	)
+
+	// Device-local remote-access ceiling — the first of two enforcement
+	// points (the second is pathfinder's ProxyStreamToLocal chokepoint).
+	// Refused here, before the payload is even parsed and before any relay
+	// is dialed, so a disabled device never opens an outbound session at
+	// all. The command reaching this point is already signature-verified,
+	// device-bound, unexpired and sequence-checked by the dispatcher, so
+	// this is a policy decision on a legitimate command, not a security
+	// check on an untrusted one.
+	//
+	// Refusing here rather than in the dispatcher is deliberate: every
+	// dispatcher refusal path is a bare `continue` that sends no task
+	// response, which would surface to the operator as a generic timeout.
+	// Here the task_id is real, taskstore.Begin has already opened the row,
+	// and SendTaskResponse produces a clean terminal FAILED record carrying
+	// the reason. The dispatcher's replay barrier was already advanced and
+	// persisted before this handler ran, so a refusal cannot wedge the
+	// device's dispatch sequence.
+	policy := ws.GetRemoteAccessPolicy()
+	if policy == config.RemoteAccessDisabled {
+		log.Warnw("Refusing CONNECT — remote access disabled on this device",
+			"task_id", cmd.TaskID,
+			"policy", string(policy),
+		)
+		return connectSendResponse(ws, cmd.TaskID, NewFailureResult(remoteAccessRefusalMessage(policy)))
+	}
 
 	// Validate payload exists
 	if cmd.Payload == nil {
@@ -51,7 +113,14 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Optional read_only flag (default false → admin/root behavior preserved).
 	// The flag selects between two LOCALLY configured OPNsense usernames; the
 	// broker never supplies an arbitrary username (privilege-escalation guard).
-	readOnly := payloadBool(cmd.Payload, "read_only")
+	requestedReadOnly := payloadBool(cmd.Payload, "read_only")
+
+	// Apply the device-local ceiling. The control plane's request is a
+	// request, not an instruction: under the "readonly" policy the device
+	// clamps every session to read-only whatever the payload asked for.
+	// Clamping is one-way — the policy can only ever restrict, never widen
+	// a session the caller asked to be read-only.
+	readOnly := effectiveReadOnly(policy, requestedReadOnly)
 
 	// Resolve the OPNsense username to forge into the PHP session.
 	webadminUser := ws.GetWebadminUser()
@@ -59,9 +128,18 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 		webadminUser = ws.GetWebadminReadOnlyUser()
 	}
 
+	if readOnly != requestedReadOnly {
+		log.Infow("Clamped CONNECT session to read-only by local policy",
+			"task_id", cmd.TaskID,
+			"policy", string(policy),
+			"requested_read_only", requestedReadOnly,
+		)
+	}
+
 	log.Debugw("Connecting to Pathfinder",
 		"session_id", sessionID,
 		"pathfinder_host", ws.GetPathfinderHost(),
+		"policy", string(policy),
 		"read_only", readOnly,
 		"webadmin_user", webadminUser,
 	)
@@ -80,7 +158,7 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	}
 
 	// Connect to Pathfinder
-	err := connectToPathfinder(ctx, ws, sessionID, webadminUser, readOnly)
+	err := connectToPathfinder(ctx, ws, sessionID, webadminUser, readOnly, policy)
 	if err != nil {
 		log.Errorw("Pathfinder session ended",
 			"session_id", sessionID,
@@ -110,7 +188,11 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 // (admin user for normal sessions, the read-only user when read_only=true).
 // readOnly gates the tunnel to webadmin-only (no shell/ssh/exec) — enforced
 // in the proxy regardless of what the client requests.
-func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessionID, webadminUser string, readOnly bool) error {
+//
+// policy is the device-local ceiling, passed through to the proxy so its
+// per-stream chokepoint can enforce it independently of the caller-side
+// decisions made in HandleConnect.
+func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessionID, webadminUser string, readOnly bool, policy config.RemoteAccessPolicy) error {
 	log := logging.Named("CONNECT")
 
 	// Create cancellable context for clean shutdown when streams close
@@ -158,6 +240,7 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 		WebadminSessionDir: ws.GetWebadminSessionDir(),
 		WebadminPort:       ws.GetWebadminPort(),
 		ReadOnly:           readOnly,
+		Policy:             policy,
 	})
 	// Provide the connect-session context to the proxy so exec streams can
 	// use it for command timeouts and cancellation.

@@ -1,6 +1,6 @@
 # NDAgent
 
-NDAgent is the on-firewall agent for **NetDefense for OPNsense**. It runs as a service on your OPNsense box, holds a persistent outbound connection to the NetDefense control plane, and executes a fixed set of signed commands — configuration sync, firmware updates, backups, and remote access — against the OPNsense REST API.
+NDAgent is the on-firewall agent for **NetDefense for OPNsense**. It runs as a service on your OPNsense box, holds a persistent outbound connection to the NetDefense control plane, and executes a fixed set of signed commands — configuration sync, firmware updates, backups, and remote access sessions.
 
 This repository contains the open-source source code for:
 
@@ -23,11 +23,17 @@ This code is open source specifically so none of the following is a "trust me" c
 
 **The dispatch tier can't forge commands.** The relay service that fans commands out to devices holds no private signing key and independently re-verifies every envelope's signature before forwarding it. Compromising that tier doesn't get you the ability to mint commands — you'd still need the control plane's private key.
 
-**A fixed vocabulary, not a shell.** NDAgent understands exactly ten operations — `PING`, `SYNC`, `PULL`, `BACKUP`, `CONNECT`, `RESTART`, `REBOOT`, `SHUTDOWN`, `PLUGIN_INSTALL`, `FIRMWARE_UPGRADE` — each with its own typed payload and handler (`internal/tasks/register.go`). There is no "run this shell command" task type and no general remote-exec primitive in the command protocol.
+**A fixed vocabulary.** NDAgent understands exactly ten operations — `PING`, `SYNC`, `PULL`, `BACKUP`, `CONNECT`, `RESTART`, `REBOOT`, `SHUTDOWN`, `PLUGIN_INSTALL`, `FIRMWARE_UPGRADE` — each with its own typed payload and handler (`internal/tasks/register.go`). The task protocol carries no "run this shell command" operation.
 
-**The device has the final say on two things a compromised control plane can't override:**
-- Read-only remote-access sessions are enforced on the firewall itself, not by the caller's request. When a session is opened read-only, the agent's local proxy refuses every service except the web UI — no shell, no SSH — regardless of what's asked for (`internal/pathfinder/proxy.go`).
-- `root`, the agent's own service account, and the read-only service account are hard-protected: no configuration sync can ever create, modify, or delete them, no matter what the control plane sends (`internal/opnapi/users_types.go`).
+Be clear about what that does and does not buy you, because the distinction is the whole point: **`CONNECT` opens a remote session, and a session reaches a shell.** A fixed vocabulary means the wire protocol can't be coerced into arbitrary instructions — it does not mean a caller holding a write-scoped credential is confined. Everything above protects the *channel*. None of it contains a compromised control plane or a stolen operator credential.
+
+**What the device itself decides**, independent of the control plane:
+
+- **The remote-access ceiling.** `remote_access_policy` (Services → NetDefense → Settings) caps what any remote session may be: `full`, `readonly` (web UI only — no shell, no SSH, no exec stream, whatever the caller asked for), or `disabled` (no session opens at all). The control plane may request a session at or below this ceiling and never above it. It cannot raise it: the value lives in the device's own configuration, and the agent's OPNsense API client has no writer for it, so a configuration sync can't change it either. Enforced twice — in the `CONNECT` handler before any relay is dialed (`internal/tasks/connect.go`), and again at the per-stream chokepoint every stream must traverse (`internal/pathfinder/proxy.go`).
+- **Read-only sessions.** When a session is read-only — whether the caller asked for that or the device's ceiling imposed it — the local proxy refuses every service except the web UI, regardless of what's requested (`internal/pathfinder/proxy.go`).
+- **Protected accounts.** `root`, the agent's own service account, and the read-only service account can never be created, modified, or deleted **by configuration sync**, whatever the control plane sends (`internal/opnapi/users_types.go`). Note the scope: this constrains the sync path, not someone who already has a shell.
+
+**What none of this stops.** A credential with write access can open a remote session, and from a session, a shell. The ceiling above is the limit on that; the credential is the key — so scope the tokens you issue accordingly, especially for AI agents driving the MCP tools. And even with remote access disabled, a compromised control plane is not harmless: configuration sync can install packages, and package post-install scripts run as root. `reject_dangerous_snippets` (on by default) covers the privileged-user, SSH-key and Zabbix-command vectors, but not package installation.
 
 **Re-keying requires a device-local step.** If a device's signing key ever needs to be re-bound (lost key material, suspected compromise), an operator issues a one-time token from the control plane that expires in 24 hours by default, and that token has to be applied in the device's own local configuration before a new key is accepted. The control plane can't rotate a device's trusted key by itself.
 

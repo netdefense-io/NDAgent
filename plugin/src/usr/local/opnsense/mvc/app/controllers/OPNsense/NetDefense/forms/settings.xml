@@ -62,6 +62,13 @@
         <advanced>true</advanced>
     </field>
     <field>
+        <id>settings.remoteAccessPolicy</id>
+        <label>Remote Access Policy</label>
+        <type>dropdown</type>
+        <help>Device-local ceiling on remote access. "Full access" permits shell, SSH and web UI. "Read-only web UI only" clamps every remote session to the web UI with no shell, whatever privilege the requester holds. "Disabled" refuses remote sessions outright. This is the device's final word: the ceiling is enforced here on the firewall and cannot be raised remotely — not by an operator account, not by a configuration sync, not by the NetDefense platform. Note it governs NetDefense remote sessions only; it does not restrict configuration sync, which is gated separately by "Reject Dangerous Snippet Content".</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
         <id>settings.rejectDangerousSnippets</id>
         <label>Reject Dangerous Snippet Content</label>
         <type>checkbox</type>

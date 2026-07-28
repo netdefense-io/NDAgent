@@ -9,6 +9,10 @@ import (
 
 	"go.uber.org/zap"
 
+	// Aliased: several functions in this file already use `config` as a
+	// local variable name for a ServiceConfig value, which would shadow the
+	// package. The alias keeps those untouched and removes the collision.
+	ndconfig "github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 )
 
@@ -35,7 +39,8 @@ type TCPProxy struct {
 	shellManager *ShellManager
 	execManager  *ExecManager
 	httpProxy    *HTTPProxy
-	readOnly     bool // when true, only the webadmin service is proxied; all shell/exec/ssh streams are refused
+	readOnly     bool                        // when true, only the webadmin service is proxied; all shell/exec/ssh streams are refused
+	policy       ndconfig.RemoteAccessPolicy // device-local ceiling, re-checked per stream independently of readOnly
 	mu           sync.RWMutex
 
 	log *zap.SugaredLogger
@@ -57,6 +62,20 @@ type ProxyConfig struct {
 	// into the HTTPProxy itself (see HTTPProxy.SetReadOnly) so mutating
 	// runtime-action requests within the webadmin stream are denylisted.
 	ReadOnly bool
+
+	// Policy is the device-local remote-access ceiling. HandleConnect
+	// already refuses "disabled" before a relay is ever dialed and clamps
+	// ReadOnly under "readonly", so in the normal flow this field is
+	// redundant — that is the point. It is re-checked at the per-stream
+	// chokepoint so the guarantee does not depend on a single caller
+	// remembering to apply it, and so a future code path that constructs a
+	// proxy without going through HandleConnect cannot silently serve
+	// streams the device's owner disabled.
+	//
+	// The zero value ("") is not a valid policy and is treated as
+	// unrestricted for backward compatibility with callers that predate
+	// the ceiling (tests, NewTCPProxy). Production always sets it.
+	Policy ndconfig.RemoteAccessPolicy
 }
 
 // NewTCPProxy creates a new TCP proxy.
@@ -82,6 +101,7 @@ func NewTCPProxyWithConfig(cfg ProxyConfig) *TCPProxy {
 		execManager:  NewExecManager(),
 		httpProxy:    httpProxy,
 		readOnly:     cfg.ReadOnly,
+		policy:       cfg.Policy,
 		log:          logging.Named("pathfinder.proxy"),
 	}
 }
@@ -123,16 +143,36 @@ func (p *TCPProxy) GetService(name string) (ServiceConfig, bool) {
 func (p *TCPProxy) ProxyStreamToLocal(stream *Stream) error {
 	serviceName := stream.ServiceName()
 
+	// Device-local remote-access ceiling — the second enforcement point.
+	// HandleConnect refuses "disabled" before dialing the relay, so in the
+	// normal flow no stream ever reaches here on a disabled device. This
+	// check exists so that guarantee survives a caller that skips or
+	// mis-sequences the first gate: the device owner's setting is enforced
+	// where the stream is actually served, not only where it is requested.
+	if p.policy == ndconfig.RemoteAccessDisabled {
+		p.log.Warnw("Refusing stream — remote access disabled on this device",
+			"stream_id", stream.ID(),
+			"service", serviceName,
+		)
+		return fmt.Errorf("remote access is disabled on this device")
+	}
+
 	// Read-only enforcement chokepoint. Every stream — whatever service the
 	// client names — passes through here. In a read-only session only the
 	// webadmin HTTP service (constrained by the forged read-only OPNsense
 	// ACL) is permitted; shell, shell-ctl, exec, ssh, and any other service
 	// are refused. This is the server-side guarantee that an RO caller can
 	// never obtain a terminal/root shell, independent of a modified client.
-	if p.readOnly && serviceName != ServiceWebadmin {
+	//
+	// The policy arm is evaluated alongside the session flag rather than
+	// relying on HandleConnect's clamp, for the same independence reason as
+	// the disabled check above: under a "readonly" ceiling this holds even
+	// if a caller neglected to clamp readOnly.
+	if (p.readOnly || p.policy == ndconfig.RemoteAccessReadOnly) && serviceName != ServiceWebadmin {
 		p.log.Warnw("Refusing non-webadmin stream in read-only session",
 			"stream_id", stream.ID(),
 			"service", serviceName,
+			"policy", string(p.policy),
 		)
 		return fmt.Errorf("service %q not permitted in read-only session", serviceName)
 	}

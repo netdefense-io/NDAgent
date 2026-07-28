@@ -85,6 +85,17 @@ func run(cmd *cobra.Command, args []string) error {
 		"config", configPath,
 	)
 
+	// Config parsing runs before logging is initialized, so an invalid
+	// remote_access_policy is reported here rather than at validate() time.
+	// The value was clamped to the most restrictive policy, not ignored.
+	if cfg.RemoteAccessPolicyInvalid != "" {
+		log.Warnw("Invalid remote_access_policy — clamped to the most restrictive policy",
+			"configured", cfg.RemoteAccessPolicyInvalid,
+			"effective", string(cfg.RemoteAccessPolicy),
+			"valid_values", "full, readonly, disabled",
+		)
+	}
+
 	// Check if agent is enabled
 	if !cfg.IsEnabled() {
 		log.Error("Agent is disabled in configuration")

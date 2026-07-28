@@ -593,3 +593,116 @@ func containsHelper(s, substr string) bool {
 	}
 	return false
 }
+
+// TestLoad_RemoteAccessPolicyDefaultsToFull pins the upgrade-safety
+// property that matters most for the existing fleet: a config that omits
+// remote_access_policy entirely must behave exactly as it did before the
+// ceiling existed. The OPNsense Settings model's <Default> and the conf
+// template's helpers.exists guard agree with this, so an absent config.xml
+// node, an absent conf line, and an explicit "full" are all the same
+// thing — which is why this setting needs no grandfathering migration.
+// If this test ever fails, a package upgrade is silently restricting
+// remote access on every device that has not saved its Settings since.
+func TestLoad_RemoteAccessPolicyDefaultsToFull(t *testing.T) {
+	content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+`
+	configPath := createTempConfigFile(t, content)
+	cfg, err := Load(configPath)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.RemoteAccessPolicy != RemoteAccessFull {
+		t.Errorf("RemoteAccessPolicy should default to %q when omitted, got %q",
+			RemoteAccessFull, cfg.RemoteAccessPolicy)
+	}
+	if cfg.RemoteAccessPolicyInvalid != "" {
+		t.Errorf("an omitted policy is not an invalid one; RemoteAccessPolicyInvalid = %q",
+			cfg.RemoteAccessPolicyInvalid)
+	}
+}
+
+// TestLoad_RemoteAccessPolicyExplicitValues confirms each of the three
+// defined policies round-trips, including case-insensitively — the value
+// is normally written by the plugin's Volt template from a dropdown, but
+// an operator repairing a device by hand should not be defeated by case.
+func TestLoad_RemoteAccessPolicyExplicitValues(t *testing.T) {
+	cases := map[string]RemoteAccessPolicy{
+		"full":     RemoteAccessFull,
+		"readonly": RemoteAccessReadOnly,
+		"disabled": RemoteAccessDisabled,
+		"Disabled": RemoteAccessDisabled,
+		"READONLY": RemoteAccessReadOnly,
+		" full ":   RemoteAccessFull,
+	}
+	for raw, want := range cases {
+		content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+remote_access_policy=` + raw + `
+`
+		configPath := createTempConfigFile(t, content)
+		cfg, err := Load(configPath)
+		if err != nil {
+			t.Fatalf("Load() with remote_access_policy=%q error = %v", raw, err)
+		}
+		if cfg.RemoteAccessPolicy != want {
+			t.Errorf("remote_access_policy=%q → got %q, want %q", raw, cfg.RemoteAccessPolicy, want)
+		}
+		if cfg.RemoteAccessPolicyInvalid != "" {
+			t.Errorf("remote_access_policy=%q should be valid, got invalid marker %q",
+				raw, cfg.RemoteAccessPolicyInvalid)
+		}
+	}
+}
+
+// TestLoad_RemoteAccessPolicyInvalidClampsToDisabled pins the deliberate
+// deviation from every other setting in this package: an unparseable value
+// does NOT abort startup, it clamps to the most restrictive policy.
+//
+// Both halves matter. Clamping to "disabled" means a ceiling that cannot be
+// read fails tight rather than wide. Not returning an error means the device
+// stays online — refusing to start would take SYNC, telemetry and firmware
+// down too, precisely because remote access broke, leaving no way to observe
+// or repair the device short of physical access.
+func TestLoad_RemoteAccessPolicyInvalidClampsToDisabled(t *testing.T) {
+	for _, raw := range []string{"maybe", "off", "true", "yes", "read-only", "FULL_ACCESS"} {
+		content := `
+token=test-token
+device_uuid=test-device
+server_host=localhost
+remote_access_policy=` + raw + `
+`
+		configPath := createTempConfigFile(t, content)
+		cfg, err := Load(configPath)
+		if err != nil {
+			t.Fatalf("an invalid remote_access_policy=%q must not fail startup, got error = %v", raw, err)
+		}
+		if cfg.RemoteAccessPolicy != RemoteAccessDisabled {
+			t.Errorf("remote_access_policy=%q should clamp to %q, got %q",
+				raw, RemoteAccessDisabled, cfg.RemoteAccessPolicy)
+		}
+		if cfg.RemoteAccessPolicyInvalid == "" {
+			t.Errorf("remote_access_policy=%q should record the raw value for the startup warning", raw)
+		}
+	}
+}
+
+// TestRemoteAccessPolicyValid guards the Valid() helper the proxy and the
+// WebSocketClient accessor both key off. The zero value must not be valid —
+// GetRemoteAccessPolicy relies on that to fall back to the tightest policy.
+func TestRemoteAccessPolicyValid(t *testing.T) {
+	for _, p := range []RemoteAccessPolicy{RemoteAccessFull, RemoteAccessReadOnly, RemoteAccessDisabled} {
+		if !p.Valid() {
+			t.Errorf("%q should be a valid policy", p)
+		}
+	}
+	for _, p := range []RemoteAccessPolicy{"", "Full", "none", "off"} {
+		if p.Valid() {
+			t.Errorf("%q should not be a valid policy", p)
+		}
+	}
+}
