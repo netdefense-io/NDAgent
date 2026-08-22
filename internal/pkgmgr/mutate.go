@@ -28,6 +28,15 @@ const (
 	ActionNotFound       SoftwareAction = "NOT_FOUND"
 	ActionInvalidName    SoftwareAction = "INVALID_NAME"
 	ActionError          SoftwareAction = "ERROR"
+
+	// Repository-reconcile and shadow-check outcomes. These ride the same
+	// per-item result envelope NDWeb and NDCLI already render, so adding a
+	// vocabulary entry is cheaper than adding a new result shape.
+	ActionRepoConfigured SoftwareAction = "REPO_CONFIGURED"
+	ActionRepoUnchanged  SoftwareAction = "REPO_UNCHANGED"
+	ActionRepoRemoved    SoftwareAction = "REPO_REMOVED"
+	ActionRepoConflict   SoftwareAction = "REPO_CONFLICT"
+	ActionShadowed       SoftwareAction = "SHADOWED"
 )
 
 // MutateOutcome describes the result of a single Install or Delete call.
@@ -46,6 +55,7 @@ var (
 	removeFunc      = pkgRemoveFreeBSD
 	updateFunc      = pkgUpdateFreeBSD
 	isInstalledFunc = pkgIsInstalledFreeBSD
+	addURLFunc      = pkgAddURLFreeBSD
 )
 
 // Update runs `pkg update -q` to refresh the local catalog. SoftwarePolicy
@@ -53,6 +63,10 @@ var (
 // Delete calls read against the freshened catalog. A stale catalog would
 // produce false NOT_FOUND results.
 func Update(ctx context.Context) error {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, updateTimeout)
+	defer cancel()
 	return updateFunc(ctx)
 }
 
@@ -60,6 +74,10 @@ func Update(ctx context.Context) error {
 // runPkg helper from pkgmgr.go so transient errors (pkg(8) missing, signal)
 // propagate the same way Query already handles them.
 func IsInstalled(ctx context.Context, name string) (bool, error) {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, mutateTimeout)
+	defer cancel()
 	return isInstalledFunc(ctx, name)
 }
 
@@ -78,6 +96,10 @@ func pkgIsInstalledFreeBSD(ctx context.Context, name string) (bool, error) {
 // Install runs `pkg install -y <name>`. Returns ActionInstalled on success,
 // ActionNotFound when no repository has the package, ActionError otherwise.
 func Install(ctx context.Context, name string) MutateOutcome {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, mutateTimeout)
+	defer cancel()
 	return installFunc(ctx, name)
 }
 
@@ -86,6 +108,10 @@ func Install(ctx context.Context, name string) MutateOutcome {
 // upstream — `pkg delete` on a missing package exits non-zero, which we'd
 // otherwise misreport.
 func Delete(ctx context.Context, name string) MutateOutcome {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, mutateTimeout)
+	defer cancel()
 	return removeFunc(ctx, name)
 }
 
@@ -154,4 +180,45 @@ func firstNonEmptyLine(s string) string {
 		}
 	}
 	return ""
+}
+
+// AddURL installs a package straight from a URL via `pkg add`.
+//
+// This is NOT a catalog operation and behaves unlike Install in ways that
+// matter (pkg-add(8)): it does not consult configured repositories for the
+// named package, and resolves dependencies only from sibling files in the same
+// directory as the archive. `-f` forces REINSTALLATION of an already-installed
+// package — it does not bypass dependency or signature checking.
+//
+// A package installed this way carries no repository-origin annotation, so a
+// later `pkg upgrade` matches it by name against whatever repository offers
+// that name. That limitation is inherent to pkg add and is documented for
+// users rather than papered over here.
+//
+// Gets the longest deadline of any operation: the archive size and the server
+// serving it are both outside our control.
+func AddURL(ctx context.Context, url string, force bool) MutateOutcome {
+	pkgMu.Lock()
+	defer pkgMu.Unlock()
+	ctx, cancel := context.WithTimeout(ctx, addURLTimeout)
+	defer cancel()
+	return addURLFunc(ctx, url, force)
+}
+
+func pkgAddURLFreeBSD(ctx context.Context, url string, force bool) MutateOutcome {
+	args := []string{"add"}
+	if force {
+		args = append(args, "-f")
+	}
+	args = append(args, url)
+
+	stderr, err := runPkgCaptureStderr(ctx, args...)
+	if err == nil {
+		return MutateOutcome{Action: ActionInstalled}
+	}
+	msg := firstNonEmptyLine(stderr)
+	if msg == "" {
+		msg = err.Error()
+	}
+	return MutateOutcome{Action: ActionError, ErrMsg: msg}
 }

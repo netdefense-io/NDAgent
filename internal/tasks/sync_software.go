@@ -2,12 +2,14 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
+	"github.com/netdefense-io/ndagent/internal/pkgrepo"
 )
 
 // ============================================================================
@@ -41,6 +43,31 @@ const softwarePackageNameMaxLen = 100
 type softwarePayload struct {
 	Present []string
 	Absent  []string
+
+	// Repositories and External are omitted by NDManager when empty, so a
+	// policy that uses neither produces exactly the payload this handler
+	// has always received.
+	Repositories []pkgrepo.Repository
+	External     []externalPackage
+
+	// AllowUnverified is the organization's opt-in, carried inside the
+	// signed payload. The agent re-checks it independently rather than
+	// trusting that NDManager already gated — that independence is the
+	// point of the third enforcement layer.
+	AllowUnverified bool
+}
+
+// externalPackage is one entry from external[]: a package installed straight
+// from a URL rather than from a repository catalog.
+//
+// Name and Version are declared explicitly because `pkg add` records no
+// repository origin, so the archive URL alone gives the reconciler no way to
+// answer "is this already satisfied". The declared pair is the identity.
+type externalPackage struct {
+	Name    string
+	Version string
+	URL     string
+	Force   bool
 }
 
 // parseSoftwarePayload extracts the "software" bucket from a SYNC_API
@@ -80,8 +107,83 @@ func parseSoftwarePayload(payload map[string]interface{}) (*softwarePayload, err
 		}
 	}
 
-	if len(out.Present) == 0 && len(out.Absent) == 0 {
+	if flag, ok := asMap["allow_unverified"].(bool); ok {
+		out.AllowUnverified = flag
+	}
+
+	repos, err := parseRepositories(asMap["repositories"])
+	if err != nil {
+		return nil, err
+	}
+	out.Repositories = repos
+
+	ext, err := parseExternal(asMap["external"])
+	if err != nil {
+		return nil, err
+	}
+	out.External = ext
+
+	if len(out.Present) == 0 && len(out.Absent) == 0 &&
+		len(out.Repositories) == 0 && len(out.External) == 0 {
 		return nil, nil
+	}
+	return out, nil
+}
+
+// parseRepositories decodes repositories[]. Round-tripping through JSON keeps
+// the shape in one place (pkgrepo.Repository's tags) rather than hand-walking
+// a nested map here and drifting from it.
+func parseRepositories(raw interface{}) ([]pkgrepo.Repository, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("software.repositories: %w", err)
+	}
+	var repos []pkgrepo.Repository
+	if err := json.Unmarshal(blob, &repos); err != nil {
+		return nil, fmt.Errorf("software.repositories: %w", err)
+	}
+	for i, r := range repos {
+		if r.Name == "" {
+			return nil, fmt.Errorf("software.repositories[%d]: name is required", i)
+		}
+		if !validSoftwareName(r.Name) {
+			return nil, fmt.Errorf("software.repositories[%d]: invalid repository name %q", i, r.Name)
+		}
+	}
+	return repos, nil
+}
+
+func parseExternal(raw interface{}) ([]externalPackage, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	blob, err := json.Marshal(raw)
+	if err != nil {
+		return nil, fmt.Errorf("software.external: %w", err)
+	}
+	var wire []struct {
+		Name    string `json:"name"`
+		Version string `json:"version"`
+		URL     string `json:"url"`
+		Force   bool   `json:"force"`
+	}
+	if err := json.Unmarshal(blob, &wire); err != nil {
+		return nil, fmt.Errorf("software.external: %w", err)
+	}
+	out := make([]externalPackage, 0, len(wire))
+	for i, e := range wire {
+		if e.Name == "" || e.Version == "" || e.URL == "" {
+			return nil, fmt.Errorf("software.external[%d]: name, version and url are all required", i)
+		}
+		// Same agent-side regex the package lists get: a poisoned row must
+		// not reach pkg(8) through this path either.
+		if !validSoftwareName(e.Name) {
+			return nil, fmt.Errorf("software.external[%d]: invalid package name %q", i, e.Name)
+		}
+		out = append(out, externalPackage{Name: e.Name, Version: e.Version, URL: e.URL, Force: e.Force})
 	}
 	return out, nil
 }
@@ -91,13 +193,23 @@ func parseSoftwarePayload(payload map[string]interface{}) (*softwarePayload, err
 // any non-success per-package action flips overall Success to false, same
 // binary contract the snippet executors use.
 //
-// Execution order:
+// Execution order (six phases; the repository work brackets the original
+// sequence rather than reordering it):
 //
-//  1. `pkg update -q` once (fresh catalog → fewer false NOT_FOUND).
-//  2. For each `absent` name: if installed, `pkg delete -y`. ALREADY_ABSENT
+//  1. Foreign-duplicate scan. If a repo config we do not own already defines
+//     a repository name this policy declares, fail BEFORE writing anything.
+//     Scanning after writing would only notice the collision once the device
+//     already carried two definitions — the state this feature exists to
+//     prevent — and failing there would leave the box dirty.
+//  2. Reconcile repository config: write/refresh our files, materialize
+//     signature material, prune repositories the policy dropped.
+//  3. `pkg update` once (fresh catalog → fewer false NOT_FOUND).
+//  4. For each `absent` name: if installed, `pkg delete -y`. ALREADY_ABSENT
 //     otherwise.
-//  3. For each `present` name: if installed, ALREADY_PRESENT (no-op). Else
-//     `pkg install -y`.
+//  5. For each `present` name: if installed, ALREADY_PRESENT (no-op). Else
+//     shadow-check, then `pkg install -y`.
+//  6. For each `external` entry: if the declared name+version is installed
+//     and force is unset, ALREADY_PRESENT with no download. Else `pkg add`.
 //
 // Per-package failure types: INVALID_NAME (didn't pass the regex),
 // NOT_FOUND (pkg's "no packages matching" message), ERROR (any other
@@ -110,9 +222,22 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 		return result
 	}
 
+	// Phases 1-2: repository configuration, before any pkg mutation.
+	repoChanged, ok := reconcileRepositories(ctx, sp, &result)
+	if !ok {
+		// Refused or failed: the device is unchanged and the task fails with
+		// a reason that names what to fix.
+		return result
+	}
+
 	// One catalog refresh per task. A failure here doesn't poison every
 	// per-package call — pkg can still operate against stale metadata —
 	// but it's worth surfacing as a single ERROR so the operator sees it.
+	// repoChanged is deliberately not used to force a refresh yet: pkgmgr.Update
+	// runs `pkg update -q` unconditionally, and adding a forced variant is a
+	// separate change with its own cost on a production catalog. Keeping the
+	// signal here makes that a one-line follow-up rather than a re-derivation.
+	_ = repoChanged
 	if err := pkgmgr.Update(ctx); err != nil {
 		log.Warnw("pkg update failed; continuing against possibly-stale catalog", "err", err)
 		result.Errors = append(result.Errors, fmt.Sprintf("pkg update: %v", err))
@@ -200,6 +325,39 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 			continue
 		}
 
+		// Shadow check, only for packages actually about to be installed.
+		// A settled device — everything ALREADY_PRESENT — pays nothing, and
+		// an already-installed package is governed by CONSERVATIVE_UPGRADE
+		// rather than by this decision.
+		//
+		// Priority does not protect us here: pkg picks the highest version
+		// regardless of repository priority, so two repositories offering the
+		// same name means pkg would choose a winner the operator never did.
+		// Refusing is the only honest answer.
+		offering, err := pkgmgr.OfferedBy(ctx, name)
+		if err != nil {
+			// Could not establish that the install is unambiguous.
+			// Unverifiable is not the same as safe.
+			item.Action = string(pkgmgr.ActionError)
+			item.Status = "error"
+			item.Error = err.Error()
+			result.Results = append(result.Results, item)
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("software %s: shadow check: %v", name, err))
+			result.Success = false
+			continue
+		}
+		if len(offering) > 1 {
+			shadow := pkgmgr.ShadowError{Package: name, Repositories: offering}
+			item.Action = string(pkgmgr.ActionShadowed)
+			item.Status = "error"
+			item.Error = shadow.Error()
+			result.Results = append(result.Results, item)
+			result.Errors = append(result.Errors, shadow.Error())
+			result.Success = false
+			continue
+		}
+
 		out := pkgmgr.Install(ctx, name)
 		item.Action = string(out.Action)
 		switch out.Action {
@@ -221,7 +379,122 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 		result.Results = append(result.Results, item)
 	}
 
+	// Phase 6: external URL packages, after everything the catalog can serve.
+	installExternal(ctx, sp, &result)
+
 	return result
+}
+
+// reconcileRepositories runs phases 1 and 2. Returns (repoConfigChanged, ok);
+// ok=false means the task must stop without touching packages.
+func reconcileRepositories(
+	ctx context.Context, sp *softwarePayload, result *SyncAPIResult,
+) (bool, bool) {
+	names := make([]string, 0, len(sp.Repositories))
+	for _, r := range sp.Repositories {
+		names = append(names, r.Name)
+	}
+
+	// Phase 1: refuse before writing, never after.
+	conflicts, err := pkgrepo.ScanForeign(names)
+	if err != nil {
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
+			Status: "error", Error: err.Error(),
+		})
+		result.Errors = append(result.Errors, fmt.Sprintf("repository scan: %v", err))
+		result.Success = false
+		return false, false
+	}
+	if len(conflicts) > 0 {
+		for _, c := range conflicts {
+			result.Results = append(result.Results, SyncAPIItemResult{
+				Type: "REPOSITORY", Name: c.Repository,
+				Action: string(pkgmgr.ActionRepoConflict),
+				Status: "error", Error: c.Error(),
+			})
+			result.Errors = append(result.Errors, c.Error())
+		}
+		result.Success = false
+		return false, false
+	}
+
+	// Phase 2: write, then drop repositories the policy no longer lists.
+	changed, err := pkgrepo.Apply(sp.Repositories, sp.AllowUnverified)
+	if err != nil {
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
+			Status: "error", Error: err.Error(),
+		})
+		result.Errors = append(result.Errors, err.Error())
+		result.Success = false
+		return false, false
+	}
+	if err := pkgrepo.Prune(names); err != nil {
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
+			Status: "error", Error: err.Error(),
+		})
+		result.Errors = append(result.Errors, fmt.Sprintf("repository prune: %v", err))
+		result.Success = false
+		return changed, false
+	}
+
+	for _, r := range sp.Repositories {
+		action := pkgmgr.ActionRepoUnchanged
+		if changed {
+			action = pkgmgr.ActionRepoConfigured
+		}
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Name: r.Name, Action: string(action), Status: "success",
+		})
+	}
+	return changed, true
+}
+
+// installExternal runs phase 6.
+//
+// The declared name+version is the identity, because `pkg add` records no
+// repository origin and the URL alone cannot answer "already satisfied".
+// Checking first means a settled device performs no download at all.
+func installExternal(ctx context.Context, sp *softwarePayload, result *SyncAPIResult) {
+	for _, e := range sp.External {
+		item := SyncAPIItemResult{Type: "SOFTWARE", Name: e.Name}
+
+		if !e.Force {
+			// pkg identifies an exact build as name-version.
+			installed, err := pkgmgr.IsInstalled(ctx, e.Name+"-"+e.Version)
+			if err != nil {
+				item.Action = string(pkgmgr.ActionError)
+				item.Status = "error"
+				item.Error = err.Error()
+				result.Results = append(result.Results, item)
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("external %s: pkg info: %v", e.Name, err))
+				result.Success = false
+				continue
+			}
+			if installed {
+				item.Action = string(pkgmgr.ActionAlreadyPresent)
+				item.Status = "success"
+				result.Results = append(result.Results, item)
+				continue
+			}
+		}
+
+		out := pkgmgr.AddURL(ctx, e.URL, e.Force)
+		item.Action = string(out.Action)
+		if out.Action == pkgmgr.ActionInstalled {
+			item.Status = "success"
+		} else {
+			item.Status = "error"
+			item.Error = out.ErrMsg
+			result.Errors = append(result.Errors,
+				fmt.Sprintf("external %s from %s: %s", e.Name, e.URL, out.ErrMsg))
+			result.Success = false
+		}
+		result.Results = append(result.Results, item)
+	}
 }
 
 func validSoftwareName(name string) bool {

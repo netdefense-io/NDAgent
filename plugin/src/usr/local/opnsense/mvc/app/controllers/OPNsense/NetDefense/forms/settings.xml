@@ -69,10 +69,10 @@
         <advanced>true</advanced>
     </field>
     <field>
-        <id>settings.rejectDangerousSnippets</id>
-        <label>Reject Dangerous Snippet Content</label>
+        <id>settings.allowAllSnippetContent</id>
+        <label>Allow All Snippet Content</label>
         <type>checkbox</type>
-        <help>Device-local defense-in-depth: reject individual USER/GROUP/Zabbix snippet elements that carry a dangerous field (broad privileges, system scope, interactive shell, authorized keys, Zabbix remote commands, sudo) instead of applying them. On by default for new configurations — the primary control is still server-side. Existing devices upgrading from an older release keep their prior (off) behavior automatically. Disabling this can allow legitimate service-account or monitoring snippets that were previously being rejected; review agent logs before disabling.</help>
+        <help>Off by default: broad privileges, system scope, interactive shells, SSH keys and Zabbix sudo are refused. See https://netdefense.io/docs/ndagent/configuration/#allow-all-snippet-content</help>
         <advanced>true</advanced>
     </field>
     <field>

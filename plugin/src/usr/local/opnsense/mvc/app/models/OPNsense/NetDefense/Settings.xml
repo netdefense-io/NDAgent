@@ -102,27 +102,32 @@
                 <disabled>Disabled (refuse all remote sessions)</disabled>
             </OptionValues>
         </remoteAccessPolicy>
-        <rejectDangerousSnippets type="BooleanField">
-            <!-- Device-local defense-in-depth gate. When enabled, SYNC_API
-                 rejects individual USER/GROUP/ZABBIX_* snippet elements
-                 that carry a dangerous field (broad priv, scope=system,
-                 non-nologin shell, authorizedkeys, Zabbix remote commands,
-                 sudo_root) instead of applying them. Default ON
-                 (secure-by-default): this is the value a brand-new,
-                 never-before-configured device picks up the first time its
-                 Settings model is saved (GUI Apply or the unattended
-                 configure.php helper). Existing fleets that were already
-                 relying on the previous permissive default are
-                 grandfathered on package upgrade — ensure_readonly.php's
-                 post-install reconcile writes an explicit "0" into
-                 config.xml for any already-configured device whose saved
-                 config predates this field, so this <Default> only ever
-                 applies to genuinely fresh configuration, never silently
-                 flips an existing device's behavior. See CLAUDE.md's
-                 "Device-local dangerous-snippet gate" section. -->
-            <Default>1</Default>
+        <allowAllSnippetContent type="BooleanField">
+            <!-- Operator-facing inverse of the agent's reject_dangerous_snippets
+                 setting. The agent's config key and behaviour are unchanged;
+                 only the presentation is inverted, once, in the ndagent.conf
+                 template:
+
+                     allowAllSnippetContent = 0  ->  reject_dangerous_snippets=true
+                     allowAllSnippetContent = 1  ->  reject_dangerous_snippets=false
+
+                 Renamed from <rejectDangerousSnippets> because the original
+                 label was a double negative — unchecking a box called "Reject
+                 Dangerous Snippet Content" to permit dangerous content reads
+                 backwards. Default 0 (do not allow all) is therefore exactly
+                 the previous secure default of reject=1; this rename changes
+                 no device's behaviour.
+
+                 Existing devices are migrated by ensure_readonly.php, which
+                 writes the inverted value from any pre-existing
+                 rejectDangerousSnippets node. That migration is what preserves
+                 the grandfathered permissive setting on fleets that predate
+                 the secure-by-default flip — without it, those devices would
+                 silently tighten on upgrade. See CLAUDE.md's "Device-local
+                 dangerous-snippet gate" section. -->
+            <Default>0</Default>
             <Required>Y</Required>
-        </rejectDangerousSnippets>
+        </allowAllSnippetContent>
         <webadminReadonlyUser type="TextField">
             <!-- OPNsense username forged into the read-only "Open WebAdmin"
                  PHP session. Maps to the curated read-only ACL provisioned

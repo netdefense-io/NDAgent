@@ -43,6 +43,23 @@
         border-color: #a94442 !important;
         box-shadow: inset 0 1px 1px rgba(0,0,0,.075), 0 0 6px #ce8483 !important;
     }
+    /* Advanced-settings group headers. Separation comes from typography and a
+       neutral-gray rule rather than a fill, so the row reads correctly in both
+       the light and dark OPNsense themes. The transparent background overrides
+       table-striped, which would otherwise tint every other header. */
+    .netdefense-group-header {
+        background: transparent !important;
+        border-bottom: 1px solid rgba(128, 128, 128, 0.35);
+        padding-top: 18px !important;
+        padding-bottom: 6px !important;
+    }
+    .netdefense-group-header span {
+        text-transform: uppercase;
+        font-size: 11px;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        opacity: 0.75;
+    }
 </style>
 
 <script type="text/javascript">
@@ -570,10 +587,18 @@
             <table class="table table-striped">
                 <tbody>
                     <tr>
+                        <td colspan="2" class="netdefense-group-header">
+                            <span>{{ lang._('Control Plane') }}</span>
+                        </td>
+                    </tr>
+                    <tr>
                         <td style="width: 22%;"><strong>{{ lang._('Server Address') }}</strong></td>
                         <td>
                             <input type="text" class="form-control" id="settings.serverAddress" name="settings.serverAddress" placeholder="https://hub.netdefense.io">
-                            <div class="help-block">{{ lang._('NetDefense server URL (e.g., https://hub.netdefense.io or https://example.com:8443).') }}</div>
+                            <div class="help-block">
+                                {{ lang._('Where this device connects. Change only for a self-hosted deployment.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#server-address" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
                         </td>
                     </tr>
                     <tr>
@@ -582,22 +607,30 @@
                             <label class="checkbox-inline">
                                 <input type="checkbox" id="settings.sslVerify" name="settings.sslVerify" checked> {{ lang._('Enable SSL certificate verification') }}
                             </label>
+                            <br>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.tofuSslVerify" name="settings.tofuSslVerify" checked> {{ lang._('TOFU Key Fetch SSL Verification') }}
+                            </label>
+                            <div class="help-block">
+                                {{ lang._('The second box covers the one-time trust key fetch and stays on independently, so disabling the first never exposes key pinning.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#tofu-key-fetch-ssl-verification" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
                         </td>
                     </tr>
+
                     <tr>
-                        <td><strong>{{ lang._('TOFU Key Fetch SSL Verification') }}</strong></td>
-                        <td>
-                            <label class="checkbox-inline">
-                                <input type="checkbox" id="settings.tofuSslVerify" name="settings.tofuSslVerify" checked> {{ lang._('Enable SSL certificate verification for the first-connect trust key fetch') }}
-                            </label>
-                            <div class="help-block">{{ lang._('Kept on even if SSL Verification above is disabled, so the one-time trust key fetch stays protected against a rogue key being planted before anything is pinned.') }}</div>
+                        <td colspan="2" class="netdefense-group-header">
+                            <span>{{ lang._('Remote Access') }}</span>
                         </td>
                     </tr>
                     <tr>
                         <td><strong>{{ lang._('Pathfinder Address') }}</strong></td>
                         <td>
                             <input type="text" class="form-control" id="settings.pathfinderHost" name="settings.pathfinderHost" placeholder="https://pathfinder.netdefense.io">
-                            <div class="help-block">{{ lang._('Pathfinder server URL for remote shell connections.') }}</div>
+                            <div class="help-block">
+                                {{ lang._('Relay used for remote sessions. Change only for a self-hosted deployment.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#pathfinder-address" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
                         </td>
                     </tr>
                     <tr>
@@ -615,7 +648,48 @@
                                 <!-- Options populated dynamically via JavaScript -->
                             </select>
                             <input type="hidden" id="settings.pathfinderShell" name="settings.pathfinderShell" value="">
-                            <div class="help-block">{{ lang._('Shell to use for Pathfinder remote sessions.') }}</div>
+                            <div class="help-block">
+                                {{ lang._('Shell launched for an interactive remote session.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#pathfinder-shell" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>{{ lang._('Remote Access Policy') }}</strong></td>
+                        <td>
+                            <select class="form-control selectpicker" id="settings.remoteAccessPolicy" name="settings.remoteAccessPolicy">
+                                <option value="full" selected>{{ lang._('Full access (shell, SSH and web UI)') }}</option>
+                                <option value="readonly">{{ lang._('Read-only web UI only (no shell)') }}</option>
+                                <option value="disabled">{{ lang._('Disabled (refuse all remote sessions)') }}</option>
+                            </select>
+                            <div class="help-block">
+                                {{ lang._('Ceiling on remote sessions for this device. Set here, and cannot be raised remotely.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#remote-access-policy" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td colspan="2" class="netdefense-group-header">
+                            <span>{{ lang._('Configuration Sync') }}</span>
+                        </td>
+                    </tr>
+                    <tr>
+                        <td><strong>{{ lang._('Allow All Snippet Content') }}</strong></td>
+                        <td>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.allowAllSnippetContent" name="settings.allowAllSnippetContent"> {{ lang._('Apply privileged snippet content instead of refusing it') }}
+                            </label>
+                            <div class="help-block">
+                                {{ lang._('Off by default: broad privileges, system scope, interactive shells, SSH keys and Zabbix sudo are refused.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#allow-all-snippet-content" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
+                        </td>
+                    </tr>
+
+                    <tr>
+                        <td colspan="2" class="netdefense-group-header">
+                            <span>{{ lang._('Maintenance') }}</span>
                         </td>
                     </tr>
                     <tr>
@@ -627,27 +701,10 @@
                                 <option value="WARNING">WARNING</option>
                                 <option value="ERROR">ERROR</option>
                             </select>
-                            <div class="help-block">{{ lang._('Logging verbosity for the NetDefense Agent.') }}</div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td><strong>{{ lang._('Remote Access Policy') }}</strong></td>
-                        <td>
-                            <select class="form-control selectpicker" id="settings.remoteAccessPolicy" name="settings.remoteAccessPolicy">
-                                <option value="full" selected>{{ lang._('Full access (shell, SSH and web UI)') }}</option>
-                                <option value="readonly">{{ lang._('Read-only web UI only (no shell)') }}</option>
-                                <option value="disabled">{{ lang._('Disabled (refuse all remote sessions)') }}</option>
-                            </select>
-                            <div class="help-block">{{ lang._('Device-local ceiling on remote access. "Read-only web UI only" clamps every remote session to the web UI with no shell, whatever privilege the requester holds. "Disabled" refuses remote sessions outright. This is the final word and is enforced here on the firewall: the ceiling cannot be raised remotely — not by an operator account, not by a configuration sync, not by the NetDefense platform. It governs NetDefense remote sessions only; configuration sync is gated separately by "Reject Dangerous Snippet Content" below.') }}</div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td><strong>{{ lang._('Reject Dangerous Snippet Content') }}</strong></td>
-                        <td>
-                            <label class="checkbox-inline">
-                                <input type="checkbox" id="settings.rejectDangerousSnippets" name="settings.rejectDangerousSnippets" checked> {{ lang._('Reject dangerous USER/GROUP/Zabbix snippet content') }}
-                            </label>
-                            <div class="help-block">{{ lang._('Device-local defense-in-depth: reject individual snippet elements carrying a dangerous field (broad privileges, system scope, interactive shell, authorized keys, Zabbix remote commands, sudo) instead of applying them. On by default for new configurations; devices upgrading from an older release keep their prior (off) behavior automatically. Disabling this can allow legitimate service-account or monitoring snippets that were previously being rejected — review agent logs before disabling.') }}</div>
+                            <div class="help-block">
+                                {{ lang._('Agent log verbosity.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#log-level" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
                         </td>
                     </tr>
                     <tr>
@@ -655,7 +712,8 @@
                         <td>
                             <input type="text" class="form-control" id="settings.bootstrapToken" name="settings.bootstrapToken" placeholder="" autocomplete="off">
                             <div class="help-block">
-                                {{ lang._('One-time token from your NetDefense administrator (issued via "ndcli device rebind-token <name>"). Paste here to re-bind the device signing key after a suspected leak, hardware replacement, or routine rotation. The agent rotates its keypair automatically when this field is set. Clear this field once the device shows ENABLED again.') }}
+                                {{ lang._('One-time token to re-bind the signing key for this device. Clear it once the device shows ENABLED again.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#re-bind-token" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
                             </div>
                         </td>
                     </tr>

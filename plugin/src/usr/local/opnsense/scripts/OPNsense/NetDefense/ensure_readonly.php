@@ -114,14 +114,40 @@ try {
         $settingsChanged = true;
     }
 
-    // Grandfather the previous permissive reject_dangerous_snippets
-    // default (see the header docblock) for any device already configured
-    // before this field existed in its saved config.xml.
+    // Carry any existing rejectDangerousSnippets value across to its
+    // positively-phrased replacement, allowAllSnippetContent, inverting it.
+    //
+    // This runs BEFORE the grandfathering block below and is the reason a
+    // rename cannot change behaviour: a device that was explicitly permissive
+    // (reject=0, typically because the grandfathering below wrote it on an
+    // earlier upgrade) becomes allowAll=1 and stays permissive. A device that
+    // was explicitly secure (reject=1) becomes allowAll=0 and stays secure.
+    //
+    // Without this, the new field would simply be absent on every existing
+    // device, the model default (0 = secure) would apply, and the fleets
+    // deliberately grandfathered as permissive would tighten silently on
+    // package upgrade -- breaking in-use snippets with no warning.
+    //
+    // The old node is left in place rather than removed: it is inert once the
+    // template stops reading it, and leaving it makes a downgrade to an
+    // earlier plugin build behave correctly instead of reverting to defaults.
+    if (
+        isset($cfg->OPNsense->netdefense->settings->rejectDangerousSnippets)
+        && !isset($cfg->OPNsense->netdefense->settings->allowAllSnippetContent)
+    ) {
+        $wasRejecting = (string)$cfg->OPNsense->netdefense->settings->rejectDangerousSnippets === '1';
+        $cfg->OPNsense->netdefense->settings->allowAllSnippetContent = $wasRejecting ? '0' : '1';
+        $settingsChanged = true;
+    }
+
+    // Grandfather the previous permissive default (see the header docblock)
+    // for any device already configured before either field existed in its
+    // saved config.xml. Expressed in the new field: allow all = permissive.
     if (
         $isConfigured
-        && !isset($cfg->OPNsense->netdefense->settings->rejectDangerousSnippets)
+        && !isset($cfg->OPNsense->netdefense->settings->allowAllSnippetContent)
     ) {
-        $cfg->OPNsense->netdefense->settings->rejectDangerousSnippets = '0';
+        $cfg->OPNsense->netdefense->settings->allowAllSnippetContent = '1';
         $settingsChanged = true;
     }
 

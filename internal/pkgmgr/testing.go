@@ -42,3 +42,17 @@ func SetQueryFunc(f func(context.Context, []string) ([]Status, error)) func(cont
 	queryFunc = f
 	return prev
 }
+
+// SetOfferedByFunc — same pattern for the shadow check.
+func SetOfferedByFunc(f func(context.Context, string) ([]string, error)) func(context.Context, string) ([]string, error) {
+	prev := offeredByFunc
+	offeredByFunc = f
+	return prev
+}
+
+// SetAddURLFunc — same pattern for AddURL.
+func SetAddURLFunc(f func(context.Context, string, bool) MutateOutcome) func(context.Context, string, bool) MutateOutcome {
+	prev := addURLFunc
+	addURLFunc = f
+	return prev
+}

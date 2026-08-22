@@ -102,7 +102,7 @@ type callLog struct {
 	removes  []string
 }
 
-// swapPkgmgr installs in-memory stubs for pkgmgr's four call paths.
+// swapPkgmgr installs in-memory stubs for pkgmgr's call paths.
 // `installed` is mutated in place so a successful Install/Delete is visible
 // to a follow-up IsInstalled within the same test.
 func swapPkgmgr(t *testing.T,
@@ -142,12 +142,21 @@ func swapPkgmgr(t *testing.T,
 		cl.infos = append(cl.infos, name)
 		return installed[name], nil
 	})
+	// The install path shadow-checks before installing. Without a stub these
+	// tests would shell out to a real pkg(8), which is not present in CI.
+	// One repository is the unambiguous case, so this keeps every existing
+	// assertion meaning exactly what it meant before the check existed;
+	// tests that care about shadowing override this themselves.
+	prevOfferedBy := pkgmgr.SetOfferedByFunc(func(_ context.Context, name string) ([]string, error) {
+		return []string{"OPNsense"}, nil
+	})
 
 	t.Cleanup(func() {
 		pkgmgr.SetInstallFunc(prevInstall)
 		pkgmgr.SetRemoveFunc(prevRemove)
 		pkgmgr.SetUpdateFunc(prevUpdate)
 		pkgmgr.SetIsInstalledFunc(prevIsInstalled)
+		pkgmgr.SetOfferedByFunc(prevOfferedBy)
 	})
 	return cl
 }
