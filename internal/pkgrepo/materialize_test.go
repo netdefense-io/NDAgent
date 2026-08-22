@@ -16,12 +16,15 @@ func TestFirstApplyWritesConfAndFingerprints(t *testing.T) {
 	withTempRoot(t)
 	r := fingerprintRepo()
 
-	changed, err := Apply([]Repository{r}, true)
+	written, err := Apply([]Repository{r}, true)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
-	if !changed {
+	if !AnyChanged(written) {
 		t.Error("first apply should report Changed")
+	}
+	if !written[r.Name] {
+		t.Errorf("first apply should mark %q as written", r.Name)
 	}
 
 	conf, err := os.ReadFile(ConfPath("mimugmail"))
@@ -68,11 +71,11 @@ func TestApplyTwiceWritesNothingTheSecondTime(t *testing.T) {
 	}
 	firstBytes, _ := os.ReadFile(ConfPath("mimugmail"))
 
-	changed, err := Apply(repos, true)
+	written, err := Apply(repos, true)
 	if err != nil {
 		t.Fatalf("second apply: %v", err)
 	}
-	if changed {
+	if AnyChanged(written) {
 		t.Error("second apply of an unchanged policy reported Changed")
 	}
 
@@ -142,8 +145,14 @@ func TestPruneDeletesOnlyOurFiles(t *testing.T) {
 	}
 
 	// Policy no longer mentions mimugmail.
-	if err := Prune(nil); err != nil {
+	removed, err := Prune(nil)
+	if err != nil {
 		t.Fatalf("Prune: %v", err)
+	}
+	// The caller reports one result line per removal, so a silent prune
+	// would hide a device-affecting change from the operator.
+	if len(removed) != 1 || removed[0] != "mimugmail" {
+		t.Errorf("Prune should report what it removed, got %v", removed)
 	}
 
 	if _, err := os.Stat(ConfPath("mimugmail")); !os.IsNotExist(err) {
@@ -166,8 +175,12 @@ func TestPruneKeepsRepositoriesStillInThePolicy(t *testing.T) {
 	if _, err := Apply([]Repository{keep, drop}, true); err != nil {
 		t.Fatal(err)
 	}
-	if err := Prune([]string{"mimugmail"}); err != nil {
+	removed, err := Prune([]string{"mimugmail"})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if len(removed) != 1 || removed[0] != "other" {
+		t.Errorf("Prune should report only the dropped repo, got %v", removed)
 	}
 	if _, err := os.Stat(ConfPath("mimugmail")); err != nil {
 		t.Errorf("kept repo was deleted: %v", err)
@@ -244,5 +257,34 @@ func TestWritesAreAtomic(t *testing.T) {
 		if strings.Contains(e.Name(), ".tmp") || strings.HasPrefix(e.Name(), ".") {
 			t.Errorf("temp artefact left behind: %s", e.Name())
 		}
+	}
+}
+
+// Apply reports per repository, not one flag for the batch. A single new
+// repository used to make every sibling read as freshly configured in the
+// task result, which told the operator a device changed when it had not.
+func TestApplyReportsPerRepository(t *testing.T) {
+	withTempRoot(t)
+	first := fingerprintRepo()
+	if _, err := Apply([]Repository{first}, true); err != nil {
+		t.Fatal(err)
+	}
+
+	second := fingerprintRepo()
+	second.Name = "other"
+	second.Priority = 6
+
+	written, err := Apply([]Repository{first, second}, true)
+	if err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if written[first.Name] {
+		t.Errorf("%q was unchanged but reported as written", first.Name)
+	}
+	if !written[second.Name] {
+		t.Errorf("%q is new and should be reported as written", second.Name)
+	}
+	if !AnyChanged(written) {
+		t.Error("AnyChanged should be true when one repository was written")
 	}
 }

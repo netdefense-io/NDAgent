@@ -420,7 +420,7 @@ func reconcileRepositories(
 	}
 
 	// Phase 2: write, then drop repositories the policy no longer lists.
-	changed, err := pkgrepo.Apply(sp.Repositories, sp.AllowUnverified)
+	written, err := pkgrepo.Apply(sp.Repositories, sp.AllowUnverified)
 	if err != nil {
 		result.Results = append(result.Results, SyncAPIItemResult{
 			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
@@ -430,7 +430,10 @@ func reconcileRepositories(
 		result.Success = false
 		return false, false
 	}
-	if err := pkgrepo.Prune(names); err != nil {
+	changed := pkgrepo.AnyChanged(written)
+
+	removed, err := pkgrepo.Prune(names)
+	if err != nil {
 		result.Results = append(result.Results, SyncAPIItemResult{
 			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
 			Status: "error", Error: err.Error(),
@@ -439,10 +442,21 @@ func reconcileRepositories(
 		result.Success = false
 		return changed, false
 	}
+	// Removing a repository from the device is a change the operator should
+	// see, not something that happens silently.
+	for _, name := range removed {
+		changed = true
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Name: name,
+			Action: string(pkgmgr.ActionRepoRemoved), Status: "success",
+		})
+	}
 
+	// Per entry, not one flag for the batch: a single new repository used to
+	// make every sibling report as freshly configured.
 	for _, r := range sp.Repositories {
 		action := pkgmgr.ActionRepoUnchanged
-		if changed {
+		if written[r.Name] {
 			action = pkgmgr.ActionRepoConfigured
 		}
 		result.Results = append(result.Results, SyncAPIItemResult{

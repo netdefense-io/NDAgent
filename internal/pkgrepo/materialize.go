@@ -5,39 +5,56 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // Apply reconciles the on-device repository configuration to `repos`.
 //
-// Returns Changed=true only when something was actually written. The caller
-// uses that to decide whether a forced catalog refresh (`pkg update -f`) is
-// warranted; forcing one on every sync would be a real cost on a production
-// catalog, so "nothing changed" has to mean nothing was touched.
+// The returned map says, per repository name, whether that entry was actually
+// written. Per-entry rather than a single flag: the caller reports one result
+// line per repository, and a shared flag made every repository read as
+// "configured" whenever any one of them changed.
+//
+// A repository is absent from the map only if Apply returned early on error.
+// The caller uses "any true" to decide whether a forced catalog refresh
+// (`pkg update -f`) is warranted; forcing one on every sync would be a real
+// cost on a production catalog, so "nothing changed" has to mean nothing was
+// touched.
 //
 // allowUnverified is the organization's opt-in, carried inside the signed
 // payload. This function re-checks it independently rather than trusting that
 // NDManager already did — that independence is the whole point of the third
 // enforcement layer: a poisoned database row must not be able to put an
 // unverified repository on a device whose organization never opted in.
-func Apply(repos []Repository, allowUnverified bool) (bool, error) {
+func Apply(repos []Repository, allowUnverified bool) (map[string]bool, error) {
 	// Validate everything before writing anything. A policy carrying one bad
 	// repository should not leave half its siblings applied.
 	for _, r := range repos {
 		if err := checkPermitted(r, allowUnverified); err != nil {
-			return false, err
+			return nil, err
 		}
 	}
 
-	changed := false
+	written := make(map[string]bool, len(repos))
 	for _, r := range repos {
 		c, err := applyOne(r)
 		if err != nil {
-			return changed, err
+			return written, err
 		}
-		changed = changed || c
+		written[r.Name] = c
 	}
-	return changed, nil
+	return written, nil
+}
+
+// AnyChanged reports whether any entry in an Apply result was written.
+func AnyChanged(written map[string]bool) bool {
+	for _, c := range written {
+		if c {
+			return true
+		}
+	}
+	return false
 }
 
 // checkPermitted enforces the agent-side half of the trust model.
@@ -135,11 +152,14 @@ func writeFingerprints(r Repository) (bool, error) {
 	return changed, nil
 }
 
-// Prune removes managed files for repositories no longer in the policy.
+// Prune removes managed files for repositories no longer in the policy and
+// returns the names it removed, so the caller can report each one. Removing a
+// repository from a device is a change the operator should see in the task
+// result, not something that happens silently.
 //
 // Confined to files carrying ManagedMarker: an administrator's own config is
 // never removed by us, even if it happens to sit under our filename prefix.
-func Prune(keep []string) error {
+func Prune(keep []string) ([]string, error) {
 	keeping := map[string]bool{}
 	for _, name := range keep {
 		keeping[name] = true
@@ -148,11 +168,12 @@ func Prune(keep []string) error {
 	entries, err := os.ReadDir(reposDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
 
+	var removed []string
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasPrefix(e.Name(), filePrefix) || !strings.HasSuffix(e.Name(), ".conf") {
 			continue
@@ -165,7 +186,7 @@ func Prune(keep []string) error {
 		path := filepath.Join(reposDir, e.Name())
 		content, err := os.ReadFile(path)
 		if err != nil {
-			return err
+			return removed, err
 		}
 		if !IsManaged(content) {
 			// Prefix matches but we did not write it. Leaving it alone is the
@@ -173,16 +194,18 @@ func Prune(keep []string) error {
 			continue
 		}
 		if err := os.Remove(path); err != nil {
-			return err
+			return removed, err
 		}
 		if err := os.RemoveAll(FingerprintDir(name)); err != nil {
-			return err
+			return removed, err
 		}
 		if err := os.Remove(PubkeyPath(name)); err != nil && !os.IsNotExist(err) {
-			return err
+			return removed, err
 		}
+		removed = append(removed, name)
 	}
-	return nil
+	sort.Strings(removed)
+	return removed, nil
 }
 
 // writeIfDifferent writes only when the content actually differs, and does so
