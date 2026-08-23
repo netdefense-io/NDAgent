@@ -365,3 +365,99 @@ func findAction(res SyncAPIResult, action string) *SyncAPIItemResult {
 func osReadFile(p string) ([]byte, error) { return os.ReadFile(p) }
 func osMkdirAll(p string) error           { return os.MkdirAll(p, 0o755) }
 func osWriteFile(p, body string) error    { return os.WriteFile(p, []byte(body), 0o644) }
+
+// The regression this exists for: a policy that once configured a repository
+// and is then emptied must remove it from the device. Before the fix the
+// empty payload collapsed to nil, executeSyncSoftware returned immediately,
+// Prune never ran, and the managed file stayed on disk forever.
+func TestEmptiedPolicyPrunesManagedRepositories(t *testing.T) {
+	defer pkgrepo.SetRootForTest(t.TempDir())()
+
+	// A repository this agent manages is already on the device.
+	configured := pkgrepo.Repository{
+		Name:      "feature-check",
+		URL:       "https://example.invalid/repo",
+		Priority:  9,
+		Enabled:   false,
+		Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone},
+	}
+	if _, err := pkgrepo.Apply([]pkgrepo.Repository{configured}, true); err != nil {
+		t.Fatalf("seeding the device state: %v", err)
+	}
+	confPath := pkgrepo.ConfPath("feature-check")
+	if _, err := os.Stat(confPath); err != nil {
+		t.Fatalf("fixture did not write the conf: %v", err)
+	}
+
+	// The policy is emptied: present, absent and repositories all gone.
+	sp, err := parseSoftwarePayload(mustPayload(t, `{"software":{"present":[],"absent":[]}}`))
+	if err != nil {
+		t.Fatalf("parseSoftwarePayload: %v", err)
+	}
+	if sp == nil {
+		t.Fatal("an emptied policy must still reconcile; nil skips the prune entirely")
+	}
+
+	var result SyncAPIResult
+	if _, ok := reconcileRepositories(context.Background(), sp, &result); !ok {
+		t.Fatalf("reconcile refused: %+v", result.Errors)
+	}
+
+	if _, err := os.Stat(confPath); !os.IsNotExist(err) {
+		t.Error("the managed repository file survived an emptied policy")
+	}
+	var removed bool
+	for _, r := range result.Results {
+		if r.Type == "REPOSITORY" && r.Name == "feature-check" && r.Action == "REPO_REMOVED" {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Errorf("removal must be reported, got %+v", result.Results)
+	}
+}
+
+// The keep-list is built from the payload's repositories, and NDManager has
+// already merged every policy reaching the device through every template/OU
+// association into that one list. So the prune must keep ALL of them and
+// remove only what no policy contributes — dropping one because it arrived
+// via a different template would uninstall a live repository on every sync.
+func TestPruneKeepsEveryRepositoryInTheMergedPayload(t *testing.T) {
+	defer pkgrepo.SetRootForTest(t.TempDir())()
+
+	// Three managed repositories already on the device.
+	seed := []pkgrepo.Repository{
+		{Name: "alpha", URL: "https://example.invalid/a", Priority: 1, Enabled: true,
+			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
+		{Name: "bravo", URL: "https://example.invalid/b", Priority: 2, Enabled: true,
+			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
+		{Name: "stale", URL: "https://example.invalid/s", Priority: 3, Enabled: true,
+			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
+	}
+	if _, err := pkgrepo.Apply(seed, true); err != nil {
+		t.Fatalf("seeding: %v", err)
+	}
+
+	// The merged payload still carries alpha and bravo — they come from two
+	// different policies — but no longer carries stale.
+	sp, err := parseSoftwarePayload(mustPayload(t, `{"software":{"present":[],"absent":[],"allow_unverified":true,"repositories":[
+		{"name":"alpha","url":"https://example.invalid/a","priority":1,"enabled":true,"signature":{"type":"none"}},
+		{"name":"bravo","url":"https://example.invalid/b","priority":2,"enabled":true,"signature":{"type":"none"}}]}}`))
+	if err != nil {
+		t.Fatalf("parseSoftwarePayload: %v", err)
+	}
+
+	var result SyncAPIResult
+	if _, ok := reconcileRepositories(context.Background(), sp, &result); !ok {
+		t.Fatalf("reconcile refused: %+v", result.Errors)
+	}
+
+	for _, keep := range []string{"alpha", "bravo"} {
+		if _, err := os.Stat(pkgrepo.ConfPath(keep)); err != nil {
+			t.Errorf("repository %q is still in the merged payload but was pruned: %v", keep, err)
+		}
+	}
+	if _, err := os.Stat(pkgrepo.ConfPath("stale")); !os.IsNotExist(err) {
+		t.Error("a repository no policy contributes should have been removed")
+	}
+}

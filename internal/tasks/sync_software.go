@@ -123,10 +123,18 @@ func parseSoftwarePayload(payload map[string]interface{}) (*softwarePayload, err
 	}
 	out.External = ext
 
-	if len(out.Present) == 0 && len(out.Absent) == 0 &&
-		len(out.Repositories) == 0 && len(out.External) == 0 {
-		return nil, nil
-	}
+	// Deliberately NOT short-circuiting on an entirely empty section.
+	//
+	// When the only content was `present`/`absent`, empty genuinely meant
+	// "nothing to do". It does not any more: this agent writes files it owns
+	// (repository configs, fingerprint material), so an empty policy means
+	// "remove everything I manage" — which is work, not the absence of it.
+	// Returning nil here left a custom repository configured on the device
+	// forever once it was dropped from the policy, with no way to remove it
+	// through the product.
+	//
+	// An absent `software` key still returns nil: that is a server which sent
+	// no software section at all, and it must not be read as "prune".
 	return out, nil
 }
 
@@ -227,6 +235,14 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 	if !ok {
 		// Refused or failed: the device is unchanged and the task fails with
 		// a reason that names what to fix.
+		return result
+	}
+
+	// Nothing left to install or remove: the repository reconcile above was
+	// the whole job. Skip the catalog refresh — a policy that only ever
+	// configured repositories, or one that has just been emptied, should not
+	// pay for a `pkg update` on every sync.
+	if len(sp.Present) == 0 && len(sp.Absent) == 0 && len(sp.External) == 0 {
 		return result
 	}
 

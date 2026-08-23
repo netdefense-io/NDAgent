@@ -29,13 +29,33 @@ func TestParseSoftwarePayload_Missing(t *testing.T) {
 	}
 }
 
+// An empty software section used to collapse to nil, on the reasoning that
+// empty present/absent lists mean "nothing to do". That stopped being true
+// once this agent started writing files it owns: an emptied policy means
+// "remove everything I manage", and collapsing to nil skipped the prune, so a
+// custom repository dropped from a policy stayed configured on the device
+// forever with no way to remove it through the product.
+//
+// The assertion below is inverted from what it originally said, deliberately.
 func TestParseSoftwarePayload_EmptyLists(t *testing.T) {
 	sp, err := parseSoftwarePayload(mustPayload(t, `{"software":{"present":[],"absent":[]}}`))
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
-	if sp != nil {
-		t.Fatalf("empty-both should collapse to nil; got %+v", sp)
+	if sp == nil {
+		t.Fatal("an empty software section must still reconcile, so managed files get pruned")
+	}
+	if len(sp.Present) != 0 || len(sp.Absent) != 0 || len(sp.Repositories) != 0 || len(sp.External) != 0 {
+		t.Errorf("nothing should have been invented: %+v", sp)
+	}
+}
+
+// An absent key is still a no-op: that is a server that sent no software
+// section at all, and it must not be read as "prune everything".
+func TestParseSoftwarePayload_AbsentKeyStaysNoOp(t *testing.T) {
+	sp, err := parseSoftwarePayload(mustPayload(t, `{"snippets":[]}`))
+	if err != nil || sp != nil {
+		t.Fatalf("expected (nil, nil), got (%+v, %v)", sp, err)
 	}
 }
 
