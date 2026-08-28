@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -14,6 +15,14 @@ import (
 
 // Default timeout for waiting for client to pair
 const defaultPairingTimeout = 5 * time.Minute
+
+// peerOfflineGraceWindow bounds how soon after a peer_offline signal a
+// session end (without a clean close frame) is still treated as a natural
+// consequence of the peer having already departed, rather than a genuine
+// transport failure. Short enough that it can't paper over an unrelated
+// later failure; comfortably inside the ping/pong keepalive window
+// (pingInterval 30s / pongWait 60s in internal/pathfinder/client.go).
+const peerOfflineGraceWindow = 10 * time.Second
 
 // connectSendResponse is the terminal-response sender used by HandleConnect's
 // policy refusal path. Indirected so tests can assert the refusal without a
@@ -30,6 +39,64 @@ func effectiveReadOnly(policy config.RemoteAccessPolicy, requested bool) bool {
 		return true
 	}
 	return requested
+}
+
+// pathfinderSessionOutcome is the result of classifying how a CONNECT's
+// Pathfinder session ended, plus enough detail for HandleConnect to log
+// appropriately at each level without re-deriving the classification.
+type pathfinderSessionOutcome struct {
+	result TaskResult
+
+	// cancelled is true when the parent context was cancelled (agent
+	// shutdown, task cancellation) — unchanged pre-existing behavior.
+	cancelled bool
+
+	// naturalEnd is true when the session ended via a relay clean-close
+	// sentinel (*pathfinder.ErrSessionEndedCleanly) rather than a genuine
+	// transport failure.
+	naturalEnd bool
+
+	// cleanCloseReason carries the relay's close-frame reason text when
+	// naturalEnd is true, for logging only.
+	cleanCloseReason string
+}
+
+// classifyPathfinderSessionEnd maps a connectToPathfinder error to the
+// terminal task result, per the house rule that a natural session end is a
+// SUCCESS, not a FAILED. It is a pure function — no network, no logging — so
+// the classification can be unit tested directly against synthetic errors.
+//
+// ctxErr is the parent context's Err() (nil unless the CONNECT task itself
+// was cancelled); err is whatever connectToPathfinder returned.
+func classifyPathfinderSessionEnd(ctxErr, err error) pathfinderSessionOutcome {
+	// Cancellation takes priority: it's not a Pathfinder-side outcome at
+	// all, and connectToPathfinder swallows the frame-loop error in this
+	// case (returns nil), so err doesn't carry useful information here.
+	if ctxErr != nil {
+		return pathfinderSessionOutcome{
+			result:    NewSuccessResult("Pathfinder session ended (cancelled)"),
+			cancelled: true,
+		}
+	}
+
+	// A clean close from the relay (session TTL expiry, idle timeout — see
+	// NDPathFinder's "Cleaner-driven WebSocket close frames" contract) is a
+	// natural session end, not a failure. Branch on the sentinel type
+	// (which itself only ever gets constructed from close code 1000/1001),
+	// not on the reason text, so a future relay reason doesn't regress to
+	// FAILED.
+	var cleanClose *pathfinder.ErrSessionEndedCleanly
+	if errors.As(err, &cleanClose) {
+		return pathfinderSessionOutcome{
+			result:           NewSuccessResult(fmt.Sprintf("Pathfinder session ended: %v", cleanClose)),
+			naturalEnd:       true,
+			cleanCloseReason: cleanClose.Reason,
+		}
+	}
+
+	return pathfinderSessionOutcome{
+		result: NewFailureResult(fmt.Sprintf("Pathfinder session ended: %v", err)),
+	}
 }
 
 // remoteAccessRefusalMessage builds the operator-facing reason for a
@@ -160,19 +227,24 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Connect to Pathfinder
 	err := connectToPathfinder(ctx, ws, sessionID, webadminUser, readOnly, policy)
 	if err != nil {
-		log.Errorw("Pathfinder session ended",
-			"session_id", sessionID,
-			"error", err,
-		)
+		outcome := classifyPathfinderSessionEnd(ctx.Err(), err)
 
-		// Determine if this was a cancellation or an error
-		if ctx.Err() != nil {
-			result := NewSuccessResult("Pathfinder session ended (cancelled)")
-			return SendTaskResponse(ws, cmd.TaskID, result)
+		switch {
+		case outcome.cancelled:
+			log.Debugw("Pathfinder session cancelled", "session_id", sessionID)
+		case outcome.naturalEnd:
+			log.Infow("Pathfinder session ended naturally",
+				"session_id", sessionID,
+				"reason", outcome.cleanCloseReason,
+			)
+		default:
+			log.Errorw("Pathfinder session ended",
+				"session_id", sessionID,
+				"error", err,
+			)
 		}
 
-		result := NewFailureResult(fmt.Sprintf("Pathfinder session ended: %v", err))
-		return SendTaskResponse(ws, cmd.TaskID, result)
+		return SendTaskResponse(ws, cmd.TaskID, outcome.result)
 	}
 
 	log.Infow("Pathfinder session completed successfully",
@@ -302,6 +374,22 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 	if ctx.Err() != nil {
 		log.Debugw("Pathfinder session cancelled")
 		return nil
+	}
+
+	// RunFrameLoop already classifies a clean close (1000/1001) as
+	// ErrSessionEndedCleanly. When it instead returns a plain error but the
+	// relay told us the peer departed shortly before, treat that as the same
+	// natural end — the agent's own read failing right after the peer left
+	// is an expected consequence, not an independent transport failure.
+	if err != nil {
+		var cleanClose *pathfinder.ErrSessionEndedCleanly
+		if !errors.As(err, &cleanClose) && client.PeerOfflineRecently(peerOfflineGraceWindow) {
+			log.Debugw("Session ended without a clean close, but peer_offline preceded it",
+				"session_id", sessionID,
+				"underlying_error", err,
+			)
+			return &pathfinder.ErrSessionEndedCleanly{Reason: "peer disconnected"}
+		}
 	}
 
 	return err

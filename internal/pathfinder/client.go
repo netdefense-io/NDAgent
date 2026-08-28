@@ -17,10 +17,11 @@ import (
 
 // Message types for JSON signaling
 const (
-	MsgTypeRegister   = "register"
-	MsgTypeRegistered = "registered"
-	MsgTypePaired     = "paired"
-	MsgTypeError      = "error"
+	MsgTypeRegister    = "register"
+	MsgTypeRegistered  = "registered"
+	MsgTypePaired      = "paired"
+	MsgTypeError       = "error"
+	MsgTypePeerOffline = "peer_offline"
 )
 
 // WebSocket keepalive constants
@@ -51,6 +52,39 @@ type RegisteredPayload struct {
 	PeerOnline bool   `json:"peer_online"`
 }
 
+// PeerOfflinePayload is received when the paired peer disconnects from the
+// relay mid-session (e.g. the CLI/browser client closes its side while the
+// agent's own connection stays up). It's an in-band signal distinct from a
+// WebSocket close frame — see MsgTypePeerOffline.
+type PeerOfflinePayload struct {
+	PeerID string `json:"peer_id"`
+	Role   string `json:"role"`
+}
+
+// ErrSessionEndedCleanly indicates the relay closed the WebSocket with a
+// clean close frame — CloseNormalClosure (1000) or CloseGoingAway (1001) —
+// rather than an abrupt disconnect (1005/1006) or a network error. This is
+// NDPathFinder's cleaner-driven teardown path (session TTL expiry, idle
+// timeout) per API-CONTRACT.md's "Cleaner-driven WebSocket close frames"
+// section, and callers should classify it as a natural session end, not a
+// transport failure.
+type ErrSessionEndedCleanly struct {
+	// Reason carries the close-frame text, e.g. "TTL expired (client never
+	// connected)" or "idle timeout (15m0s)". Callers should treat the exact
+	// strings as informational only and branch on the close code (which is
+	// how this error gets constructed in the first place), so a future
+	// relay reason doesn't need an agent-side update to still classify as a
+	// clean close. May be empty if the peer sent no reason text.
+	Reason string
+}
+
+func (e *ErrSessionEndedCleanly) Error() string {
+	if e.Reason == "" {
+		return "pathfinder session ended cleanly"
+	}
+	return e.Reason
+}
+
 // Client manages a WebSocket connection to a Pathfinder server.
 type Client struct {
 	serverURL  string
@@ -66,6 +100,13 @@ type Client struct {
 	// Callback for incoming binary frames
 	frameHandler   func([]byte)
 	frameHandlerMu sync.RWMutex
+
+	// peerOfflineAt timestamps the most recent peer_offline signal, used as
+	// a fallback natural-end indicator when the session subsequently ends
+	// without a clean close frame (e.g. the agent's own read then hits a
+	// network error rather than 1000/1001). Zero value means "never seen".
+	peerOfflineMu sync.Mutex
+	peerOfflineAt time.Time
 
 	log *zap.SugaredLogger
 }
@@ -305,6 +346,21 @@ func (c *Client) RunFrameLoop(ctx context.Context) error {
 		for {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
+				// A clean close (1000/1001) is the relay's cleaner-driven
+				// teardown path (session TTL expiry, idle timeout) per
+				// API-CONTRACT.md's "Cleaner-driven WebSocket close frames"
+				// section — surface it as a typed sentinel so callers can
+				// classify it as a natural session end rather than a
+				// transport failure. Everything else (1005/1006, network
+				// errors, no close frame at all) keeps today's behavior.
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+					reason := ""
+					if closeErr, ok := err.(*websocket.CloseError); ok {
+						reason = closeErr.Text
+					}
+					errChan <- &ErrSessionEndedCleanly{Reason: reason}
+					return
+				}
 				errChan <- fmt.Errorf("read failed: %w", err)
 				return
 			}
@@ -321,11 +377,23 @@ func (c *Client) RunFrameLoop(ctx context.Context) error {
 					handler(data)
 				}
 			} else if messageType == websocket.TextMessage {
-				// Handle JSON messages during relay (errors, etc.)
+				// Handle JSON messages during relay (errors, peer_offline, etc.)
 				var msg Message
 				if err := json.Unmarshal(data, &msg); err == nil {
-					if msg.Type == MsgTypeError {
+					switch msg.Type {
+					case MsgTypeError:
 						c.log.Errorw("Received error from Pathfinder", "error", msg.Error)
+					case MsgTypePeerOffline:
+						var offline PeerOfflinePayload
+						if err := json.Unmarshal(msg.Payload, &offline); err != nil {
+							c.log.Warnw("Failed to parse peer_offline payload", "error", err)
+						} else {
+							c.log.Infow("Peer disconnected from Pathfinder session",
+								"peer_id", offline.PeerID,
+								"role", offline.Role,
+							)
+						}
+						c.recordPeerOffline()
 					}
 				}
 			}
@@ -388,6 +456,29 @@ func (c *Client) Close() error {
 	}
 
 	return nil
+}
+
+// recordPeerOffline timestamps a peer_offline signal.
+func (c *Client) recordPeerOffline() {
+	c.peerOfflineMu.Lock()
+	c.peerOfflineAt = time.Now()
+	c.peerOfflineMu.Unlock()
+}
+
+// PeerOfflineRecently reports whether a peer_offline signal was observed
+// within the given window of now. Callers use this as a fallback natural-end
+// signal when the session ends without a clean close frame — the peer having
+// already departed makes a following disconnect an expected consequence
+// rather than a genuine transport failure.
+func (c *Client) PeerOfflineRecently(within time.Duration) bool {
+	c.peerOfflineMu.Lock()
+	at := c.peerOfflineAt
+	c.peerOfflineMu.Unlock()
+
+	if at.IsZero() {
+		return false
+	}
+	return time.Since(at) <= within
 }
 
 // IsConnected returns true if the client is connected.

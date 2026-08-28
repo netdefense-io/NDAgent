@@ -2,11 +2,14 @@ package tasks
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/network"
+	"github.com/netdefense-io/ndagent/internal/pathfinder"
 )
 
 func TestBuildPathfinderWSURL(t *testing.T) {
@@ -262,6 +265,127 @@ func TestHandleConnectAllowsWhenPolicyFull(t *testing.T) {
 
 	if refused {
 		t.Error("policy=full must not take the remote-access refusal path")
+	}
+}
+
+// ── Natural session-end classification ──────────────────────────────────
+//
+// NDPathFinder's cleaner-driven teardown (session TTL expiry, idle timeout)
+// closes the WebSocket with a clean close frame (code 1000/1001) carrying a
+// stable reason string — see API-CONTRACT.md's "Cleaner-driven WebSocket
+// close frames" section. That must classify as a SUCCESS task, not FAILED;
+// a genuine transport failure (1005/1006, network error) must still FAIL.
+
+// TestClassifyPathfinderSessionEnd_CleanCloseReasons pins the SUCCESS path
+// for every reason string in the NDPathFinder contract. The classification
+// must key off the *pathfinder.ErrSessionEndedCleanly sentinel type (itself
+// only ever constructed from close code 1000/1001), not off matching these
+// exact strings, so a future relay reason not in this list still succeeds —
+// this test exists to document what the strings look like in practice, not
+// to gate the classification on them.
+func TestClassifyPathfinderSessionEnd_CleanCloseReasons(t *testing.T) {
+	reasons := []string{
+		"TTL expired (client never connected)",
+		"TTL expired (agent never connected)",
+		"TTL expired",
+		"idle timeout (15m0s)",
+	}
+
+	for _, reason := range reasons {
+		t.Run(reason, func(t *testing.T) {
+			err := &pathfinder.ErrSessionEndedCleanly{Reason: reason}
+
+			outcome := classifyPathfinderSessionEnd(nil, err)
+
+			if !outcome.result.Success {
+				t.Fatalf("clean close %q classified as FAILED, want SUCCESS", reason)
+			}
+			if outcome.cancelled {
+				t.Error("clean close must not be reported as cancelled")
+			}
+			if !outcome.naturalEnd {
+				t.Error("clean close must set naturalEnd")
+			}
+			want := fmt.Sprintf("Pathfinder session ended: %s", reason)
+			if outcome.result.Message != want {
+				t.Errorf("message = %q, want %q", outcome.result.Message, want)
+			}
+		})
+	}
+}
+
+// TestClassifyPathfinderSessionEnd_CleanCloseWrapped confirms the errors.As
+// unwrapping catches a sentinel that arrives wrapped (e.g. via %w further up
+// the call chain), not just a bare *ErrSessionEndedCleanly.
+func TestClassifyPathfinderSessionEnd_CleanCloseWrapped(t *testing.T) {
+	inner := &pathfinder.ErrSessionEndedCleanly{Reason: "idle timeout (15m0s)"}
+	wrapped := fmt.Errorf("connect failed: %w", inner)
+
+	outcome := classifyPathfinderSessionEnd(nil, wrapped)
+
+	if !outcome.result.Success {
+		t.Fatalf("wrapped clean close classified as FAILED, want SUCCESS")
+	}
+	if !outcome.naturalEnd {
+		t.Error("wrapped clean close must set naturalEnd")
+	}
+}
+
+// TestClassifyPathfinderSessionEnd_TransportFailure pins the FAILED path for
+// genuine transport errors — abrupt close (1005/1006) and plain network
+// errors both surface as a bare error from connectToPathfinder, never the
+// ErrSessionEndedCleanly sentinel.
+func TestClassifyPathfinderSessionEnd_TransportFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"abrupt close 1006", errors.New("read failed: websocket: close 1006 (abnormal closure): unexpected EOF")},
+		{"abrupt close 1005", errors.New("read failed: websocket: close 1005 (no status)")},
+		{"network error", errors.New("read failed: read tcp 10.0.0.1:443: connection reset by peer")},
+		{"dial failure", errors.New("connect failed: dial failed: dial tcp: lookup pathfinder.example.com: no such host")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			outcome := classifyPathfinderSessionEnd(nil, tt.err)
+
+			if outcome.result.Success {
+				t.Fatalf("transport failure %q classified as SUCCESS, want FAILED", tt.err)
+			}
+			if outcome.naturalEnd {
+				t.Error("transport failure must not set naturalEnd")
+			}
+			if outcome.cancelled {
+				t.Error("transport failure must not be reported as cancelled")
+			}
+			want := fmt.Sprintf("Pathfinder session ended: %v", tt.err)
+			if outcome.result.Message != want {
+				t.Errorf("message = %q, want %q", outcome.result.Message, want)
+			}
+		})
+	}
+}
+
+// TestClassifyPathfinderSessionEnd_Cancellation pins the pre-existing
+// cancellation behavior: it must win over any classification of err (which
+// connectToPathfinder returns as nil on cancellation anyway), and must
+// remain a SUCCESS with the original "(cancelled)" message.
+func TestClassifyPathfinderSessionEnd_Cancellation(t *testing.T) {
+	outcome := classifyPathfinderSessionEnd(context.Canceled, nil)
+
+	if !outcome.result.Success {
+		t.Fatal("cancellation must classify as SUCCESS")
+	}
+	if !outcome.cancelled {
+		t.Error("cancellation must set cancelled")
+	}
+	if outcome.naturalEnd {
+		t.Error("cancellation must not also set naturalEnd")
+	}
+	want := "Pathfinder session ended (cancelled)"
+	if outcome.result.Message != want {
+		t.Errorf("message = %q, want %q", outcome.result.Message, want)
 	}
 }
 
