@@ -124,6 +124,45 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		"managed_clients", len(currentClientUUIDs),
 	)
 
+	// Phase 1.5: Enable the WireGuard master switch when this device is
+	// meant to carry VPN configuration.
+	//
+	// NetDefense config is authoritative: if a WireGuard network is being
+	// synced to this device, WireGuard is turned on — every sync, no local
+	// state tracking, no first-time-only guard, no attempt to detect an
+	// operator's intent. Disabling the plugin by hand on the box is not a
+	// supported way to leave a VPN; the supported way is to remove the
+	// device from the network in NetDefense, which empties `networks` here
+	// and takes the enable with it.
+	//
+	// Without this, a device whose master switch is off materializes the
+	// wg_server/wg_client objects and reconfigures, but the plugin creates
+	// no wgN interface — so OPNsense's `wireguard` interface group never
+	// appears and any rule targeting it is rejected with
+	// `Option [wireguard] not in list.`
+	// Gated on a network that will actually be realized, not merely on one
+	// being present in the payload. Deriving the public key is the only way
+	// a network can fail before any API call, so a payload whose every
+	// network is malformed must not flip the master switch on and then fail
+	// — that would leave the plugin enabled with nothing behind it.
+	if anyRealizableNetwork(networks) {
+		if err := ensureWireGuardEnabled(ctx, client); err != nil {
+			// Record and carry on rather than returning. The orphan sweep in
+			// Phases 4 and 5 is the teardown half of this executor and does
+			// not depend on the master switch; skipping it would strand
+			// managed servers and clients on the device because an unrelated
+			// call failed. Same rule as checkRuleInterfaces: a check that
+			// coexists with an orphan sweep must not abort before it.
+			//
+			// The task still fails — errMsg lands in result.Errors — so this
+			// is never silent.
+			errMsg := fmt.Sprintf("Failed to enable WireGuard: %v", err)
+			log.Errorw(errMsg)
+			result.Errors = append(result.Errors, errMsg)
+			result.Success = false
+		}
+	}
+
 	// Track desired names for orphan detection
 	desiredServerNames := make(map[string]bool)
 	desiredClientNames := make(map[string]bool)
@@ -389,6 +428,59 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 	log.Info("VPN sync completed successfully")
 
 	return result
+}
+
+// anyRealizableNetwork reports whether at least one desired network can
+// actually be materialized, i.e. its private key yields a public key.
+//
+// This is the guard on the master-switch enable. Turning the plugin on for a
+// payload that then fails every network leaves the device enabled with no
+// instance — worse than where it started, and not something the operator's
+// "if config is synced, enable it" rule asks for: nothing is being synced if
+// nothing is realizable.
+func anyRealizableNetwork(networks []VPNNetwork) bool {
+	for _, network := range networks {
+		if _, err := opnapi.DeriveWireGuardPublicKey(network.Interface.PrivateKey); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ensureWireGuardEnabled turns the os-wireguard master switch on.
+//
+// The end state is unconditional — this function either leaves the switch
+// on or returns an error. The read is a write-elision only: `general/set`
+// writes config.xml and cuts a config revision, so re-writing "1" over "1"
+// on every sync would churn the device's config history for nothing. It is
+// NOT intent preservation: an "0" read is always corrected to "1".
+//
+// No reconfigure here — Phase 6 does one at the end of the VPN sync, after
+// the servers and clients exist, which is the point at which the plugin can
+// actually bring the interface up.
+func ensureWireGuardEnabled(ctx context.Context, client *opnapi.Client) error {
+	log := logging.Named("SYNC_VPN")
+
+	general, err := client.GetWireGuardGeneral(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to read WireGuard general settings: %w", err)
+	}
+
+	if general.Enabled == "1" {
+		log.Debug("WireGuard master switch already enabled")
+		return nil
+	}
+
+	log.Infow("Enabling WireGuard master switch (device is receiving VPN configuration)",
+		"previous_enabled", general.Enabled,
+	)
+
+	general.Enabled = "1"
+	if err := client.SetWireGuardGeneral(ctx, general); err != nil {
+		return fmt.Errorf("failed to write WireGuard general settings: %w", err)
+	}
+
+	return nil
 }
 
 // stringFromPtr returns the string value or empty string if nil.

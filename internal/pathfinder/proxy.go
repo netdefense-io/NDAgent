@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"sync"
 
 	"go.uber.org/zap"
@@ -204,7 +205,11 @@ func (p *TCPProxy) ProxyStreamToLocal(stream *Stream) error {
 		return fmt.Errorf("unknown service: %s", serviceName)
 	}
 
-	addr := fmt.Sprintf("%s:%d", config.LocalHost, config.LocalPort)
+	// net.JoinHostPort, not fmt.Sprintf("%s:%d") — the latter produces an
+	// unusable address for an IPv6 literal host (it needs brackets), which
+	// `go vet`'s hostport check flags. Identical output for the IPv4
+	// literals actually configured today (127.0.0.1).
+	addr := net.JoinHostPort(config.LocalHost, strconv.Itoa(config.LocalPort))
 
 	p.log.Debugw("Proxying stream to local service",
 		"stream_id", stream.ID(),

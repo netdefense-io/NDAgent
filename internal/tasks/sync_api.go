@@ -207,6 +207,13 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
+	// Visibility only — never blocks the sync. Below the 26.1 floor a VPN
+	// teardown silently strands its auto firewall rules, and shipping a
+	// known silent failure with only documentation to protect users is not
+	// acceptable. At most one log line per category per agent process, and
+	// no API call at all once the release is known to be supported.
+	warnIfOPNsenseBelowFloor(ctx, apiClient)
+
 	// Parse payload
 	if cmd.Payload == nil {
 		result := NewFailureResult("No payload provided")
@@ -375,8 +382,34 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"software_absent_count", softwareAbsentCount,
 	)
 
+	// Execute sync for VPN networks FIRST — before aliases and rules.
+	//
+	// Rules may target OPNsense's `wireguard` interface group, and that
+	// group only exists once the WireGuard plugin has an enabled instance
+	// and has been reconfigured. Realizing the VPN first is what lets a
+	// first-time setup converge in a single `sync apply` instead of
+	// requiring a second pass after the interface appears.
+	//
+	// Same orphan-cleanup-always semantics as the other executors.
+	// executeSyncVPN handles the "plugin not installed" case by returning
+	// a no-op success when the WireGuard search endpoints 404.
+	vpnResult := executeSyncVPN(ctx, apiClient, vpnNetworks)
+
 	// Execute sync for aliases and rules
 	syncResult := executeSyncAPI(ctx, apiClient, aliases, rules)
+
+	// Splice the VPN results in front so the reported item list reads in
+	// execution order.
+	syncResult.Results = append(append([]SyncAPIItemResult{}, vpnResult.Results...), syncResult.Results...)
+	syncResult.Errors = append(append([]string{}, vpnResult.Errors...), syncResult.Errors...)
+	// ValidationErrors too: executeSyncVPN sets none today, but every other
+	// executor merge carries all three fields and dropping one here is a trap
+	// for whoever adds VPN validation errors later — they would vanish from
+	// the task response with nothing to explain why.
+	syncResult.ValidationErrors = append(append([]ValidationError{}, vpnResult.ValidationErrors...), syncResult.ValidationErrors...)
+	if !vpnResult.Success {
+		syncResult.Success = false
+	}
 
 	// Execute sync for users and groups. Runs every sync (no len-based
 	// gate) so that managed-but-undesired identities are reliably swept
@@ -403,16 +436,6 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	syncResult.Results = append(syncResult.Results, unboundResult.Results...)
 	syncResult.Errors = append(syncResult.Errors, unboundResult.Errors...)
 	if !unboundResult.Success {
-		syncResult.Success = false
-	}
-
-	// Execute sync for VPN networks. Same orphan-cleanup-always semantics.
-	// executeSyncVPN handles the "plugin not installed" case by returning
-	// a no-op success when the WireGuard search endpoints 404.
-	vpnResult := executeSyncVPN(ctx, apiClient, vpnNetworks)
-	syncResult.Results = append(syncResult.Results, vpnResult.Results...)
-	syncResult.Errors = append(syncResult.Errors, vpnResult.Errors...)
-	if !vpnResult.Success {
 		syncResult.Success = false
 	}
 
@@ -577,6 +600,106 @@ func checkOrphanAliasUsage(
 	return validationErrors
 }
 
+// checkRuleInterfaces pre-flights every desired rule's `interface` field
+// against the interfaces and interface groups OPNsense actually offers.
+//
+// Without this, a rule naming an interface the device does not have fails
+// deep inside OPNsense's model validation with `Option [wireguard] not in
+// list.` — the option name, no rule identity, no list of what IS valid, and
+// no hint that the cause is a VPN network that was never realized on this
+// device. GetInterfaceList reads the same option list the model validates
+// against (`GET /firewall/filter/getRule`), so the check is exact rather
+// than an approximation.
+//
+// A failure to read the interface list is NOT treated as a validation
+// failure: the check is a diagnostic that produces a better error message,
+// and losing it must never block a sync that would otherwise succeed. In
+// that case OPNsense's own validation still applies, exactly as before.
+func checkRuleInterfaces(ctx context.Context, client *opnapi.Client, rules []APIRulePayload) []ValidationError {
+	log := logging.Named("SYNC_API")
+
+	if len(rules) == 0 {
+		return nil
+	}
+
+	interfaces, err := client.GetInterfaceList(ctx)
+	if err != nil {
+		log.Warnw("Skipping rule interface pre-flight: failed to list interfaces", "error", err)
+		return nil
+	}
+	if len(interfaces) == 0 {
+		// An empty list means the template shape changed; treating it as
+		// "nothing is valid" would block every rule on the device.
+		log.Warn("Skipping rule interface pre-flight: OPNsense returned no interface options")
+		return nil
+	}
+
+	available := make(map[string]bool, len(interfaces))
+	for _, iface := range interfaces {
+		available[iface] = true
+	}
+
+	sortedAvailable := append([]string(nil), interfaces...)
+	sort.Strings(sortedAvailable)
+	availableList := strings.Join(sortedAvailable, ", ")
+
+	var validationErrors []ValidationError
+	for _, rule := range rules {
+		// An empty interface is a floating rule — valid, nothing to check.
+		// OPNsense accepts a comma-separated list for multi-interface rules;
+		// collect every missing name but report the rule ONCE, so
+		// "wireguard, opt9" is one blocked rule naming both rather than two
+		// blocked rows for a single rule.
+		var missing []string
+		for _, token := range strings.Split(rule.Interface, ",") {
+			iface := strings.TrimSpace(token)
+			if iface == "" || available[iface] {
+				continue
+			}
+			missing = append(missing, iface)
+		}
+		if len(missing) == 0 {
+			continue
+		}
+
+		quoted := make([]string, 0, len(missing))
+		for _, m := range missing {
+			quoted = append(quoted, fmt.Sprintf("%q", m))
+		}
+		subject := fmt.Sprintf("interface or interface group %s does not", quoted[0])
+		if len(missing) > 1 {
+			subject = fmt.Sprintf("interfaces or interface groups %s do not", strings.Join(quoted, ", "))
+		}
+
+		message := fmt.Sprintf(
+			"Cannot apply rule %q: %s exist on this device (available: %s)",
+			rule.Description, subject, availableList,
+		)
+		for _, m := range missing {
+			if m == wireGuardInterfaceGroup {
+				message += "; this device is not carrying an active WireGuard network, so OPNsense has not created the \"wireguard\" interface group — attach the VPN network to this device in NetDefense"
+				break
+			}
+		}
+
+		validationErrors = append(validationErrors, ValidationError{
+			Type:       "rule",
+			UUID:       rule.UUID,
+			Name:       rule.Description,
+			ErrorCode:  "INTERFACE_NOT_FOUND",
+			Message:    message,
+			References: missing,
+		})
+	}
+
+	return validationErrors
+}
+
+// wireGuardInterfaceGroup is the interface group OPNsense's WireGuard plugin
+// creates for its wgN interfaces. Referenced here only to sharpen the
+// pre-flight error message — the check itself is interface-agnostic.
+const wireGuardInterfaceGroup = "wireguard"
+
 // executeSyncAPI performs the actual sync using declarative state model.
 func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAliasPayload, rules []APIRulePayload) SyncAPIResult {
 	log := logging.Named("SYNC_API")
@@ -671,11 +794,86 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		log.Warnw("Sync blocked by validation errors",
 			"error_count", len(validationErrors),
 		)
+		// Surface each validation error in the task's errors list too, so
+		// the task summary carries a count and the reason is readable
+		// without digging into the structured validation_errors payload.
+		validationMessages := make([]string, 0, len(validationErrors))
+		for _, ve := range validationErrors {
+			validationMessages = append(validationMessages, ve.Message)
+		}
 		return SyncAPIResult{
 			Success:          false,
 			Message:          "Sync blocked: cannot delete aliases that are in use",
+			Errors:           validationMessages,
 			ValidationErrors: validationErrors,
 		}
+	}
+
+	// Phase 1.6: Pre-flight every rule's interface against what the device
+	// actually offers, so a rule naming a missing interface (group) reports
+	// the problem by name instead of OPNsense's bare `Option [x] not in
+	// list.`
+	//
+	// This deliberately does NOT fail fast, unlike the orphan-alias check
+	// above. The two teardown outcomes have to happen in the SAME sync:
+	//
+	//   - An auto-generated VPN rule (`[nd-vpn:<network>]`, emitted by
+	//     NDManager's vpn_firewall_renderer only while the device holds an
+	//     enabled membership) drops out of the desired set when the network
+	//     goes away. It is an NDAgent-managed object and must be DELETED by
+	//     the orphan sweep in Phase 4 — no dangling rule.
+	//   - A user-authored template rule still pointing at the interface
+	//     that just disappeared must FAIL LOUDLY, naming the rule and the
+	//     missing interface.
+	//
+	// A fail-fast return can only do the second: it would abort before
+	// Phase 4 and strand exactly the auto rules that were supposed to be
+	// swept. So an offending rule is instead dropped from the create/update
+	// pass, recorded as a blocked item, and appended to `errors` (which is
+	// what `success := len(errors) == 0` keys off) — the same shape the
+	// dangerous-snippet gate uses. Everything else in the sync, orphan
+	// deletion included, still runs.
+	interfaceErrors := checkRuleInterfaces(ctx, client, rules)
+
+	// Offending rules stay OUT of the create/update pass but stay IN the
+	// desired set, so they are not orphan-deleted. Same principle as the
+	// dangerous-snippet gate: the check refuses to write a rule it knows
+	// OPNsense will reject; it does not delete pre-existing device state
+	// that happens to match the same criteria. A rule whose interface group
+	// vanished underneath it is left exactly as it is on the device for the
+	// operator to fix.
+	applyRules := rules
+	if len(interfaceErrors) > 0 {
+		blockedRuleUUIDs := make(map[string]bool, len(interfaceErrors))
+		for _, ve := range interfaceErrors {
+			blockedRuleUUIDs[ve.UUID] = true
+		}
+
+		applyRules = make([]APIRulePayload, 0, len(rules))
+		for _, r := range rules {
+			if !blockedRuleUUIDs[r.UUID] {
+				applyRules = append(applyRules, r)
+			}
+		}
+
+		for _, ve := range interfaceErrors {
+			log.Warnw("SYNC_API: rule references an interface that does not exist on this device",
+				"uuid", ve.UUID,
+				"rule", ve.Name,
+				"message", ve.Message,
+			)
+			results = append(results, SyncAPIItemResult{
+				Type:   "rule",
+				UUID:   ve.UUID,
+				Name:   ve.Name,
+				Action: "blocked",
+				Status: "blocked",
+				Error:  ve.Message,
+			})
+			errors = append(errors, ve.Message)
+		}
+
+		validationErrors = append(validationErrors, interfaceErrors...)
 	}
 
 	// Phase 2: Create/Update aliases (before rules, as rules may depend on aliases)
@@ -706,8 +904,9 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		results = append(results, itemResult)
 	}
 
-	// Phase 3: Create/Update rules with computed sequences
-	for _, rule := range rules {
+	// Phase 3: Create/Update rules with computed sequences.
+	// applyRules is `rules` minus anything the interface pre-flight blocked.
+	for _, rule := range applyRules {
 		action := "created"
 		if currentRuleUUIDs[rule.UUID] {
 			action = "updated"
@@ -858,6 +1057,10 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		Message: message,
 		Results: results,
 		Errors:  errors,
+		// Carries any INTERFACE_NOT_FOUND entries from the Phase 1.6
+		// pre-flight — the sync continued past them (so orphan sweeps ran),
+		// but the structured detail still reaches the task response.
+		ValidationErrors: validationErrors,
 	}
 }
 

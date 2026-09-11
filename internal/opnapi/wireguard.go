@@ -16,6 +16,72 @@ import (
 // resources by name prefix instead.
 const NDAgentWireGuardPrefix = "nd-vpn__"
 
+// WireGuardGeneral is the os-wireguard plugin's master switch — the
+// "Enable WireGuard" checkbox under VPN → WireGuard → Settings, stored as
+// the `general` node of the plugin model.
+//
+// Verified against the lab OPNsense (26.1, os-wireguard):
+//
+//	GET  /api/wireguard/general/get  ->  {"general":{"enabled":"0"}}
+//	POST /api/wireguard/general/set  <-  {"general":{"enabled":"1"}}
+//	                                 ->  {"result":"saved"}
+//
+// The model has exactly one field, so writing it back whole cannot clobber
+// unrelated plugin settings. The wrapper key is `general` — confirmed from
+// the GET template shape, per the OPNsense wrapper-key rule in CLAUDE.md.
+//
+// The switch is load-bearing beyond the tunnel itself: with it off, the
+// plugin creates no wgN interfaces, so OPNsense's `wireguard` interface
+// GROUP does not exist and any firewall rule targeting that group is
+// rejected with `Option [wireguard] not in list.`
+type WireGuardGeneral struct {
+	Enabled string `json:"enabled"`
+}
+
+// WireGuardGeneralWrapper wraps the general settings for API operations.
+type WireGuardGeneralWrapper struct {
+	General WireGuardGeneral `json:"general"`
+}
+
+// GetWireGuardGeneral reads the WireGuard plugin's master switch.
+func (c *Client) GetWireGuardGeneral(ctx context.Context) (WireGuardGeneral, error) {
+	respBody, err := c.doRequest(ctx, "GET", "/wireguard/general/get", nil)
+	if err != nil {
+		return WireGuardGeneral{}, err
+	}
+
+	var wrapper WireGuardGeneralWrapper
+	if err := json.Unmarshal(respBody, &wrapper); err != nil {
+		return WireGuardGeneral{}, fmt.Errorf("failed to parse general settings: %w", err)
+	}
+
+	c.log.Debugw("GetWireGuardGeneral completed", "enabled", wrapper.General.Enabled)
+
+	return wrapper.General, nil
+}
+
+// SetWireGuardGeneral writes the WireGuard plugin's master switch.
+// The caller must still call ReconfigureWireGuard for the change to take effect.
+func (c *Client) SetWireGuardGeneral(ctx context.Context, general WireGuardGeneral) error {
+	respBody, err := c.doRequest(ctx, "POST", "/wireguard/general/set", WireGuardGeneralWrapper{General: general})
+	if err != nil {
+		return err
+	}
+
+	var result APIResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if result.Result != "saved" {
+		return fmt.Errorf("unexpected result: %s (response: %s)", result.Result, string(respBody))
+	}
+
+	c.log.Debugw("SetWireGuardGeneral completed", "enabled", general.Enabled)
+
+	return nil
+}
+
 // WireGuardServer represents a WireGuard server for create/update API calls.
 type WireGuardServer struct {
 	Enabled       string `json:"enabled"`

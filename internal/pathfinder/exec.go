@@ -73,9 +73,17 @@ package pathfinder
 //       { "id": "", "type": "result", "exit_code": -1, "truncated": false }
 //     The stream stays open; subsequent requests are processed normally.
 //
-//  9. PRIVILEGE: commands run as the agent process owner (root on OPNsense) with
-//     DeviceExecEnv() providing PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin,
-//     HOME=/root, working directory /root.
+//  9. PRIVILEGE / ENVIRONMENT: commands run as the agent process owner (root on
+//     OPNsense). DeviceExecEnv() replaces PATH with
+//     /sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin and inherits
+//     every other variable from the agent process unchanged. HOME is therefore
+//     NOT forced here — the interactive shell path (shell.go) sets HOME=/root
+//     and USER=root, the exec path deliberately does not; an earlier version of
+//     this comment claimed otherwise.
+//     Working directory is /root on the device. Where /root cannot be entered
+//     (it does not exist, or the process is not root and so cannot chdir into a
+//     0700 directory) the agent's own working directory is inherited instead —
+//     see usableWorkingDir.
 //
 // 10. STREAM LIFETIME: the exec stream stays open across many commands. It closes
 //     only when the client sends a FrameTypeClose frame, handled by the normal
@@ -115,6 +123,13 @@ const (
 	// execOutputCap is the combined stdout+stderr byte cap per command (1 MiB).
 	execOutputCap = 1 << 20
 
+	// execWaitDelay bounds how long cmd.Wait keeps waiting on the child's
+	// output pipe after the context is done. Without it, a descendant that
+	// survived the kill and still holds the pipe pins the task open with no
+	// deadline at all. Generous enough to let a just-killed process group's
+	// final output drain, short enough that a timeout stays a timeout.
+	execWaitDelay = 2 * time.Second
+
 	// ExecTimeoutExitCode is the exit_code in the result frame when the command
 	// is killed by the agent's timeout. Matches GNU coreutils timeout(1).
 	ExecTimeoutExitCode = 124
@@ -128,6 +143,50 @@ const (
 	// Math: maxRaw = (32768 - 80) * 3/4 ≈ 24516. We use 24000 for a round margin.
 	execResponseChunkSize = 24000
 )
+
+// resolveExecTimeout turns a request's timeout_seconds into the deadline the
+// command actually runs under, per wire-contract item 3: absent or <=0 means
+// defaultExecTimeout, anything above maxExecTimeout is silently clamped down
+// to it.
+//
+// Extracted from runCommand so both branches can be asserted directly. Doing
+// it through a live command would mean waiting out a 60 s default or a
+// 3600 s cap, which is why neither was covered before.
+func resolveExecTimeout(seconds int) time.Duration {
+	if seconds <= 0 {
+		return defaultExecTimeout
+	}
+	d := time.Duration(seconds) * time.Second
+	if d > maxExecTimeout {
+		return maxExecTimeout
+	}
+	return d
+}
+
+// deviceHomeDir is the working directory commands run in on the device —
+// root's home on FreeBSD/OPNsense. Part of wire-contract item 9.
+const deviceHomeDir = "/root"
+
+// usableWorkingDir returns dir if a command can actually chdir into it, and
+// "" otherwise (which leaves exec.Cmd.Dir empty, inheriting the agent's own
+// working directory).
+//
+// Usability, not existence, is the test, and the difference is not academic:
+// /root is mode 0700, so on a host where the process is not root it exists
+// but cannot be entered. An os.Stat existence check passes there, and the
+// exec then fails with a chdir error before the command ever runs —
+// exit_code -1, no output, every command. Opening the directory tests the
+// access chdir actually needs.
+//
+// On the device this always returns deviceHomeDir: the agent runs as root.
+func usableWorkingDir(dir string) string {
+	f, err := os.Open(dir)
+	if err != nil {
+		return ""
+	}
+	_ = f.Close()
+	return dir
+}
 
 // ExecRequest is the JSON object sent by the client (NDCLI) for each command.
 type ExecRequest struct {
@@ -211,15 +270,7 @@ func (em *ExecManager) HandleExecStream(ctx context.Context, stream *Stream) {
 func (em *ExecManager) runCommand(ctx context.Context, stream *Stream, req ExecRequest) {
 	log := em.log.With("req_id", req.ID, "stream_id", stream.ID())
 
-	// Resolve timeout.
-	timeout := defaultExecTimeout
-	if req.TimeoutSeconds > 0 {
-		d := time.Duration(req.TimeoutSeconds) * time.Second
-		if d > maxExecTimeout {
-			d = maxExecTimeout
-		}
-		timeout = d
-	}
+	timeout := resolveExecTimeout(req.TimeoutSeconds)
 
 	log.Debugw("Executing command", "command", req.Command, "timeout", timeout)
 
@@ -230,17 +281,40 @@ func (em *ExecManager) runCommand(ctx context.Context, stream *Stream, req ExecR
 
 	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-c", req.Command)
 	cmd.Env = util.DeviceExecEnv()
-	// Use /root as working directory (root's home on FreeBSD/OPNsense).
-	// Fall back to no explicit Dir (inherits current directory) on platforms
-	// where /root does not exist (e.g. macOS developer machines).
-	if _, err := os.Stat("/root"); err == nil {
-		cmd.Dir = "/root"
-	}
+	// Working directory: deviceHomeDir when usable, otherwise inherited.
+	// See usableWorkingDir for why usability, not existence, is the test.
+	cmd.Dir = usableWorkingDir(deviceHomeDir)
 	// Place the child in its own process group so we can kill the whole tree
 	// on timeout (kill -pgid).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = &stdoutBuf
 	cmd.Stderr = &stderrBuf
+
+	// Kill the whole process group on deadline, not just the direct child.
+	//
+	// exec.CommandContext's default cancel signals only cmd.Process. Because
+	// Stdout/Stderr are buffers rather than *os.File, os/exec wires the child
+	// to a pipe and Wait blocks until every writer on it is gone — and the
+	// grandchildren inherit that pipe. So killing only /bin/sh lets a
+	// surviving descendant hold the pipe open and `cmd.Run()` returns only
+	// when that descendant exits, long past the deadline the caller asked
+	// for. (Whether a descendant exists at all depends on the shell: both
+	// FreeBSD sh and dash exec a lone simple command, but anything
+	// backgrounded or compound leaves one behind on any platform.)
+	//
+	// WaitDelay is the backstop for the same hang: it bounds how long Wait
+	// will keep waiting on the pipe once the context is done, so a stuck
+	// descendant can no longer pin the task open indefinitely.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return nil
+		}
+		if pgid, err := syscall.Getpgid(cmd.Process.Pid); err == nil {
+			return syscall.Kill(-pgid, syscall.SIGKILL)
+		}
+		return cmd.Process.Kill()
+	}
+	cmd.WaitDelay = execWaitDelay
 
 	waitErr := cmd.Run()
 

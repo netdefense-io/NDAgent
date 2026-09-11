@@ -51,9 +51,44 @@ type SearchRequest struct {
 }
 
 // RuleSearchRequest is the request body for rule search with interface filter.
-// Rules are organized by interface in OPNsense:
-// - No interface = floating rules (prio_group 200000)
-// - With interface = interface rules (prio_group 400000)
+//
+// **The semantics are OPNsense-version-dependent. NDAgent requires 26.1 or
+// later.** From `FilterController::searchRuleAction`:
+//
+//   - Field present and non-empty (comma-separated accepted), any version:
+//     returns only rules bound to one of those interfaces. A rule on an
+//     interface NOT in the list is excluded.
+//   - Field ABSENT (what `omitempty` produces for an empty string) on
+//     **26.1+**: returns EVERY rule — floating, single-interface and
+//     multi-interface alike, including rules bound to an interface or group
+//     that is no longer in the interface option list.
+//   - Field absent on **25.1 / 25.7**: takes the FLOATING VIEW — a rule is
+//     returned only if bound to zero or to more than one interface. A rule
+//     bound to exactly one interface (`"wireguard"`, `"lan"`) is EXCLUDED.
+//   - Field present but empty, on 26.1+: still the floating view, not
+//     everything. NDAgent never sends this shape because of `omitempty`, so
+//     the distinction is latent here — but it is real, and a fixture or a
+//     future caller that assumes "empty means everything" would be wrong.
+//
+// Why the version floor is load-bearing: ListAllRules' first call is the
+// unfiltered one, and on 26.1+ that single call already returns everything,
+// which is what keeps rule discovery — and therefore the SYNC_API orphan
+// sweep — independent of the live interface list. Deleting the last WireGuard
+// instance removes the `wireguard` group from that list, and the
+// `[nd-vpn:...]` rules bound to it must still be discoverable or the sweep
+// cannot delete them and a VPN teardown strands them on the device.
+//
+// On 25.x that does not hold: a single-interface rule is invisible to the
+// unfiltered call, so the second, interface-scoped call is the ONLY way such
+// a rule is ever discovered — which is why ListAllRules makes two calls and
+// dedupes on `seenUUIDs`. Below 26.1 a VPN teardown would silently strand its
+// auto rules, because the group is gone from the interface list before the
+// rules bound to it are enumerated.
+//
+// The older comment here ("No interface = floating rules") was therefore not
+// wrong when written — it described 25.x accurately and aged out when 26.1
+// changed the semantics. See TestListAllRulesFindsRulesOnUnlistedInterfaces,
+// whose fixture models the 26.1 controller rather than the assumption.
 type RuleSearchRequest struct {
 	Current      int               `json:"current"`
 	RowCount     int               `json:"rowCount"`

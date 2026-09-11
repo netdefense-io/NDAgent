@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -468,4 +469,132 @@ func (c *Client) GetFirmwareRunning(ctx context.Context) (*FirmwareRunning, erro
 		return nil, fmt.Errorf("firmware running decode: %w", err)
 	}
 	return &resp, nil
+}
+
+// MinSupportedOPNsenseMajor / MinSupportedOPNsenseMinor are NDAgent's
+// supported OPNsense floor: 26.1.
+//
+// The floor is not cosmetic. SYNC_API's rule discovery depends on 26.1's
+// `searchRule` semantics — an omitted `interface` key returns every rule,
+// where 25.x returned only the floating view — and without that a VPN
+// teardown cannot enumerate, and therefore cannot delete, the auto firewall
+// rules bound to the `wireguard` group once that group disappears. See
+// RuleSearchRequest in types.go for the per-release behaviour.
+const (
+	MinSupportedOPNsenseMajor = 26
+	MinSupportedOPNsenseMinor = 1
+)
+
+// ProductRelease is the installed OPNsense release.
+//
+// Raw is the version string exactly as OPNsense reported it, for logs;
+// Major and Minor are the parsed release series used for comparison. Patch
+// and any FreeBSD-style suffix ("26.1.9_1") are deliberately ignored — the
+// behaviour this gates on changes by series, not by patch.
+type ProductRelease struct {
+	Raw   string
+	Major int
+	Minor int
+}
+
+// AtLeast reports whether the release is at or above major.minor.
+func (r ProductRelease) AtLeast(major, minor int) bool {
+	if r.Major != major {
+		return r.Major > major
+	}
+	return r.Minor >= minor
+}
+
+// String renders the release for logs, preferring what OPNsense reported.
+func (r ProductRelease) String() string {
+	if r.Raw != "" {
+		return r.Raw
+	}
+	return fmt.Sprintf("%d.%d", r.Major, r.Minor)
+}
+
+// GetProductRelease reads the installed OPNsense release from
+// `/core/firmware/info`.
+//
+// Deliberately NOT `/core/firmware/status`: that endpoint reports the cached
+// result of the most recent firmware CHECK, so its contents depend on
+// whether one has ever run — `GetFirmwareStatus` exists for that purpose and
+// is the wrong source for "what is installed right now". `/info` reports the
+// installed product itself, which is what a version floor has to be judged
+// against. Verified on the lab device that `/info` carries both
+// `product_version` ("26.1.9") and `product_series` ("26.1").
+//
+// An unreadable or unparseable response is an error, never a guess: callers
+// must be able to distinguish "below the floor" from "could not tell", and
+// defaulting either way would make one of those lies.
+func (c *Client) GetProductRelease(ctx context.Context) (ProductRelease, error) {
+	body, err := c.doRequest(ctx, "GET", "/core/firmware/info", nil)
+	if err != nil {
+		return ProductRelease{}, fmt.Errorf("firmware info: %w", err)
+	}
+
+	var raw struct {
+		ProductVersion string `json:"product_version"`
+		Product        struct {
+			Version string `json:"product_version"`
+			Series  string `json:"product_series"`
+		} `json:"product"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return ProductRelease{}, fmt.Errorf("firmware info decode: %w", err)
+	}
+
+	// Prefer the full version; fall back to the product block, then to the
+	// series, which is already the major.minor form we need.
+	candidate := raw.ProductVersion
+	if candidate == "" {
+		candidate = raw.Product.Version
+	}
+	if candidate == "" {
+		candidate = raw.Product.Series
+	}
+	if candidate == "" {
+		return ProductRelease{}, fmt.Errorf("firmware info carried no product version")
+	}
+
+	release, err := ParseProductRelease(candidate)
+	if err != nil {
+		return ProductRelease{}, err
+	}
+
+	c.log.Debugw("GetProductRelease completed", "version", release.Raw, "major", release.Major, "minor", release.Minor)
+
+	return release, nil
+}
+
+// ParseProductRelease extracts the major.minor series from an OPNsense
+// version string such as "26.1.9", "26.1" or "25.7.9_1".
+func ParseProductRelease(version string) (ProductRelease, error) {
+	trimmed := strings.TrimSpace(version)
+	parts := strings.SplitN(trimmed, ".", 3)
+	if len(parts) < 2 {
+		return ProductRelease{}, fmt.Errorf("unrecognised OPNsense version %q", version)
+	}
+
+	major, err := strconv.Atoi(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return ProductRelease{}, fmt.Errorf("unrecognised OPNsense version %q: bad major", version)
+	}
+
+	// The minor component may carry a suffix on a two-part version
+	// ("25.7_1"); take the leading digits.
+	minorField := strings.TrimSpace(parts[1])
+	digits := minorField
+	for i, r := range minorField {
+		if r < '0' || r > '9' {
+			digits = minorField[:i]
+			break
+		}
+	}
+	minor, err := strconv.Atoi(digits)
+	if err != nil {
+		return ProductRelease{}, fmt.Errorf("unrecognised OPNsense version %q: bad minor", version)
+	}
+
+	return ProductRelease{Raw: trimmed, Major: major, Minor: minor}, nil
 }
