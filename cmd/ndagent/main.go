@@ -42,6 +42,38 @@ It provides device registration, WebSocket communication with NetDefense
 servers, and configuration synchronization for OPNsense.`,
 	Version: version.Version,
 	RunE:    run,
+
+	// Reject unknown positional arguments instead of starting the daemon.
+	//
+	// Without this, ANY positional booted the agent: `ndagent version`,
+	// `ndagent status`, `ndagent --help-me` — all of them ran the daemon in
+	// the foreground, because cobra's default for a command with no
+	// subcommands is ArbitraryArgs and `run` never looked at args.
+	//
+	// That is not a theoretical tidiness problem. Two processes started as
+	// `ndagent version` (the natural guess for someone used to subcommand
+	// CLIs) held the device's WebSocket slot, so a freshly installed agent
+	// failed authentication with close 1008 "Device already connected" —
+	// while every surface an operator would check said the install was fine:
+	// `pkg info` showed the new version, `ndagent --version` printed it,
+	// `service ndagent status` reported running, and the control plane's
+	// device record showed the right version. The strays nearly invalidated
+	// a lab E2E run before anyone thought to look at the process list.
+	Args: cobra.NoArgs,
+}
+
+// versionCmd makes the positional form do the obvious thing rather than the
+// dangerous one. `ndagent version` is what people type; it now prints the
+// same string as `--version` and exits, instead of silently starting a
+// second daemon.
+var versionCmd = &cobra.Command{
+	Use:   "version",
+	Short: "Print version information and exit",
+	Args:  cobra.NoArgs,
+	Run: func(cmd *cobra.Command, args []string) {
+		// Write via the command so output is redirectable and testable.
+		fmt.Fprintln(cmd.OutOrStdout(), version.Full())
+	},
 }
 
 func init() {
@@ -51,8 +83,13 @@ func init() {
 	rootCmd.Flags().StringVarP(&configPath, "config", "c", config.DefaultConfigPath,
 		"Path to configuration file")
 
+	rootCmd.AddCommand(versionCmd)
+
 	// Custom version template
-	rootCmd.SetVersionTemplate(fmt.Sprintf("{{.Name}} %s\n", version.Full()))
+	// version.Full() already begins with the binary name, so the template must
+	// NOT prepend {{.Name}} again — that printed "ndagent ndagent version ...".
+	// This keeps `--version` and the `version` subcommand byte-identical.
+	rootCmd.SetVersionTemplate(fmt.Sprintf("%s\n", version.Full()))
 }
 
 func run(cmd *cobra.Command, args []string) error {

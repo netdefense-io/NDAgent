@@ -86,6 +86,14 @@ type APIHostOverridePayload struct {
 	TXTData     string   `json:"txtdata,omitempty"` // TXT record data
 	Description string   `json:"description"`
 	Templates   []string `json:"templates,omitempty"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // APIDomainForwardPayload is the portable format for domain forwards in templates/snippets.
@@ -101,6 +109,14 @@ type APIDomainForwardPayload struct {
 	ForwardFirst       bool     `json:"forward_first,omitempty"`
 	Description        string   `json:"description"`
 	Templates          []string `json:"templates,omitempty"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // APIHostAliasPayload is the portable format for host aliases in templates/snippets.
@@ -114,6 +130,14 @@ type APIHostAliasPayload struct {
 	Domain         string   `json:"domain"`
 	Description    string   `json:"description"`
 	Templates      []string `json:"templates,omitempty"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // APIUnboundACLPayload is the portable format for Unbound ACLs in templates/snippets.
@@ -125,6 +149,14 @@ type APIUnboundACLPayload struct {
 	Networks    []string `json:"networks"` // Networks as array (portable)
 	Description string   `json:"description"`
 	Templates   []string `json:"templates,omitempty"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // SetHostOverrideResponse is the response from host override add/set endpoints.

@@ -122,6 +122,14 @@ type APIAliasPayload struct {
 	Content     []string `json:"content"`
 	Description string   `json:"description"`
 	Templates   []string `json:"templates"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // APIRulePayload represents a rule in JSON-native format for SYNC_API.
@@ -143,6 +151,14 @@ type APIRulePayload struct {
 	DestinationPort string       `json:"destination_port,omitempty"`
 	Description     string       `json:"description"`
 	Templates       []string     `json:"templates"`
+
+	// SnippetName and SnippetIndex record where in the SYNC payload this
+	// object came from, so a validation failure can name the snippet the
+	// user has to go and fix rather than just the object. Agent-internal
+	// provenance, never serialised: this is not part of the portable
+	// snippet format, and the wire contract is unchanged.
+	SnippetName  string `json:"-"`
+	SnippetIndex int    `json:"-"`
 }
 
 // ValidationError represents a dependency or constraint violation.
@@ -321,37 +337,37 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// Validate UUIDs have correct prefix
 	for _, alias := range aliases {
 		if !strings.HasPrefix(alias.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid alias UUID %s: must start with %s", alias.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("alias", alias.SnippetName, alias.SnippetIndex, alias.Templates, alias.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
 	for _, rule := range rules {
 		if !strings.HasPrefix(rule.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid rule UUID %s: must start with %s", rule.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("rule", rule.SnippetName, rule.SnippetIndex, rule.Templates, rule.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
 	for _, ho := range hostOverrides {
 		if !strings.HasPrefix(ho.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid host_override UUID %s: must start with %s", ho.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("host_override", ho.SnippetName, ho.SnippetIndex, ho.Templates, ho.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
 	for _, df := range domainForwards {
 		if !strings.HasPrefix(df.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid domain_forward UUID %s: must start with %s", df.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("domain_forward", df.SnippetName, df.SnippetIndex, df.Templates, df.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
 	for _, ha := range hostAliases {
 		if !strings.HasPrefix(ha.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid host_alias UUID %s: must start with %s", ha.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("host_alias", ha.SnippetName, ha.SnippetIndex, ha.Templates, ha.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
 	for _, acl := range unboundACLs {
 		if !strings.HasPrefix(acl.UUID, opnapi.NDAgentUUIDPrefix) {
-			result := NewFailureResult(fmt.Sprintf("Invalid unbound_acl UUID %s: must start with %s", acl.UUID, opnapi.NDAgentUUIDPrefix))
+			result := NewFailureResult(invalidUUIDMessage("unbound_acl", acl.SnippetName, acl.SnippetIndex, acl.Templates, acl.UUID))
 			return SendTaskResponse(ws, cmd.TaskID, result)
 		}
 	}
@@ -700,6 +716,76 @@ func checkRuleInterfaces(ctx context.Context, client *opnapi.Client, rules []API
 // pre-flight error message — the check itself is interface-agnostic.
 const wireGuardInterfaceGroup = "wireguard"
 
+// checkAliasNameCollision reports why applying this alias would collide with
+// an object already on the device, or "" when it would not.
+//
+// OPNsense enforces a unique NAME on aliases, but NDAgent matches its managed
+// objects by UUID. Those two facts disagree whenever a device already carries
+// an alias with the same name under a different UUID, and OPNsense's answer
+// is the bare validation string "An alias with this name already exists." —
+// which names neither the alias nor anything to do about it.
+//
+// Community #10 hit this by following the documented authoring workflow:
+// `snippet pull` extracts an existing device object as an example to base new
+// configuration on. It does NOT adopt that object — pulling mints a new
+// managed identity — so syncing the resulting snippet back to the SAME device
+// means applying a snippet next to the unmanaged object it was copied from,
+// and the names collide. Two objects is the correct outcome for types without
+// a unique-name constraint; for aliases it is impossible, so the sync fails.
+//
+// Deliberately scoped to aliases:
+//   - RULES are explicitly out (Community #10, maintainer correction on the
+//     thread): rules have no device-side uniqueness constraint, so the same
+//     flow correctly produces two rules rather than an error. Do not "fix"
+//     that by adding a collision check here.
+//   - USERS and GROUPS have unique names but are MATCHED by name
+//     (`executeSyncUsersGroups` builds `userUUIDLookup`/`groupUUIDLookup`
+//     keyed on name), so the UUID-vs-name mismatch that causes this cannot
+//     arise for them — a same-named user is simply updated in place.
+//   - Unbound and Zabbix entities are matched by UUID or key with no
+//     equivalent unique-name constraint established, so adding speculative
+//     checks there would be guessing at a constraint rather than reflecting
+//     a known one.
+//
+// Fails OPEN: if the lookup itself errors we return "" and let the sync
+// proceed to SetAlias, which will either succeed or produce OPNsense's own
+// error. This check improves a message; losing it must never block a sync
+// that would otherwise work.
+func checkAliasNameCollision(ctx context.Context, client *opnapi.Client, alias APIAliasPayload) string {
+	log := logging.Named("SYNC_API")
+
+	existing, err := client.GetAliasByName(ctx, alias.Name)
+	if err != nil {
+		log.Warnw("Skipping alias name collision pre-flight: lookup failed",
+			"name", alias.Name,
+			"error", err,
+		)
+		return ""
+	}
+	if existing == nil {
+		return ""
+	}
+
+	existingUUID, _ := existing["uuid"].(string)
+	if existingUUID == alias.UUID {
+		// The same object: this is an ordinary update, not a collision.
+		return ""
+	}
+
+	if strings.HasPrefix(existingUUID, opnapi.NDAgentUUIDPrefix) {
+		return fmt.Sprintf(
+			"alias %q is already managed by another snippet on this device; rename one of the snippets so the two aliases do not share a name",
+			alias.Name,
+		)
+	}
+
+	return fmt.Sprintf(
+		"an unmanaged alias named %q already exists on this device; delete it on the device or rename the snippet. "+
+			"If this snippet came from `snippet pull` against this same device, the pulled object is that unmanaged alias — pull copies an object as a starting point, it does not adopt it",
+		alias.Name,
+	)
+}
+
 // executeSyncAPI performs the actual sync using declarative state model.
 func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAliasPayload, rules []APIRulePayload) SyncAPIResult {
 	log := logging.Named("SYNC_API")
@@ -881,6 +967,27 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		action := "created"
 		if currentAliasUUIDs[alias.UUID] {
 			action = "updated"
+		}
+
+		// Pre-flight the device-side unique-name constraint, so a collision
+		// reports what is wrong and what to do rather than OPNsense's raw
+		// "An alias with this name already exists."
+		if collision := checkAliasNameCollision(ctx, client, alias); collision != "" {
+			log.Warnw("SYNC_API: alias name collides with an existing object on this device",
+				"uuid", alias.UUID,
+				"name", alias.Name,
+				"message", collision,
+			)
+			results = append(results, SyncAPIItemResult{
+				Type:   "alias",
+				UUID:   alias.UUID,
+				Name:   alias.Name,
+				Action: "blocked",
+				Status: "blocked",
+				Error:  collision,
+			})
+			errors = append(errors, collision)
+			continue
 		}
 
 		opnAlias := convertToOPNAlias(alias)
@@ -1116,6 +1223,75 @@ func convertToOPNRuleWithSequence(r APIRulePayload, computedSequence int) opnapi
 	}
 }
 
+// snippetLabel identifies a snippet in an error message by NAME, falling
+// back to its position in the payload.
+//
+// Every parse and apply error used to say only "alias snippet at index 1",
+// which a user cannot act on: the index is a position within the payload
+// NDManager assembled, not anything visible in `ndcli snippet list`, and it
+// shifts as templates change. Community #11 reported exactly this — a sync
+// failing with "alias snippet at index 1: missing required field: uuid" and
+// no way to tell which of their snippets was at fault.
+//
+// The name was already on the wire and simply never read: NDManager's
+// payload builder sends `snippet_name` for every snippet
+// (services/sync_service.py, "snippet_name": snippet['name']), including the
+// synthetic VPN auto-firewall ones, which go through the same builder.
+//
+// The index is kept alongside the name rather than replaced by it, because
+// two snippets can share a name across templates and the index is what
+// disambiguates them. An absent or empty `snippet_name` falls back to the
+// old form, so a device talking to an older control plane degrades to what
+// it printed before rather than to an empty pair of quotes.
+func snippetLabel(kind string, snippet map[string]interface{}, idx int) string {
+	name, _ := snippet["snippet_name"].(string)
+	return snippetLabelFrom(kind, name, idx)
+}
+
+// snippetLabelFrom is snippetLabel for callers that already carry the name
+// and index as values rather than the raw snippet map — the UUID-prefix
+// guards, which run after parsing and see only the parsed payloads.
+func snippetLabelFrom(kind, snippetName string, idx int) string {
+	if snippetName != "" {
+		return fmt.Sprintf("%s snippet %q (index %d)", kind, snippetName, idx)
+	}
+	return fmt.Sprintf("%s snippet at index %d", kind, idx)
+}
+
+// invalidUUIDMessage explains a snippet whose content carries a UUID outside
+// NDAgent's managed prefix, naming the snippet and the template that carried
+// it rather than only the offending UUID.
+//
+// The old message was "Invalid rule UUID aaaaaaaa-...: must start with
+// 221f3268" — no snippet, no index, no template, and it aborts the entire
+// sync, so the user got an empty results list and one hex string to work
+// from. Lab E2E on the snippet-naming pass found this family had been missed.
+//
+// The abort is deliberate and preserved: a foreign UUID means the agent
+// cannot tell whether it owns the object, and guessing risks adopting or
+// overwriting configuration that is not NetDefense's. The control plane will
+// reject foreign UUIDs at create time, after which this path only serves
+// legacy content — which is exactly when a message that names the snippet
+// and the template matters, because the author may be long gone.
+func invalidUUIDMessage(kind, snippetName string, idx int, templates []string, uuid string) string {
+	msg := fmt.Sprintf("%s: invalid UUID %q — NetDefense-managed objects must use a UUID starting with %s",
+		snippetLabelFrom(kind, snippetName, idx), uuid, opnapi.NDAgentUUIDPrefix)
+
+	switch len(templates) {
+	case 0:
+	case 1:
+		msg += fmt.Sprintf("; carried by template %q", templates[0])
+	default:
+		quoted := make([]string, 0, len(templates))
+		for _, t := range templates {
+			quoted = append(quoted, fmt.Sprintf("%q", t))
+		}
+		msg += fmt.Sprintf("; carried by templates %s", strings.Join(quoted, ", "))
+	}
+
+	return msg
+}
+
 // parseAPIAliases extracts aliases from the payload snippets array.
 // NDManager sends snippets with config_type and content (JSON) fields.
 func parseAPIAliases(payload map[string]interface{}) ([]APIAliasPayload, error) {
@@ -1155,14 +1331,17 @@ func parseAPIAliases(payload map[string]interface{}) ([]APIAliasPayload, error) 
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("alias snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("alias", snippetMap, idx))
 		}
 
 		alias, err := parseAliasContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("alias snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("alias", snippetMap, idx), err)
 		}
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		alias.SnippetName, _ = snippetMap["snippet_name"].(string)
+		alias.SnippetIndex = idx
 		aliases = append(aliases, alias)
 	}
 
@@ -1258,7 +1437,7 @@ func parseAPIRules(payload map[string]interface{}) ([]APIRulePayload, error) {
 			case "PREPEND":
 				position = RulePositionPrepend
 			default:
-				return nil, fmt.Errorf("snippet at index %d has invalid position: %s (must be PREPEND or APPEND)", idx, pos)
+				return nil, fmt.Errorf("%s: invalid position %q (must be PREPEND or APPEND)", snippetLabel("rule", snippetMap, idx), pos)
 			}
 		}
 
@@ -1281,18 +1460,21 @@ func parseAPIRules(payload map[string]interface{}) ([]APIRulePayload, error) {
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("rule snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("rule", snippetMap, idx))
 		}
 
 		rule, err := parseRuleContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("rule snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("rule", snippetMap, idx), err)
 		}
 
 		// Set position and priority from snippet metadata
 		rule.Position = position
 		rule.Priority = priority
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		rule.SnippetName, _ = snippetMap["snippet_name"].(string)
+		rule.SnippetIndex = idx
 		rules = append(rules, rule)
 	}
 
@@ -1390,12 +1572,12 @@ func parseAPIUsers(payload map[string]interface{}) ([]opnapi.APIUserPayload, err
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("user snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("user", snippetMap, idx))
 		}
 
 		user, err := parseUserContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("user snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("user", snippetMap, idx), err)
 		}
 
 		users = append(users, user)
@@ -1500,12 +1682,12 @@ func parseAPIGroups(payload map[string]interface{}) ([]opnapi.APIGroupPayload, e
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("group snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("group", snippetMap, idx))
 		}
 
 		group, err := parseGroupContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("group snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("group", snippetMap, idx), err)
 		}
 
 		groups = append(groups, group)
@@ -1984,14 +2166,17 @@ func parseAPIHostOverrides(payload map[string]interface{}) ([]opnapi.APIHostOver
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("host_override snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("host_override", snippetMap, idx))
 		}
 
 		override, err := parseHostOverrideContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("host_override snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("host_override", snippetMap, idx), err)
 		}
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		override.SnippetName, _ = snippetMap["snippet_name"].(string)
+		override.SnippetIndex = idx
 		overrides = append(overrides, override)
 	}
 
@@ -2080,14 +2265,17 @@ func parseAPIDomainForwards(payload map[string]interface{}) ([]opnapi.APIDomainF
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("domain_forward snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("domain_forward", snippetMap, idx))
 		}
 
 		forward, err := parseDomainForwardContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("domain_forward snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("domain_forward", snippetMap, idx), err)
 		}
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		forward.SnippetName, _ = snippetMap["snippet_name"].(string)
+		forward.SnippetIndex = idx
 		forwards = append(forwards, forward)
 	}
 
@@ -2175,14 +2363,17 @@ func parseAPIHostAliases(payload map[string]interface{}) ([]opnapi.APIHostAliasP
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("host_alias snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("host_alias", snippetMap, idx))
 		}
 
 		alias, err := parseHostAliasContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("host_alias snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("host_alias", snippetMap, idx), err)
 		}
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		alias.SnippetName, _ = snippetMap["snippet_name"].(string)
+		alias.SnippetIndex = idx
 		aliases = append(aliases, alias)
 	}
 
@@ -2266,14 +2457,17 @@ func parseAPIUnboundACLs(payload map[string]interface{}) ([]opnapi.APIUnboundACL
 		// Parse the JSON content field
 		snippetContent, _ := snippetMap["content"].(string)
 		if snippetContent == "" {
-			return nil, fmt.Errorf("unbound_acl snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("unbound_acl", snippetMap, idx))
 		}
 
 		acl, err := parseUnboundACLContent(snippetContent, templates)
 		if err != nil {
-			return nil, fmt.Errorf("unbound_acl snippet at index %d: %v", idx, err)
+			return nil, fmt.Errorf("%s: %v", snippetLabel("unbound_acl", snippetMap, idx), err)
 		}
 
+		// Provenance for error messages; see invalidUUIDMessage.
+		acl.SnippetName, _ = snippetMap["snippet_name"].(string)
+		acl.SnippetIndex = idx
 		acls = append(acls, acl)
 	}
 

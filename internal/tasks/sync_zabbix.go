@@ -50,12 +50,12 @@ func parseAPIZabbixSettings(payload map[string]interface{}) (*opnapi.APIZabbixSe
 
 		content, _ := snippetMap["content"].(string)
 		if content == "" {
-			return nil, fmt.Errorf("zabbix_settings snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("zabbix_settings", snippetMap, idx))
 		}
 
 		var settings opnapi.APIZabbixSettingsPayload
 		if err := json.Unmarshal([]byte(content), &settings); err != nil {
-			return nil, fmt.Errorf("zabbix_settings snippet at index %d: invalid JSON: %v", idx, err)
+			return nil, fmt.Errorf("%s: invalid JSON: %v", snippetLabel("zabbix_settings", snippetMap, idx), err)
 		}
 		settings.Templates = templateNames(snippetMap)
 		last = &settings
@@ -87,15 +87,15 @@ func parseAPIZabbixUserParameters(payload map[string]interface{}) ([]opnapi.APIZ
 
 		content, _ := snippetMap["content"].(string)
 		if content == "" {
-			return nil, fmt.Errorf("zabbix_userparameter snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("zabbix_userparameter", snippetMap, idx))
 		}
 
 		var up opnapi.APIZabbixUserParameterPayload
 		if err := json.Unmarshal([]byte(content), &up); err != nil {
-			return nil, fmt.Errorf("zabbix_userparameter snippet at index %d: invalid JSON: %v", idx, err)
+			return nil, fmt.Errorf("%s: invalid JSON: %v", snippetLabel("zabbix_userparameter", snippetMap, idx), err)
 		}
 		if up.Key == "" {
-			return nil, fmt.Errorf("zabbix_userparameter snippet at index %d: missing required field: key", idx)
+			return nil, fmt.Errorf("%s: missing required field: key", snippetLabel("zabbix_userparameter", snippetMap, idx))
 		}
 		up.Templates = templateNames(snippetMap)
 		out = append(out, up)
@@ -126,15 +126,15 @@ func parseAPIZabbixAliases(payload map[string]interface{}) ([]opnapi.APIZabbixAl
 
 		content, _ := snippetMap["content"].(string)
 		if content == "" {
-			return nil, fmt.Errorf("zabbix_alias snippet at index %d missing content", idx)
+			return nil, fmt.Errorf("%s: missing content", snippetLabel("zabbix_alias", snippetMap, idx))
 		}
 
 		var a opnapi.APIZabbixAliasPayload
 		if err := json.Unmarshal([]byte(content), &a); err != nil {
-			return nil, fmt.Errorf("zabbix_alias snippet at index %d: invalid JSON: %v", idx, err)
+			return nil, fmt.Errorf("%s: invalid JSON: %v", snippetLabel("zabbix_alias", snippetMap, idx), err)
 		}
 		if a.Key == "" {
-			return nil, fmt.Errorf("zabbix_alias snippet at index %d: missing required field: key", idx)
+			return nil, fmt.Errorf("%s: missing required field: key", snippetLabel("zabbix_alias", snippetMap, idx))
 		}
 		a.Templates = templateNames(snippetMap)
 		out = append(out, a)
