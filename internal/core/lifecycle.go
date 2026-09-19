@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -175,8 +176,21 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 
-			// Handle device disabled/deleted errors
-			if err == network.ErrDeviceDisabled || err == network.ErrDeviceDeleted {
+			// A verified tombstone is the one signal that authorizes
+			// the irreversible self-decommission. Everything it does
+			// happens here, in Phase 1, while the agent still has its
+			// OPNsense credentials and its own package installed.
+			var decommission *network.DecommissionRequiredError
+			if errors.As(err, &decommission) {
+				l.runDecommission(ctx, decommission)
+				return err
+			}
+
+			// Handle device deleted without a usable tombstone. DISABLED
+			// no longer reaches here: WaitForRegistration waits it out
+			// rather than returning, because exiting would leave a
+			// suspended device down with nothing to restart it.
+			if errors.Is(err, network.ErrDeviceDeleted) || errors.Is(err, network.ErrDeviceDisabled) {
 				log.Errorw("Device status prevents registration",
 					"error", err,
 				)

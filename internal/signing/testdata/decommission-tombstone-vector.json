@@ -1,0 +1,14 @@
+{
+  "device_uuid": "7f3a1c52-9d84-4e61-b0ab-2c5d6f8e1042",
+  "deleted_at": "2026-09-18T23:40:12Z",
+  "iat": 1789000812,
+  "kid": "9ccf1ac1e1d95d60b0b28b980f37e229",
+  "public_key_jwk": {
+    "kty": "OKP",
+    "crv": "Ed25519",
+    "alg": "EdDSA",
+    "kid": "9ccf1ac1e1d95d60b0b28b980f37e229",
+    "x": "XiByB-uAR4qGj9wQjLnoxob8UgQiaCEQA21ixc7-tYc"
+  },
+  "tombstone_b64": "0oRYX6YBJwRQnM8aweHZXWCwsouYDzfiKToAAQAAaW5kbWFuYWdlcjoAAQABGmqh/Gw6AAEAA3gkN2YzYTFjNTItOWQ4NC00ZTYxLWIwYWItMmM1ZDZmOGUxMDQyOgABAAQCoFiHeyJraW5kIjoiZGV2aWNlX3RvbWJzdG9uZSIsInN0YXR1cyI6IkRFTEVURUQiLCJkZXZpY2VfdXVpZCI6IjdmM2ExYzUyLTlkODQtNGU2MS1iMGFiLTJjNWQ2ZjhlMTA0MiIsImRlbGV0ZWRfYXQiOiIyMDI2LTA5LTE4VDIzOjQwOjEyWiJ9WEDUoeKBvyKiU7MpUJ1NnnE4cOYiBx9gdXOcgYNQYM/oQBOrswpSapV7EckwQv4np//GtdOP5ohTalli+2TBez8O"
+}

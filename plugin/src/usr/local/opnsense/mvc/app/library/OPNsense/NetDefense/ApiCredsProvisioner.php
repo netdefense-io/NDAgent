@@ -210,4 +210,57 @@ class ApiCredsProvisioner
             'message' => 'API credentials configured successfully',
         ];
     }
+
+    /**
+     * The exact inverse of provision(): remove the netdefense-agent user,
+     * its API key(s), and any group membership it still holds, then clear
+     * apiKey/apiSecret/apiConfigured from the plugin settings.
+     *
+     * Called by the agent's self-decommission sequence through
+     * `configure.php --deprovision-accounts`, and again by the uninstall
+     * helper just before `pkg delete`.
+     *
+     * This MUST run locally, as root, and NOT over the OPNsense API: the
+     * agent authenticates as netdefense-agent, and Usermanager refuses to
+     * delete the account behind the request it is serving
+     * ("Not allowed to remove logged in user netdefense-agent", HTTP 500).
+     * That refusal is deterministic, so before this method existed every
+     * decommissioned box kept a page-all user with a live API key in
+     * config.xml.
+     *
+     * Caller owns the Config lock + save + Backend triggers, exactly as
+     * for provision(). Idempotent: an already-absent user reports
+     * 'skipped'.
+     *
+     * @return array{result:string,removed:bool,message:string}
+     */
+    public static function deprovision(): array
+    {
+        $removed = LocalAccounts::removeUser(self::NETDEFENSE_USERNAME);
+
+        // The credentials in the settings tree belong to the user that was
+        // just deleted; leaving them would only leave dead secrets behind.
+        $config = Config::getInstance()->object();
+        if (isset($config->OPNsense->netdefense->settings)) {
+            $settings = $config->OPNsense->netdefense->settings;
+            foreach (['apiKey', 'apiSecret'] as $field) {
+                if ((string)$settings->$field !== '') {
+                    $settings->$field = '';
+                    $removed = true;
+                }
+            }
+            if ((string)$settings->apiConfigured !== '0') {
+                $settings->apiConfigured = '0';
+                $removed = true;
+            }
+        }
+
+        return [
+            'result' => $removed ? 'ok' : 'skipped',
+            'removed' => $removed,
+            'message' => $removed
+                ? 'API user and credentials removed.'
+                : 'No API user or credentials present; no change.',
+        ];
+    }
 }

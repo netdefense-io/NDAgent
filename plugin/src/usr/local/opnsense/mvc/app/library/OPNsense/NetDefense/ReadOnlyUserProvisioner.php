@@ -483,4 +483,40 @@ class ReadOnlyUserProvisioner
             'message' => 'Read-only webadmin user provisioned successfully',
         ];
     }
+
+    /**
+     * The exact inverse of provision(): remove the netdefense-readonly
+     * group and user.
+     *
+     * The decommission sequence normally removes this identity over the
+     * OPNsense API (that call does work — the agent is not authenticating
+     * as this user). This local path exists so the same
+     * `configure.php --deprovision-accounts` call that removes the agent's
+     * own API user also cleans up the read-only identity when the API pass
+     * never ran or failed: no OPNsense credentials on the device, an API
+     * that was unreachable, or a rerun of the sequence.
+     *
+     * Group first, then user: the group carries the membership, and
+     * removing it first means no window where a group points at a uid
+     * that no longer resolves.
+     *
+     * Caller owns the Config lock + save + Backend triggers, exactly as
+     * for provision(). Idempotent: already absent reports 'skipped'.
+     *
+     * @return array{result:string,removed:bool,message:string}
+     */
+    public static function deprovision(): array
+    {
+        $groupRemoved = LocalAccounts::removeGroup(self::READONLY_GROUPNAME);
+        $userRemoved = LocalAccounts::removeUser(self::READONLY_USERNAME);
+        $removed = $groupRemoved || $userRemoved;
+
+        return [
+            'result' => $removed ? 'ok' : 'skipped',
+            'removed' => $removed,
+            'message' => $removed
+                ? 'Read-only webadmin user and group removed.'
+                : 'No read-only webadmin user or group present; no change.',
+        ];
+    }
 }

@@ -4,7 +4,9 @@ package network
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -13,6 +15,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/config"
@@ -104,10 +107,53 @@ var (
 	ErrDeviceDeleted  = errors.New("device is deleted")
 )
 
+// DecommissionRequiredError is returned by WaitForRegistration when the
+// registration check reports DELETED *and* carries a tombstone that
+// verifies against a pinned NDManager key. It is the only signal that
+// authorizes the irreversible self-decommission.
+//
+// A DELETED status with no tombstone, or with one that fails any check,
+// returns the plain ErrDeviceDeleted instead: the agent stops, the box
+// is left exactly as it is, and an operator can look at it.
+type DecommissionRequiredError struct {
+	Tombstone *signing.Tombstone
+}
+
+func (e *DecommissionRequiredError) Error() string {
+	return "device is deleted; verified tombstone requires self-decommission"
+}
+
+// registrationSleep is the shutdown-aware sleep used by the registration
+// client's own waits (the rate-limit floor and the DISABLED backoff).
+// Production is util.ShutdownAwareSleep; tests replace it so a state
+// machine built on minutes-long waits can be asserted in milliseconds.
+var registrationSleep = util.ShutdownAwareSleep
+
+// checkRegistrationMinInterval is the floor between two consecutive
+// DeviceRegistrationCheck calls. The endpoint is rate-limited 10/min per
+// IP on the broker side, and Phase 1 is now re-entered whenever the WS
+// phase hits a permanent refusal, so a flapping device could otherwise
+// walk straight into the limiter. Enforced inside CheckRegistration so
+// every caller gets it, not just the polling loop.
+const checkRegistrationMinInterval = 10 * time.Second
+
 // RegistrationClient handles device registration with the server.
 type RegistrationClient struct {
 	cfg        *config.Config
 	httpClient *http.Client
+
+	// lastCheck timestamps the previous CheckRegistration call so the
+	// next one can be held back to checkRegistrationMinInterval.
+	checkMu   sync.Mutex
+	lastCheck time.Time
+
+	// Test seams for the tombstone path. Production wiring reads the
+	// pinned NDM key cache off disk and calls signing.VerifyTombstone;
+	// tests substitute both so the DELETED state machine can be
+	// exercised without key material or a filesystem.
+	ndmKeysPath     string
+	loadPinnedKeys  func(path string) (map[string]ed25519.PublicKey, error)
+	verifyTombstone func(b64 string, lookup signing.VerifyKeyByKid, ownUUID string) (*signing.Tombstone, error)
 }
 
 // CheckRegistrationRequest is the request body for registration check.
@@ -117,8 +163,15 @@ type CheckRegistrationRequest struct {
 }
 
 // CheckRegistrationResponse is the response from registration check.
+//
+// Tombstone is present only alongside status DELETED, and only when
+// NDManager recorded one at delete time. It is the base64 COSE_Sign1
+// statement the agent must verify before it will decommission itself —
+// the status string alone is an unsigned assertion over a connection
+// with no certificate pinning, which is not a basis for wiping a box.
 type CheckRegistrationResponse struct {
-	Status string `json:"status"`
+	Status    string `json:"status"`
+	Tombstone string `json:"tombstone,omitempty"`
 }
 
 // StartRegistrationRequest is the request body for starting registration.
@@ -143,6 +196,9 @@ func NewRegistrationClient(cfg *config.Config) *RegistrationClient {
 				TLSClientConfig: cfg.GetTLSConfig(),
 			},
 		},
+		ndmKeysPath:     DefaultNDMKeysCachePath,
+		loadPinnedKeys:  LoadCachedNDMDispatchKeys,
+		verifyTombstone: signing.VerifyTombstone,
 	}
 }
 
@@ -161,9 +217,41 @@ func (r *RegistrationClient) devicePubkeyBase64() (string, error) {
 	return base64.StdEncoding.EncodeToString(signing.PublicKeyFromPrivate(priv)), nil
 }
 
+// waitForCheckSlot holds the caller back until at least
+// checkRegistrationMinInterval has passed since the previous
+// CheckRegistration call. Shutdown-aware: a cancelled context returns
+// immediately with the context error and no call is made.
+func (r *RegistrationClient) waitForCheckSlot(ctx context.Context) error {
+	r.checkMu.Lock()
+	last := r.lastCheck
+	r.checkMu.Unlock()
+
+	if last.IsZero() {
+		return nil
+	}
+	if wait := checkRegistrationMinInterval - time.Since(last); wait > 0 {
+		logging.Named("registration").Debugw("Holding registration check to respect the endpoint rate limit",
+			"wait", wait,
+		)
+		return registrationSleep(ctx, wait)
+	}
+	return nil
+}
+
 // CheckRegistration checks the device registration status with the server.
-func (r *RegistrationClient) CheckRegistration(ctx context.Context) (string, error) {
+//
+// Returns the full response body: the status string plus, for a deleted
+// device, the signed tombstone. Consecutive calls are spaced by at least
+// checkRegistrationMinInterval — the endpoint is rate-limited per IP.
+func (r *RegistrationClient) CheckRegistration(ctx context.Context) (*CheckRegistrationResponse, error) {
 	log := logging.Named("registration")
+
+	if err := r.waitForCheckSlot(ctx); err != nil {
+		return nil, err
+	}
+	r.checkMu.Lock()
+	r.lastCheck = time.Now()
+	r.checkMu.Unlock()
 
 	reqBody := CheckRegistrationRequest{
 		TokenUUID:  r.cfg.Token,
@@ -177,18 +265,18 @@ func (r *RegistrationClient) CheckRegistration(ctx context.Context) (string, err
 
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request: %w", err)
+		return nil, fmt.Errorf("failed to marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", r.cfg.ServerURICheck, bytes.NewBuffer(jsonBody))
 	if err != nil {
-		return "", fmt.Errorf("failed to create request: %w", err)
+		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("connection error during registration check: %w", err)
+		return nil, fmt.Errorf("connection error during registration check: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -196,20 +284,21 @@ func (r *RegistrationClient) CheckRegistration(ctx context.Context) (string, err
 		log.Errorw("Failed to check registration",
 			"status_code", resp.StatusCode,
 		)
-		return "", fmt.Errorf("registration check failed with status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("registration check failed with status: %d", resp.StatusCode)
 	}
 
 	var respBody CheckRegistrationResponse
 	if err := json.NewDecoder(resp.Body).Decode(&respBody); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
 	log.Infow("Device registration status",
 		"device_uuid", r.cfg.DeviceUUID,
 		"status", respBody.Status,
+		"tombstone_present", respBody.Tombstone != "",
 	)
 
-	return respBody.Status, nil
+	return &respBody, nil
 }
 
 // StartRegistration initiates the registration process with the server.
@@ -289,6 +378,79 @@ func (r *RegistrationClient) StartRegistration(ctx context.Context) error {
 	return nil
 }
 
+// Backoff bounds for the DISABLED wait. A suspended device polls
+// rarely — it has nothing to do until someone re-enables it — but it
+// never stops polling.
+const (
+	disabledInitialBackoff = 60 * time.Second
+	disabledMaxBackoff     = 5 * time.Minute
+)
+
+func nextDisabledBackoff(prev time.Duration) time.Duration {
+	next := prev * 2
+	if next > disabledMaxBackoff {
+		next = disabledMaxBackoff
+	}
+	return next
+}
+
+// handleDeletedStatus decides what a DELETED registration check means
+// for this device.
+//
+// Verified tombstone  → DecommissionRequiredError: the caller runs the
+// full self-decommission. Anything else → ErrDeviceDeleted: the agent
+// stops and the device is left untouched, exactly as it behaved before
+// tombstones existed. The reason is always logged at ERROR, because a
+// DELETED row whose tombstone will not verify is either an un-upgraded
+// control plane or someone trying to talk the agent into wiping a box.
+func (r *RegistrationClient) handleDeletedStatus(resp *CheckRegistrationResponse) error {
+	log := logging.Named("registration")
+
+	if resp.Tombstone == "" {
+		log.Errorw("Device is deleted, but the control plane sent no tombstone; stopping without cleanup",
+			"device_uuid", r.cfg.DeviceUUID,
+			"reason", "tombstone missing",
+		)
+		return ErrDeviceDeleted
+	}
+
+	keys, err := r.loadPinnedKeys(r.ndmKeysPath)
+	if err != nil || len(keys) == 0 {
+		log.Errorw("Device is deleted, but no pinned NDManager keys are available to verify the tombstone; stopping without cleanup",
+			"device_uuid", r.cfg.DeviceUUID,
+			"reason", "no pinned keys",
+			"cache_path", r.ndmKeysPath,
+			"error", err,
+		)
+		return ErrDeviceDeleted
+	}
+
+	lookup := func(kid []byte) (ed25519.PublicKey, error) {
+		pub, ok := keys[hex.EncodeToString(kid)]
+		if !ok {
+			return nil, fmt.Errorf("kid %s not in NDM key table", hex.EncodeToString(kid))
+		}
+		return pub, nil
+	}
+
+	ts, err := r.verifyTombstone(resp.Tombstone, lookup, r.cfg.DeviceUUID)
+	if err != nil {
+		log.Errorw("Device is deleted, but its tombstone failed verification; stopping without cleanup",
+			"device_uuid", r.cfg.DeviceUUID,
+			"reason", "signature invalid",
+			"error", err,
+		)
+		return ErrDeviceDeleted
+	}
+
+	log.Warnw("Device is deleted and the tombstone verified; self-decommission will run",
+		"device_uuid", r.cfg.DeviceUUID,
+		"deleted_at", ts.DeletedAt,
+		"kid", ts.Kid,
+	)
+	return &DecommissionRequiredError{Tombstone: ts}
+}
+
 // WaitForRegistration polls the server until the device is registered and enabled.
 // Returns nil when device is enabled, or an error if device is disabled/deleted or context cancelled.
 func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
@@ -310,6 +472,11 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 	const statusPollInterval = 10 * time.Second
 	const maxStartBackoff = 60 * time.Second
 
+	// `disabledBackoff` — how long to wait before re-checking a DISABLED
+	// device. Doubles from 60s to a 5-minute ceiling and resets as soon
+	// as the status changes.
+	disabledBackoff := disabledInitialBackoff
+
 	for {
 		// Check for context cancellation
 		select {
@@ -319,7 +486,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 		default:
 		}
 
-		status, err := r.CheckRegistration(ctx)
+		checkResp, err := r.CheckRegistration(ctx)
 		if err != nil {
 			// Handle connection errors with exponential backoff
 			log.Errorw("Connection error during registration",
@@ -351,6 +518,12 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 
 		// Reset delay on successful connection
 		totalDelay = 0
+		status := checkResp.Status
+		if status != StatusDisabled {
+			// Any other answer means the suspension is over (or never
+			// started); start the disabled wait from scratch next time.
+			disabledBackoff = disabledInitialBackoff
+		}
 
 		switch status {
 		case StatusEnabled:
@@ -400,16 +573,27 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 			}
 
 		case StatusDisabled:
-			log.Warnw("Device is disabled",
+			// A disabled device WAITS. It does not exit.
+			//
+			// DISABLED is a reversible, usually billing-driven state:
+			// the operator re-enables the device in the control plane
+			// and expects it to come back. The agent's rc.d script runs
+			// daemon(8) without -r, so exiting here would leave the box
+			// down until someone logged in and restarted the service by
+			// hand — a suspension would silently become a permanent
+			// outage. So: back off and keep asking, forever, and never
+			// touch anything on the device.
+			log.Warnw("Device is disabled; waiting for it to be re-enabled",
 				"device_uuid", r.cfg.DeviceUUID,
+				"next_check_in", disabledBackoff,
 			)
-			return ErrDeviceDisabled
+			if err := registrationSleep(ctx, disabledBackoff); err != nil {
+				return err
+			}
+			disabledBackoff = nextDisabledBackoff(disabledBackoff)
 
 		case StatusDeleted:
-			log.Warnw("Device is deleted",
-				"device_uuid", r.cfg.DeviceUUID,
-			)
-			return ErrDeviceDeleted
+			return r.handleDeletedStatus(checkResp)
 
 		default:
 			log.Errorw("Unknown registration status",

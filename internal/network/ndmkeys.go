@@ -158,6 +158,32 @@ func LoadOrFetchNDMKeys(
 	return cacheToMaps(cached, log)
 }
 
+// LoadCachedNDMDispatchKeys returns the pinned dispatch (primary) keys
+// from the on-disk cache and NEVER fetches.
+//
+// Phase 1 uses this to verify a device tombstone before any WebSocket
+// phase has run. Fetching here would defeat the point: whoever can
+// answer the registration check with "DELETED" can also answer a key
+// fetch, and the TOFU pin is the only thing that makes the tombstone
+// worth acting on. No cache on disk is therefore an error, not an
+// invitation to go get one — the caller stops the agent instead of
+// wiping the box.
+func LoadCachedNDMDispatchKeys(cachePath string) (map[string]ed25519.PublicKey, error) {
+	if cachePath == "" {
+		cachePath = DefaultNDMKeysCachePath
+	}
+	log := ndmKeysLoggerFactory()
+	cached, ok := tryLoadCache(cachePath, log)
+	if !ok {
+		return nil, fmt.Errorf("no pinned NDM keys at %s", cachePath)
+	}
+	dispatchKeys, _, err := cacheToMaps(cached, log)
+	if err != nil {
+		return nil, err
+	}
+	return dispatchKeys, nil
+}
+
 func tryLoadCache(cachePath string, log *zap.SugaredLogger) (*ndmKeysCacheFile, bool) {
 	raw, err := os.ReadFile(cachePath)
 	if err != nil {

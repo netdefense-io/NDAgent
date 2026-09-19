@@ -214,6 +214,20 @@ func (w *WebSocketClient) Run(ctx context.Context) error {
 				return ctx.Err()
 			}
 
+			// A permanent refusal is not a connection problem, so
+			// reconnecting cannot fix it. Return instead, which hands
+			// control back to LifecycleManager and re-runs Phase 1 —
+			// the only place that can find out whether this device is
+			// pending, disabled or deleted. Retrying here is what made
+			// a revoked device reconnect forever without ever asking.
+			if refusal, permanent := classifyPermanentRefusal(err); permanent {
+				log.Warnw("Broker refused the connection permanently; returning to the registration phase",
+					"close_code", refusal.Code,
+					"reason", refusal.Reason,
+				)
+				return refusal
+			}
+
 			log.Errorw("WebSocket connection failed",
 				"error", err,
 			)

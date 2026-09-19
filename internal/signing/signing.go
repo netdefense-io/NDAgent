@@ -198,27 +198,9 @@ func BuildResponseEnvelope(
 // task_id strict-greater replay barrier, exp not yet expired, type matches
 // expected routing. Alg=Ed25519 is also enforced inline below.
 func VerifyDispatchEnvelope(envelope []byte, lookup VerifyKeyByKid) (*DecodedEnvelope, error) {
-	var msg cose.Sign1Message
-	if err := msg.UnmarshalCBOR(envelope); err != nil {
-		return nil, fmt.Errorf("cose unmarshal: %w", err)
-	}
-
-	kid, err := extractKid(msg.Headers.Protected)
+	msg, err := verifySign1(envelope, lookup)
 	if err != nil {
-		return nil, fmt.Errorf("read kid: %w", err)
-	}
-
-	pub, err := lookup(kid)
-	if err != nil {
-		return nil, fmt.Errorf("kid lookup %s: %w", hex.EncodeToString(kid), err)
-	}
-
-	verifier, err := cose.NewVerifier(cose.AlgorithmEd25519, pub)
-	if err != nil {
-		return nil, fmt.Errorf("new cose verifier: %w", err)
-	}
-	if err := msg.Verify(nil, verifier); err != nil {
-		return nil, fmt.Errorf("cose verify: %w", err)
+		return nil, err
 	}
 
 	dec, err := protectedHeaderToDecoded(msg.Headers.Protected, msg.Payload)
@@ -241,6 +223,38 @@ func VerifyDispatchEnvelope(envelope []byte, lookup VerifyKeyByKid) (*DecodedEnv
 	return dec, nil
 }
 
+// verifySign1 is the payload-agnostic half of envelope verification:
+// CBOR-decode the COSE_Sign1 message, resolve its kid through the
+// caller's lookup, and check the signature. It says nothing about what
+// the protected header must contain — that is the caller's business.
+// Shared by VerifyDispatchEnvelope and VerifyTombstone so both legs
+// have exactly one signature-checking implementation between them.
+func verifySign1(envelope []byte, lookup VerifyKeyByKid) (*cose.Sign1Message, error) {
+	var msg cose.Sign1Message
+	if err := msg.UnmarshalCBOR(envelope); err != nil {
+		return nil, fmt.Errorf("cose unmarshal: %w", err)
+	}
+
+	kid, err := extractKid(msg.Headers.Protected)
+	if err != nil {
+		return nil, fmt.Errorf("read kid: %w", err)
+	}
+
+	pub, err := lookup(kid)
+	if err != nil {
+		return nil, fmt.Errorf("kid lookup %s: %w", hex.EncodeToString(kid), err)
+	}
+
+	verifier, err := cose.NewVerifier(cose.AlgorithmEd25519, pub)
+	if err != nil {
+		return nil, fmt.Errorf("new cose verifier: %w", err)
+	}
+	if err := msg.Verify(nil, verifier); err != nil {
+		return nil, fmt.Errorf("cose verify: %w", err)
+	}
+	return &msg, nil
+}
+
 func extractKid(phdr cose.ProtectedHeader) ([]byte, error) {
 	raw, ok := phdr[cose.HeaderLabelKeyID]
 	if !ok {
@@ -261,6 +275,18 @@ func extractKid(phdr cose.ProtectedHeader) ([]byte, error) {
 }
 
 func protectedHeaderToDecoded(phdr cose.ProtectedHeader, payload []byte) (*DecodedEnvelope, error) {
+	return decodeProtectedHeader(phdr, payload, true)
+}
+
+// decodeProtectedHeader reads the protected header into a DecodedEnvelope.
+//
+// `requireTaskID` is what separates the two envelope shapes that share
+// this code. Dispatch and response envelopes always carry task_id and
+// must reject an envelope without one. Tombstones are statements about a
+// device, not about a task, so NDManager mints them with no task_id at
+// all — see VerifyTombstone. Every other required field (iss, iat,
+// device_uuid, v) is required on both shapes.
+func decodeProtectedHeader(phdr cose.ProtectedHeader, payload []byte, requireTaskID bool) (*DecodedEnvelope, error) {
 	dec := &DecodedEnvelope{Payload: payload}
 
 	if v, ok := phdr[cose.HeaderLabelAlgorithm]; ok {
@@ -279,18 +305,22 @@ func protectedHeaderToDecoded(phdr cose.ProtectedHeader, payload []byte) (*Decod
 	}
 
 	for _, item := range []struct {
-		label int64
-		dst   interface{}
-		name  string
+		label    int64
+		dst      interface{}
+		name     string
+		required bool
 	}{
-		{HdrIss, &dec.Iss, "iss"},
-		{HdrIat, &dec.Iat, "iat"},
-		{HdrTaskID, &dec.TaskID, "task_id"},
-		{HdrDeviceUUID, &dec.DeviceUUID, "device_uuid"},
-		{HdrVersion, &dec.Version, "v"},
+		{HdrIss, &dec.Iss, "iss", true},
+		{HdrIat, &dec.Iat, "iat", true},
+		{HdrTaskID, &dec.TaskID, "task_id", requireTaskID},
+		{HdrDeviceUUID, &dec.DeviceUUID, "device_uuid", true},
+		{HdrVersion, &dec.Version, "v", true},
 	} {
 		raw, ok := phdr[item.label]
 		if !ok {
+			if !item.required {
+				continue
+			}
 			return nil, fmt.Errorf("envelope missing required header field: %s", item.name)
 		}
 		switch ptr := item.dst.(type) {
