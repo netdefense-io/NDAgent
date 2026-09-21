@@ -1,0 +1,1 @@
+{"hash":"b0feff97f5ee26c6","hostname":"e2e-b.internal","interfaces":[{"enabled":true,"if":"vtnet0","role":"wan"},{"enabled":true,"if":"vtnet1","role":"lan"},{"enabled":true,"if":"wg0","role":"wireguard"}],"opnsense":{"series":"26.7","version":"26.7.1"},"os":{"platform":"freebsd","version":"15.0-RELEASE"},"timezone":{"abbrev":"UTC","name":"Etc/UTC","utc_offset_sec":0},"v":1}

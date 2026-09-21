@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/netdefense-io/ndagent/internal/config"
+	"github.com/netdefense-io/ndagent/internal/facts"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
@@ -34,12 +35,17 @@ const (
 	MsgTypeTaskResponse   = "task_response"
 )
 
-// Authentication message sent on connection
+// Authentication message sent on connection.
+//
+// Facts is the device-facts payload, sent on every connect so the broker
+// has a current copy without waiting for a change to trigger a heartbeat
+// carry. Omitted when collection failed; older brokers ignore it.
 type AuthMessage struct {
-	Type       string `json:"type"`
-	TokenUUID  string `json:"token_uuid"`
-	DeviceUUID string `json:"device_uuid"`
-	Version    string `json:"version"`
+	Type       string       `json:"type"`
+	TokenUUID  string       `json:"token_uuid"`
+	DeviceUUID string       `json:"device_uuid"`
+	Version    string       `json:"version"`
+	Facts      *facts.Facts `json:"facts,omitempty"`
 }
 
 // AuthResponse from server
@@ -128,6 +134,10 @@ type WebSocketClient struct {
 	// Heartbeat manager
 	heartbeat *HeartbeatManager
 
+	// Device-facts collector. Read on every connect (auth message) and
+	// on every heartbeat (attached only when changed).
+	facts *facts.Collector
+
 	// Command dispatcher
 	dispatcher *CommandDispatcher
 
@@ -177,13 +187,28 @@ type WebSocketClient struct {
 // the dispatcher (Begin at dispatch time) and into SendTaskResponse
 // (Complete + MarkDelivered around the wire send).
 func NewWebSocketClient(cfg *config.Config, stateStore *state.Store, taskStore *taskstore.Store, lifecycleFor LifecycleResolver, ndmKeys map[string]ed25519.PublicKey) *WebSocketClient {
-	return &WebSocketClient{
+	w := &WebSocketClient{
 		cfg:        cfg,
 		heartbeat:  NewHeartbeatManager(cfg.DeviceUUID, 60*time.Second),
+		facts:      facts.New(cfg.ConfigXMLPath),
 		dispatcher: NewCommandDispatcher(stateStore, taskStore, lifecycleFor, ndmKeys, cfg.DeviceUUID),
 		state:      stateStore,
 		taskStore:  taskStore,
 	}
+	w.heartbeat.SetFactsProvider(w.collectFacts)
+	return w
+}
+
+// collectFacts builds the current facts payload. A collection failure is
+// logged inside the collector and reported here as nil, which omits the
+// field — it never fails the connect or the heartbeat.
+func (w *WebSocketClient) collectFacts() *facts.Facts {
+	f, err := w.facts.Collect()
+	if err != nil {
+		logging.Named("facts").Warnw("Device facts unavailable this cycle", "error", err)
+		return nil
+	}
+	return f
 }
 
 // Run connects to the WebSocket server and maintains the connection.
@@ -369,16 +394,22 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 func (w *WebSocketClient) authenticate(ctx context.Context) error {
 	log := logging.Named("websocket")
 
+	// Facts go out on every connect, so the broker's copy is current
+	// even if nothing changed since the last session.
+	deviceFacts := w.collectFacts()
+
 	authMsg := AuthMessage{
 		Type:       MsgTypeAuthentication,
 		TokenUUID:  w.cfg.Token,
 		DeviceUUID: w.cfg.DeviceUUID,
 		Version:    version.Version,
+		Facts:      deviceFacts,
 	}
 
 	log.Infow("Sending authentication message",
 		"device_uuid", w.cfg.DeviceUUID,
 		"version", version.Version,
+		"facts_attached", deviceFacts != nil,
 	)
 
 	if err := w.SendJSON(authMsg); err != nil {
@@ -401,6 +432,12 @@ func (w *WebSocketClient) authenticate(ctx context.Context) error {
 
 	if authResp.Status != "authenticated" {
 		return fmt.Errorf("authentication rejected: %s", authResp.Error)
+	}
+
+	// The broker now has this payload, so heartbeats stay quiet until it
+	// changes or the resync window elapses.
+	if deviceFacts != nil {
+		w.heartbeat.NoteFactsSent(deviceFacts.Hash)
 	}
 
 	return nil
@@ -814,8 +851,22 @@ func pluginInstallPkgChecker(ctx context.Context, packageName, _ string) (string
 // heartbeat path. lifecycle.go calls this once after starting the
 // HeavyCollector goroutine; the provider is just a thin getter on the
 // collector and is safe to call concurrently with heartbeats.
+// It also feeds the facts collector's OPNsense version, which comes from
+// the same cache — no extra REST call, and the sub-object stays omitted
+// until the collector's first refresh lands.
 func (w *WebSocketClient) SetHeavyProvider(fn HeavyProvider) {
 	w.heartbeat.SetHeavyProvider(fn)
+	if fn == nil {
+		w.facts.SetOPNsenseVersionProvider(nil)
+		return
+	}
+	w.facts.SetOPNsenseVersionProvider(func() string {
+		snap := fn()
+		if snap == nil || snap.Updates == nil || snap.Updates.FirmwareStatus == nil {
+			return ""
+		}
+		return snap.Updates.OPNsenseVersion
+	})
 }
 
 // GetPathfinderHost returns the Pathfinder server URL.

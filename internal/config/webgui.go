@@ -14,14 +14,35 @@ type WebGUIConfig struct {
 	Port     int    // e.g. 443, 8443
 }
 
-// xmlOPNsense is a minimal struct for parsing only the webgui section from config.xml.
+// xmlOPNsense is a minimal struct for parsing the handful of config.xml
+// sections the agent cares about: the webgui settings (ReadWebGUIConfig)
+// and the device-facts fields (ReadSystemFacts). One struct, one parse —
+// do not add a second config.xml reader.
 type xmlOPNsense struct {
-	XMLName xml.Name  `xml:"opnsense"`
-	System  xmlSystem `xml:"system"`
+	XMLName    xml.Name      `xml:"opnsense"`
+	System     xmlSystem     `xml:"system"`
+	Interfaces xmlInterfaces `xml:"interfaces"`
 }
 
 type xmlSystem struct {
 	WebGUI xmlWebGUI `xml:"webgui"`
+	// Timezone is the IANA name the GUI stores, e.g. "America/New_York".
+	Timezone string `xml:"timezone"`
+}
+
+// xmlInterfaces captures every child of <interfaces> regardless of name,
+// because the element name *is* the interface role (wan, lan, opt1, …).
+type xmlInterfaces struct {
+	Items []xmlInterface `xml:",any"`
+}
+
+type xmlInterface struct {
+	XMLName xml.Name
+	If      string `xml:"if"`
+	Descr   string `xml:"descr"`
+	// Enable is a pointer so an absent element (disabled) is
+	// distinguishable from a present-but-empty one (enabled).
+	Enable *string `xml:"enable"`
 }
 
 type xmlWebGUI struct {
