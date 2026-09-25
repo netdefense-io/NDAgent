@@ -10,6 +10,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
+	"go.uber.org/zap"
 )
 
 // RulePosition defines where managed rules are placed relative to unmanaged rules.
@@ -181,6 +182,17 @@ type SyncAPIResult struct {
 }
 
 // SyncAPIItemResult contains the result for a single item.
+//
+// Code, Before, After, Available and Risks are additive fields (all
+// `omitempty`, so every non-AUTH family and every older control-plane
+// consumer sees no shape change at all). They exist for the AUTH_SERVER/
+// AUTH_ORDER family: every AUTH result item carries a structured Code a consumer (NDBroker,
+// NDCLI, NDWeb) can key on together with Status, never on free-text
+// parsing of Error — this now includes the "group_member"/"user" deferral
+// items (USER_DEFERRED_EXCLUSION_STALE) and the "auth_local_server"
+// warning's risk list, which used to live only inside Error. Before/
+// After/Available are names only (never a value) and are populated on
+// the "auth_facility" item — see mapAuthResponseToResult.
 type SyncAPIItemResult struct {
 	Type   string `json:"type"`
 	UUID   string `json:"uuid"`
@@ -188,6 +200,27 @@ type SyncAPIItemResult struct {
 	Action string `json:"action"`
 	Status string `json:"status"`
 	Error  string `json:"error,omitempty"`
+	// Code is the structured outcome code: for "auth"/"auth_server" it is
+	// the fault/per-server code the PHP helper (or Go's own strict-parse
+	// gate) reported; for "auth_facility" it is the facility's own code;
+	// for "auth_local_server"/"auth_warning" it mirrors the code already
+	// embedded in Error; for the "group_member"/"user" deferral items it
+	// is authCodeUserDeferredExclusionStale. Never populated outside the
+	// AUTH family today.
+	Code string `json:"code,omitempty"`
+	// Before/After are the auth_facility item's kept/written order, names
+	// only. Available is the resolution set an unresolved
+	// entry was checked against — reported only on a refused facility
+	// write, never on success.
+	Before    []string `json:"before,omitempty"`
+	After     []string `json:"after,omitempty"`
+	Available []string `json:"available,omitempty"`
+	// Risks is the "auth_local_server" warning's structured risk list
+	// (ORDER_NAMES_LOCAL_SERVER: cleartext/unscoped_sync/
+	// protected_group/no_reserved_exclusion) — the same list that is also
+	// joined into Error's free text for a human reading the log, so a
+	// consumer can key on it without parsing "; risks: %s".
+	Risks []string `json:"risks,omitempty"`
 }
 
 // dangerousSnippetRejectionMessage builds the explicit, actionable error
@@ -334,6 +367,16 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
+	// Parse AUTH_SERVER/AUTH_ORDER content.
+	//
+	// Deliberately NOT the abort-the-whole-SYNC pattern every parse call
+	// above uses: a parse failure here never returns early. Strict parsing
+	// makes the AUTH family a no-op for THIS pass (AUTH_CONTENT_UNSUPPORTED)
+	// while every other family — firewall delivery included — still
+	// applies. See executeSyncAuth and authParseOutcome in
+	// sync_authserver.go.
+	authParsed := parseAPIAuthContent(cmd.Payload)
+
 	// Validate UUIDs have correct prefix
 	for _, alias := range aliases {
 		if !strings.HasPrefix(alias.UUID, opnapi.NDAgentUUIDPrefix) {
@@ -384,6 +427,8 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	log.Infow("Executing SYNC_API",
 		"alias_count", len(aliases),
 		"rule_count", len(rules),
+		"auth_server_count", len(authParsed.Servers),
+		"auth_facility_count", len(authParsed.Facilities),
 		"user_count", len(users),
 		"group_count", len(groups),
 		"host_override_count", len(hostOverrides),
@@ -427,6 +472,18 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		syncResult.Success = false
 	}
 
+	// Execute the AUTH_SERVER/AUTH_ORDER family — after aliases/rules, and
+	// BEFORE users/groups. One pass, before any new
+	// privileged local identity can appear, so a directory account cannot
+	// win a race against the reserved-name exclusion that is supposed to
+	// shadow it (see the stale-exclusion deferral, authDeferralInfo).
+	authOutcome := executeSyncAuth(ctx, apiClient, ws.GetDeviceUUID(), cmd.TaskID, ws.RejectDangerousSnippets(), ws.GetConfigXMLPath(), authParsed, users, groups)
+	syncResult.Results = append(syncResult.Results, authOutcome.Result.Results...)
+	syncResult.Errors = append(syncResult.Errors, authOutcome.Result.Errors...)
+	if !authOutcome.Result.Success {
+		syncResult.Success = false
+	}
+
 	// Execute sync for users and groups. Runs every sync (no len-based
 	// gate) so that managed-but-undesired identities are reliably swept
 	// off the device -- same "empty desired list means delete everything
@@ -435,7 +492,7 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// removed below). Detaching the last USER/GROUP template and
 	// re-syncing must still orphan-delete previously-applied managed
 	// users/groups, not leave them stranded on the device.
-	userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups, ws.RejectDangerousSnippets())
+	userGroupResult := executeSyncUsersGroups(ctx, apiClient, users, groups, ws.RejectDangerousSnippets(), authOutcome.Deferral)
 	syncResult.Results = append(syncResult.Results, userGroupResult.Results...)
 	syncResult.Errors = append(syncResult.Errors, userGroupResult.Errors...)
 	if !userGroupResult.Success {
@@ -798,18 +855,36 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 	// so we must list all objects and filter locally by UUID prefix.
 	allAliases, err := client.ListAllAliases(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list aliases: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list aliases: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "alias_discovery",
+				Name:   "list_aliases",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentAliases := opnapi.FilterManagedAliases(allAliases)
 
 	allRules, err := client.ListAllRules(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list rules: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list rules: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "rule_discovery",
+				Name:   "list_rules",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentRules := opnapi.FilterManagedRules(allRules)
@@ -1088,13 +1163,31 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		}
 	}
 
-	// Phase 6: Apply changes
+	// Phase 6: Apply changes. Every errors entry must have a matching
+	// results item, or a FAILED task's own results array shows nothing
+	// wrong.
 	if err := client.ReconfigureAliases(ctx); err != nil {
-		errors = append(errors, fmt.Sprintf("Alias reconfigure: %v", err))
+		msg := fmt.Sprintf("Alias reconfigure: %v", err)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "alias_apply",
+			Name:   "reconfigure",
+			Action: "apply",
+			Status: "error",
+			Error:  msg,
+		})
 	}
 
 	if err := client.ApplyRules(ctx); err != nil {
-		errors = append(errors, fmt.Sprintf("Rule apply: %v", err))
+		msg := fmt.Sprintf("Rule apply: %v", err)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "rule_apply",
+			Name:   "apply",
+			Action: "apply",
+			Status: "error",
+			Error:  msg,
+		})
 	}
 
 	// Build final result with detailed counts
@@ -1721,6 +1814,7 @@ func parseGroupContent(jsonContent string, templates []string) (opnapi.APIGroupP
 	// Optional fields
 	group.Description, _ = contentMap["description"].(string)
 	group.SourceNetworks, _ = contentMap["source_networks"].(string)
+	group.ExternalMembers = parseBoolField(contentMap["external_members"])
 
 	// Parse members (names)
 	if members, ok := contentMap["members"].([]interface{}); ok {
@@ -1757,6 +1851,54 @@ func parseBoolField(v interface{}) bool {
 	}
 }
 
+// updateExternalGroup updates an external_members:true GROUP's own
+// existence/priv/source_networks (member is never sent for it otherwise —
+// see ConvertAPIToGroup), first self-healing an empty-token or stale-uid
+// artifact in the group's stored `member` CSV, if one is present.
+//
+// The artifact: OPNsense's own Auth\Base::setGroupMembership (login-time
+// memberOf sync) edits `<member>` directly via SimpleXMLElement, bypassing
+// the MVC Group model entirely. Any group whose stored `<member>` is
+// present but empty — a freshly created group's own `<member></member>`
+// is exactly this shape, so the FIRST directory login into a brand-new
+// external group hits it too, not only a revoke-then-restore cycle — gets
+// a leading comma on its next link (see opnapi.SanitizeMemberCSV's doc
+// comment for the PHP mechanics). Separately, deleting a user never
+// scrubs other groups' stored member CSV, so a stale uid can be left
+// behind the same way (opnapi.SanitizeMemberCSVAgainstUsers). Either
+// artifact permanently fails OPNsense's own MemberField validation on
+// EVERY subsequent auth/group/set call for the group — setBase validates
+// the whole loaded model, not just the posted fields — so a plain
+// client.SetGroup call would otherwise fail forever once the device
+// reaches that state (every family but GROUP still applies; the group
+// object itself is never corrupted, only permanently un-updatable).
+//
+// The repair never sends a member NDAgent invented: it is always a fresh
+// read of what OPNsense currently has stored for this exact group,
+// sanitized to drop only the empty/stale tokens. It is NOT fully
+// race-safe against a login landing between that read and this repair's
+// write — see opnapi.RepairGroupMember's doc comment for the accepted,
+// bounded residual risk.
+func updateExternalGroup(ctx context.Context, client *opnapi.Client, log *zap.SugaredLogger, uuid, name string, opnGroup opnapi.Group, validUIDs map[string]bool) error {
+	rawMember, found, err := client.GetGroupRawMemberByName(ctx, name)
+	if err != nil || !found {
+		// Fail open: an unreadable or (racily) missing group falls through
+		// to the plain update, exactly today's behavior and no worse — this
+		// repair is a bonus recovery path, never a precondition for an
+		// otherwise-healthy update.
+		return client.SetGroup(ctx, uuid, opnGroup)
+	}
+
+	sanitized, changed := opnapi.SanitizeMemberCSVAgainstUsers(rawMember, validUIDs)
+	if !changed {
+		return client.SetGroup(ctx, uuid, opnGroup)
+	}
+
+	log.Warnw("SYNC_API: external GROUP's stored member CSV carried an empty-token or stale-uid artifact; repairing without adding or removing a real, current member",
+		"group", name, "raw_member", rawMember, "sanitized_member", sanitized)
+	return client.RepairGroupMember(ctx, uuid, opnGroup, sanitized)
+}
+
 // executeSyncUsersGroups performs sync for users and groups.
 // Groups are synced first (users may reference groups).
 //
@@ -1768,7 +1910,13 @@ func parseBoolField(v interface{}) bool {
 // delete decision below — the gate refuses new dangerous mutations, it does
 // not delete pre-existing device state that happens to match the same
 // criteria. When false, behavior is unchanged from before this gate existed.
-func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload, rejectDangerous bool) SyncAPIResult {
+//
+// auth carries the AUTH_SERVER/AUTH_ORDER family's stale-exclusion deferral
+// state (see sync_authserver.go). The
+// zero value, authDeferralInfo{}, defers nothing and is exactly today's
+// behavior, so every call site that has nothing to do with AUTH passes it
+// unchanged.
+func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload, rejectDangerous bool, auth authDeferralInfo) SyncAPIResult {
 	log := logging.Named("SYNC_API")
 
 	var results []SyncAPIItemResult
@@ -1825,20 +1973,43 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 		}
 	}
 
-	// Phase 1: Get all users and groups for lookups
+	// Phase 1: Get all users and groups for lookups.
+	//
+	// A discovery failure here fails fast (the sync-reject-gates.md
+	// precondition exception: the orphan sweep can't run safely against
+	// unreadable state) but must still preserve any dangerous-snippet
+	// rejections already recorded above.
 	allUsers, err := client.ListAllUsers(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list users: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list users: %v", err),
+			Message: msg,
+			Results: append(results, SyncAPIItemResult{
+				Type:   "user_discovery",
+				Name:   "list_users",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}),
+			Errors: append(errors, msg),
 		}
 	}
 
 	allGroups, err := client.ListAllGroups(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list groups: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list groups: %v", err),
+			Message: msg,
+			Results: append(results, SyncAPIItemResult{
+				Type:   "group_discovery",
+				Name:   "list_groups",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}),
+			Errors: append(errors, msg),
 		}
 	}
 
@@ -1859,6 +2030,33 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	gidLookup := opnapi.BuildGIDLookup(allGroups)
 	uidLookup := opnapi.BuildUIDLookup(allUsers)
 
+	// validUIDs is every uid the device currently knows about, used only
+	// to detect a stale uid left behind in a GROUP's stored member CSV by
+	// a since-deleted user (see updateExternalGroup).
+	validUIDs := make(map[string]bool, len(uidLookup))
+	for _, uid := range uidLookup {
+		validUIDs[uid] = true
+	}
+
+	// liveGroupMembers is the BEFORE-this-sync member-name set per group,
+	// captured once here rather than re-derived after each phase. The
+	// stale-exclusion deferral is about NEW names only (a member added THIS pass) — a name
+	// that was already a member before this sync started is never deferred,
+	// whatever the exclusion coverage says.
+	liveGroupMembers := make(map[string]map[string]bool, len(allGroups))
+	for _, rawGroup := range allGroups {
+		name, _ := rawGroup["name"].(string)
+		if name == "" {
+			continue
+		}
+		api := opnapi.ConvertGroupToAPI(rawGroup, allUsers)
+		set := make(map[string]bool, len(api.Members))
+		for _, m := range api.Members {
+			set[m] = true
+		}
+		liveGroupMembers[name] = set
+	}
+
 	// Build sets of desired names
 	desiredUserNames := make(map[string]opnapi.APIUserPayload)
 	for _, u := range users {
@@ -1877,12 +2075,27 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 		action := "created"
 		var syncErr error
 
+		// Drop any NEW member (not already live before this sync)
+		// whose name is currently stale-excluded, before this group's
+		// member list ever reaches ConvertAPIToGroup. External groups never
+		// go through this at all — their Members must be empty already,
+		// and ConvertAPIToGroup never builds `member` for them regardless.
+		convertPayload := groupPayload
+		var deferredMembers []string
+		if !groupPayload.ExternalMembers {
+			convertPayload.Members, deferredMembers = filterDeferredGroupMembers(groupPayload, liveGroupMembers[groupPayload.Name], auth)
+		}
+
 		// Convert to OPNsense format (without member UIDs for now)
-		opnGroup := opnapi.ConvertAPIToGroup(groupPayload, groupPayload.Templates, uidLookup)
+		opnGroup := opnapi.ConvertAPIToGroup(convertPayload, groupPayload.Templates, uidLookup)
 
 		if exists {
 			action = "updated"
-			syncErr = client.SetGroup(ctx, existingUUID, opnGroup)
+			if groupPayload.ExternalMembers {
+				syncErr = updateExternalGroup(ctx, client, log, existingUUID, groupPayload.Name, opnGroup, validUIDs)
+			} else {
+				syncErr = client.SetGroup(ctx, existingUUID, opnGroup)
+			}
 		} else {
 			newUUID, addErr := client.AddGroup(ctx, opnGroup)
 			syncErr = addErr
@@ -1907,6 +2120,28 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 		}
 
 		results = append(results, itemResult)
+		for _, name := range deferredMembers {
+			log.Warnw("SYNC_API: deferred a new GROUP member pending AUTH exclusion coverage",
+				"group", groupPayload.Name, "member", name)
+			msg := authDeferredMessage("group member", name)
+			results = append(results, SyncAPIItemResult{
+				Type:   "group_member",
+				Name:   groupPayload.Name + "/" + name,
+				Action: "deferred",
+				Status: "blocked",
+				Code:   authCodeUserDeferredExclusionStale,
+				Error:  msg,
+			})
+			// sync-reject-gates.md: a policy-driven withholding fails the
+			// TASK with an actionable reason — never a silent COMPLETED
+			// with the withholding buried in the per-item results, which
+			// is exactly what leaving `errors` untouched here would be
+			// (`success := len(errors) == 0` further down keys off it).
+			// The member stays out of THIS pass's create/update (above),
+			// but is untouched by the orphan-delete pass — same shape as
+			// every other reject-gate in this file.
+			errors = append(errors, msg)
+		}
 	}
 
 	// Refresh GID lookup after group changes
@@ -1917,6 +2152,30 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	// Phase 3: Create/Update users (after groups exist)
 	for _, userPayload := range applyUsers {
 		existingUUID, exists := userUUIDLookup[userPayload.Name]
+
+		// A brand-new privileged/managed identity whose name the
+		// AUTH pass could not (yet) exclude from every managed directory
+		// server waits for a later sync — make-before-break. An EXISTING
+		// user being merely updated is unaffected: it was already there
+		// before this pass, so there is nothing new to shadow.
+		if !exists && auth.isDeferred(userPayload.Name) {
+			log.Warnw("SYNC_API: deferred a new USER pending AUTH exclusion coverage", "name", userPayload.Name)
+			msg := authDeferredMessage("user", userPayload.Name)
+			results = append(results, SyncAPIItemResult{
+				Type:   "user",
+				Name:   userPayload.Name,
+				Action: "deferred",
+				Status: "blocked",
+				Code:   authCodeUserDeferredExclusionStale,
+				Error:  msg,
+			})
+			// See the matching group-member comment above: a deferral is
+			// a policy-driven withholding and must fail the task, not
+			// report a silent COMPLETED with the withholding buried in
+			// the item list (sync-reject-gates.md).
+			errors = append(errors, msg)
+			continue
+		}
 
 		action := "created"
 		var syncErr error
@@ -1971,8 +2230,15 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	// applyGroups, not groups — a rejected group's full priv/description
 	// must not get re-pushed here under cover of "just updating members".
 	for _, groupPayload := range applyGroups {
-		if len(groupPayload.Members) == 0 {
-			continue // No members to update
+		if groupPayload.ExternalMembers || len(groupPayload.Members) == 0 {
+			// External groups never send `member`; nothing else to update.
+			// Known residual: a member-managed group with zero resolvable
+			// Members (e.g. an unscoped hand-made AUTH_SERVER's memberOf
+			// sync clearing it) hits this same branch and skips the update
+			// too, so it can carry the identical empty-token/stale-uid
+			// artifact updateExternalGroup repairs, unrepaired. Out of
+			// scope here; not a regression from this fix.
+			continue
 		}
 
 		existingUUID, exists := groupUUIDLookup[groupPayload.Name]
@@ -1980,11 +2246,34 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 			continue // Group creation failed, skip
 		}
 
+		// Same stale-exclusion deferral filter as Phase 2, against the same pre-sync
+		// liveGroupMembers baseline — deterministic, so a name Phase 2
+		// already withheld (and reported) is withheld again here without
+		// a second "deferred" result. This is the phase that would
+		// otherwise re-add it: Phase 3 may have just created the very
+		// user this member name refers to, making it newly resolvable.
+		convertPayload := groupPayload
+		convertPayload.Members, _ = filterDeferredGroupMembers(groupPayload, liveGroupMembers[groupPayload.Name], auth)
+		if len(convertPayload.Members) == 0 {
+			continue
+		}
+
 		// Convert with updated UID lookup
-		opnGroup := opnapi.ConvertAPIToGroup(groupPayload, groupPayload.Templates, uidLookup)
+		opnGroup := opnapi.ConvertAPIToGroup(convertPayload, groupPayload.Templates, uidLookup)
 
 		if err := client.SetGroup(ctx, existingUUID, opnGroup); err != nil {
-			errors = append(errors, fmt.Sprintf("Group %s member update: %v", groupPayload.Name, err))
+			// This member-update error needs its own result item, distinct
+			// from Phase 2's create/update item for the same group.
+			msg := fmt.Sprintf("Group %s member update: %v", groupPayload.Name, err)
+			errors = append(errors, msg)
+			results = append(results, SyncAPIItemResult{
+				Type:   "group",
+				UUID:   existingUUID,
+				Name:   groupPayload.Name,
+				Action: "member_update",
+				Status: "error",
+				Error:  msg,
+			})
 		}
 	}
 
@@ -2556,36 +2845,72 @@ func executeSyncUnbound(
 	// Phase 1: Get ALL Unbound objects and filter for managed ones
 	allHostOverrides, err := client.ListAllHostOverrides(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list host overrides: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list host overrides: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "host_override_discovery",
+				Name:   "list_host_overrides",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentHostOverrides := opnapi.FilterManagedHostOverrides(allHostOverrides)
 
 	allForwards, err := client.ListAllForwards(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list domain forwards: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list domain forwards: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "domain_forward_discovery",
+				Name:   "list_forwards",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentForwards := opnapi.FilterManagedForwards(allForwards)
 
 	allHostAliases, err := client.ListAllHostAliases(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list host aliases: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list host aliases: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "host_alias_discovery",
+				Name:   "list_host_aliases",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentHostAliases := opnapi.FilterManagedHostAliases(allHostAliases)
 
 	allACLs, err := client.ListAllACLs(ctx)
 	if err != nil {
+		msg := fmt.Sprintf("Failed to list ACLs: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list ACLs: %v", err),
+			Message: msg,
+			Results: []SyncAPIItemResult{{
+				Type:   "unbound_acl_discovery",
+				Name:   "list_acls",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}},
+			Errors: []string{msg},
 		}
 	}
 	currentACLs := opnapi.FilterManagedACLs(allACLs)
@@ -2883,9 +3208,19 @@ func executeSyncUnbound(
 		}
 	}
 
-	// Phase 10: Apply changes
+	// Phase 10: Apply changes. Every errors entry must have a matching
+	// results item, or a FAILED task's own results array shows nothing
+	// wrong.
 	if err := client.ReconfigureUnbound(ctx); err != nil {
-		errors = append(errors, fmt.Sprintf("Unbound reconfigure: %v", err))
+		msg := fmt.Sprintf("Unbound reconfigure: %v", err)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "unbound_apply",
+			Name:   "reconfigure",
+			Action: "apply",
+			Status: "error",
+			Error:  msg,
+		})
 	}
 
 	// Build final result with detailed counts

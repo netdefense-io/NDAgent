@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // SearchUsers searches for users matching the search phrase.
@@ -265,6 +266,12 @@ func IsProtectedUser(username string) bool {
 }
 
 // IsProtectedGroup checks if a group name is protected from modification.
+//
+// Case-insensitive: OPNsense's own memberOf
+// sync lowercases every incoming group name and matches it against every
+// local group by lowercased name, so "Admins" or "ADMINS" resolves to the
+// same live group as "admins" on the device. An exact-case check here would
+// let a snippet reach the protected group under a differently-cased name.
 func IsProtectedGroup(groupName string) bool {
-	return ProtectedGroupNames[groupName]
+	return ProtectedGroupNames[strings.ToLower(groupName)]
 }

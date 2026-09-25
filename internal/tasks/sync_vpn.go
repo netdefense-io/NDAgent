@@ -87,6 +87,13 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		result.Success = false
 		result.Message = fmt.Sprintf("Failed to search WireGuard servers: %v", err)
 		result.Errors = append(result.Errors, result.Message)
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type:   "wg_discovery",
+			Name:   "search_servers",
+			Action: "discover",
+			Status: "error",
+			Error:  result.Message,
+		})
 		return result
 	}
 	managedServers := opnapi.FilterManagedWireGuardServers(allServers)
@@ -96,6 +103,13 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		result.Success = false
 		result.Message = fmt.Sprintf("Failed to search WireGuard clients: %v", err)
 		result.Errors = append(result.Errors, result.Message)
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type:   "wg_discovery",
+			Name:   "search_clients",
+			Action: "discover",
+			Status: "error",
+			Error:  result.Message,
+		})
 		return result
 	}
 	managedClients := opnapi.FilterManagedWireGuardClients(allClients)
@@ -159,6 +173,13 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 			errMsg := fmt.Sprintf("Failed to enable WireGuard: %v", err)
 			log.Errorw(errMsg)
 			result.Errors = append(result.Errors, errMsg)
+			result.Results = append(result.Results, SyncAPIItemResult{
+				Type:   "wg_apply",
+				Name:   "enable",
+				Action: "apply",
+				Status: "error",
+				Error:  errMsg,
+			})
 			result.Success = false
 		}
 	}
@@ -420,6 +441,13 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		errMsg := fmt.Sprintf("Failed to reconfigure WireGuard: %v", err)
 		log.Errorw(errMsg)
 		result.Errors = append(result.Errors, errMsg)
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type:   "wg_apply",
+			Name:   "reconfigure",
+			Action: "apply",
+			Status: "error",
+			Error:  errMsg,
+		})
 		result.Success = false
 		result.Message = errMsg
 		return result

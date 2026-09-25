@@ -246,19 +246,24 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 		return result
 	}
 
-	// One catalog refresh per task. A failure here doesn't poison every
-	// per-package call — pkg can still operate against stale metadata —
-	// but it's worth surfacing as a single ERROR so the operator sees it.
+	// One catalog refresh per task. A failure here is recorded as a
+	// "warning" result item, not an `errors` entry: pkg can still operate
+	// against stale metadata, so Success stays true.
 	// repoChanged is deliberately not used to force a refresh yet: pkgmgr.Update
 	// runs `pkg update -q` unconditionally, and adding a forced variant is a
 	// separate change with its own cost on a production catalog. Keeping the
 	// signal here makes that a one-line follow-up rather than a re-derivation.
 	_ = repoChanged
 	if err := pkgmgr.Update(ctx); err != nil {
+		msg := fmt.Sprintf("pkg update: %v", err)
 		log.Warnw("pkg update failed; continuing against possibly-stale catalog", "err", err)
-		result.Errors = append(result.Errors, fmt.Sprintf("pkg update: %v", err))
-		// Don't flip Success — a stale catalog is recoverable; only real
-		// per-package failures should fail the whole task.
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type:   "software",
+			Name:   "pkg_update",
+			Action: "warning",
+			Status: "warning",
+			Error:  msg,
+		})
 	}
 
 	// Process absent first so an obsolete plugin clears before we attempt

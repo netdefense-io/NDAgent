@@ -104,3 +104,24 @@ func TestBuildSyncSummary_SectionOrderStable(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestBuildSyncSummary_AuthSections is the revert
+// guard: auth_server/auth_facility get their own labeled sections, and a
+// facility's "written" action counts as an update (its own "unchanged"
+// already reads unchanged, so there is no separate "written" bucket to
+// confuse with "created").
+func TestBuildSyncSummary_AuthSections(t *testing.T) {
+	results := []SyncAPIItemResult{
+		{Type: "auth_server", Action: "created", Status: "success"},
+		{Type: "auth_server", Action: "unchanged", Status: "success"},
+		{Type: "auth_facility", Action: "written", Status: "success"},
+		// Non-mutating/blocked outcomes must never appear in the tally.
+		{Type: "auth_server", Action: "blocked", Status: "blocked"},
+		{Type: "auth_facility", Action: "refused", Status: "blocked"},
+	}
+	got := buildSyncSummary(results, 2)
+	want := "Auth servers +1; Auth order ~1 (2 errors)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

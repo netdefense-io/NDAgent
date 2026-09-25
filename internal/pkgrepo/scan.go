@@ -39,7 +39,7 @@ var repoKeyPattern = regexp.MustCompile(`^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*:\s*
 // ScanForeign reports repository names in `managed` that are defined by a file
 // we do not own.
 //
-// Run this BEFORE writing anything (ruling R1). Scanning afterwards would only
+// Run this BEFORE writing anything. Scanning afterwards would only
 // detect the collision once the device already carried two definitions of the
 // repository — the exact state this feature exists to prevent — and failing the
 // task at that point would leave the box dirty.

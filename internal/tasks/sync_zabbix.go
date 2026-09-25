@@ -222,11 +222,18 @@ func executeSyncZabbix(
 				Message: "No changes applied",
 			}
 		}
+		msg := fmt.Sprintf("Failed to list zabbix userparameters: %v", err)
 		return SyncAPIResult{
 			Success: false,
-			Message: fmt.Sprintf("Failed to list zabbix userparameters: %v", err),
-			Results: results,
-			Errors:  append(errors, err.Error()),
+			Message: msg,
+			Results: append(results, SyncAPIItemResult{
+				Type:   "zabbix_discovery",
+				Name:   "list_userparameters",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+			}),
+			Errors: append(errors, msg),
 		}
 	}
 
@@ -396,11 +403,18 @@ func executeSyncZabbix(
 	{
 		currentRows, err := client.ListAllZabbixAliases(ctx)
 		if err != nil {
+			msg := fmt.Sprintf("Failed to list zabbix aliases: %v", err)
 			return SyncAPIResult{
 				Success: false,
-				Message: fmt.Sprintf("Failed to list zabbix aliases: %v", err),
-				Results: results,
-				Errors:  append(errors, err.Error()),
+				Message: msg,
+				Results: append(results, SyncAPIItemResult{
+					Type:   "zabbix_discovery",
+					Name:   "list_aliases",
+					Action: "discover",
+					Status: "error",
+					Error:  msg,
+				}),
+				Errors: append(errors, msg),
 			}
 		}
 		currentManaged := opnapi.FilterManagedZabbixAliases(currentRows)
@@ -493,7 +507,17 @@ func executeSyncZabbix(
 	}
 	if touched {
 		if err := client.ReconfigureZabbix(ctx); err != nil {
-			errors = append(errors, fmt.Sprintf("Zabbix reconfigure: %v", err))
+			// Every errors entry must have a matching results item, or a
+			// FAILED task's own results array shows nothing wrong.
+			msg := fmt.Sprintf("Zabbix reconfigure: %v", err)
+			errors = append(errors, msg)
+			results = append(results, SyncAPIItemResult{
+				Type:   "zabbix_apply",
+				Name:   "reconfigure",
+				Action: "apply",
+				Status: "error",
+				Error:  msg,
+			})
 		}
 	}
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"go.uber.org/zap"
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/facts"
@@ -545,6 +546,44 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 	return conn.ReadMessage()
 }
 
+// buildTaskResponseInner assembles the inner response object that becomes
+// the signed envelope's payload. Pulled out of SendTaskResponse as its own
+// pure function so it can be unit tested without a live device keypair,
+// WebSocket connection or state store.
+func buildTaskResponseInner(status, message string, data map[string]interface{}, log *zap.SugaredLogger) map[string]interface{} {
+	inner := map[string]interface{}{
+		"status":  status,
+		"message": message,
+	}
+	if data == nil {
+		return inner
+	}
+
+	if content, ok := data["content"].(string); ok {
+		inner["content"] = content
+	} else if contentMap, ok := data["content"].(map[string]interface{}); ok {
+		contentBytes, err := json.Marshal(contentMap)
+		if err != nil {
+			log.Errorw("Failed to serialize content map", "error", err)
+		} else {
+			inner["content"] = string(contentBytes)
+		}
+	}
+	if results, ok := data["results"]; ok {
+		inner["results"] = results
+	}
+	if validationErrors, ok := data["validation_errors"]; ok {
+		inner["validation_errors"] = validationErrors
+	}
+	// errors must reach the wire too — it's what the "(N errors)" count in
+	// message refers to.
+	if syncErrors, ok := data["errors"]; ok {
+		inner["errors"] = syncErrors
+	}
+
+	return inner
+}
+
 // SendTaskResponse sends a task response to the server, wrapped in a
 // COSE_Sign1 envelope signed by the device private key.
 //
@@ -557,7 +596,7 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 //	}
 //
 // The envelope's payload is the JSON-serialized response object
-// ({status, message, content, results, validation_errors}).
+// ({status, message, content, results, validation_errors, errors}).
 //
 // Concurrency: multiple task goroutines can call this simultaneously
 // (e.g. an IN_PROGRESS heartbeat from one task racing with a final
@@ -571,30 +610,7 @@ func (w *WebSocketClient) ReadMessage() (messageType int, p []byte, err error) {
 func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data map[string]interface{}) error {
 	log := logging.Named("websocket")
 
-	// Build the inner response object — what NDBroker will see as
-	// `data` after envelope verification.
-	inner := map[string]interface{}{
-		"status":  status,
-		"message": message,
-	}
-	if data != nil {
-		if content, ok := data["content"].(string); ok {
-			inner["content"] = content
-		} else if contentMap, ok := data["content"].(map[string]interface{}); ok {
-			contentBytes, err := json.Marshal(contentMap)
-			if err != nil {
-				log.Errorw("Failed to serialize content map", "error", err)
-			} else {
-				inner["content"] = string(contentBytes)
-			}
-		}
-		if results, ok := data["results"]; ok {
-			inner["results"] = results
-		}
-		if validationErrors, ok := data["validation_errors"]; ok {
-			inner["validation_errors"] = validationErrors
-		}
-	}
+	inner := buildTaskResponseInner(status, message, data, log)
 
 	innerBytes, err := json.Marshal(inner)
 	if err != nil {

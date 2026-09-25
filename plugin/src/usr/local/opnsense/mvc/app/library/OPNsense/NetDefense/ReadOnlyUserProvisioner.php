@@ -127,6 +127,46 @@ class ReadOnlyUserProvisioner
      * restart a service or drop states — runtime-only and recoverable. These
      * cannot be separated from the view without losing the view.
      *
+     * EXCLUDED (AUTH_SERVER / AUTH_ORDER, unconditional): three more
+     * pages the earlier inverted-allowlist reasoning above does not cover,
+     * because each grants an RO session something beyond a config-write-
+     * blocked view once directory authentication servers can exist
+     * (`ldap_bindpw` is plaintext in config.xml):
+     *   - page-system-authservers          (the auth-servers EDIT page
+     *                                        renders `ldap_bindpw` directly
+     *                                        into the HTML response body,
+     *                                        `value="<?=$pconfig['ldap_bindpw'];?>"`
+     *                                        — `type="password"` only masks
+     *                                        the browser's rendering, not
+     *                                        the wire response; confirmed
+     *                                        against the live page source
+     *                                        on the lab)
+     *   - page-diagnostics-configurationhistory (the History diff/download
+     *                                        API returns full config.xml
+     *                                        content/diffs, unredacted —
+     *                                        any revision spanning an
+     *                                        AUTH_SERVER change exposes
+     *                                        `ldap_bindpw` the same way)
+     *   - page-diagnostics-authentication  (the Authentication TESTER does
+     *                                        NOT leak the bind password —
+     *                                        confirmed by tracing
+     *                                        LDAP.php's `_authenticate()`,
+     *                                        which populates
+     *                                        `lastAuthProperties` from the
+     *                                        TESTED user's own attributes,
+     *                                        never the bind credential —
+     *                                        excluded instead for a
+     *                                        narrower reason: it hands a
+     *                                        nominally read-only session an
+     *                                        active credential-testing /
+     *                                        username-enumeration
+     *                                        capability against any
+     *                                        configured server)
+     * All three are removed unconditionally, not gated on whether any
+     * AUTH_SERVER exists yet — the read-only group is provisioned once, at
+     * install time, long before an org may attach its first AUTH_SERVER
+     * snippet.
+     *
      * Maintenance: OPNsense ACL is allow-only (the sole "deny" is the
      * `user-config-readonly` flag), so a new page priv added by a future
      * OPNsense release must be added here for RO users to reach it. Re-run
@@ -243,9 +283,10 @@ class ReadOnlyUserProvisioner
         'page-status-trafficgraph',  // Reporting: Traffic
 
         // --- Diagnostics & Logs ---
+        // page-diagnostics-authentication and page-diagnostics-
+        // configurationhistory are deliberately absent — see the
+        // AUTH_SERVER/AUTH_ORDER doc-comment note above the const.
         'page-diagnostics-arptable',  // Diagnostics: ARP Table
-        'page-diagnostics-authentication',  // Diagnostics: Authentication
-        'page-diagnostics-configurationhistory',  // Diagnostics: Configuration History
         'page-diagnostics-crash-reporter',  // System: Crash Reporter
         'page-diagnostics-dns_diagnostics',  // Interfaces: Diagnostics: DNS Lookup
         'page-diagnostics-health',  // Diagnostics: System Health
@@ -284,7 +325,8 @@ class ReadOnlyUserProvisioner
         'page-system-advanced-misc',  // System: Advanced: Miscellaneous
         'page-system-advanced-network',  // Interfaces: Settings
         'page-system-advanced-sysctl',  // System: Advanced: Tunables
-        'page-system-authservers',  // System: Authentication Servers
+        // page-system-authservers is deliberately absent — see the
+        // AUTH_SERVER/AUTH_ORDER doc-comment note above the const.
         'page-system-camanager',  // System: CA Manager
         'page-system-certmanager',  // System: Certificate Manager
         'page-system-crlmanager',  // System: CRL Manager

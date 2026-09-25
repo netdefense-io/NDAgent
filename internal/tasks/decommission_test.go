@@ -321,8 +321,12 @@ func TestDecommission_DeprovisionFailureDoesNotStopTheSequence(t *testing.T) {
 // A device that never had OPNsense API credentials still has both
 // accounts in config.xml if a provisioning run got that far, so the local
 // deprovision must be wired with or without an API client.
+//
+// The "auth" family is the one exception to
+// "no API client means no object families": auth servers have no REST API
+// at all, so it is wired unconditionally, placed AFTER the apiClient block.
 func TestNewDecommissioner_DeprovisionWiredWithoutAnAPIClient(t *testing.T) {
-	d := NewDecommissioner(nil, "os-netdefense", func() {})
+	d := NewDecommissioner(nil, "os-netdefense", "device-uuid-1", "", func() {})
 
 	if d.DeprovisionAccounts == nil {
 		t.Fatal("DeprovisionAccounts is nil for a device with no API client")
@@ -330,9 +334,17 @@ func TestNewDecommissioner_DeprovisionWiredWithoutAnAPIClient(t *testing.T) {
 	if d.RemoveAgentIdentity != nil || d.RemoveReadonlyIdentity != nil {
 		t.Error("the API identity removals should stay unwired without an API client")
 	}
-	if len(d.Families) != 0 {
-		t.Errorf("families = %d, want 0 without an API client", len(d.Families))
+	if len(d.Families) != 1 || d.Families[0].Name != "auth" {
+		t.Fatalf("families = %v, want exactly [auth] without an API client", familyNames(d.Families))
 	}
+}
+
+func familyNames(families []DecommissionFamily) []string {
+	names := make([]string, len(families))
+	for i, f := range families {
+		names[i] = f.Name
+	}
+	return names
 }
 
 func TestDecommission_ForkFailureStillShutsDownAndReports(t *testing.T) {

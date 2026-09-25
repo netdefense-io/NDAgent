@@ -284,9 +284,8 @@ func TestExecuteSyncSoftware_PkgErrorFailsTask(t *testing.T) {
 }
 
 func TestExecuteSyncSoftware_PkgUpdateFailureIsTolerated(t *testing.T) {
-	// Stale catalog ≠ task failure. The per-package operation succeeds
-	// against the cached metadata; we just surface the update failure as a
-	// top-level error string for visibility.
+	// Stale catalog != task failure: the update failure must surface as a
+	// "warning" result item, never an `errors` entry.
 	installed := map[string]bool{"bash": true}
 	cl := swapPkgmgr(t, installed, nil, nil, nil, errors.New("pkg update boom"))
 
@@ -296,8 +295,17 @@ func TestExecuteSyncSoftware_PkgUpdateFailureIsTolerated(t *testing.T) {
 	if !r.Success {
 		t.Fatalf("update failure alone must not flip Success=false; errors=%v", r.Errors)
 	}
-	if len(r.Errors) == 0 {
-		t.Errorf("expected the update failure to be surfaced in r.Errors")
+	if len(r.Errors) != 0 {
+		t.Errorf("pkg update failure must not land in r.Errors (that would fail the task or add a phantom error count): %v", r.Errors)
+	}
+	found := false
+	for _, item := range r.Results {
+		if item.Type == "software" && item.Name == "pkg_update" && item.Status == "warning" && item.Error != "" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected a warning result item for the pkg update failure, got %+v", r.Results)
 	}
 	if cl.updates != 1 {
 		t.Errorf("expected 1 update attempt, got %d", cl.updates)

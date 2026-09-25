@@ -397,7 +397,7 @@ func TestExecuteSyncUsersGroups_OrphanDeleteSkipsProtectedIdentities(t *testing.
 
 	// Empty desired sets: both the protected user and the protected group
 	// are "managed but not desired", the exact orphan-delete condition.
-	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false)
+	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false, authDeferralInfo{})
 
 	if len(userDeleteCalls) != 0 {
 		t.Errorf("expected no user delete calls, got %v (protected user netdefense-agent must never be orphan-deleted)", userDeleteCalls)
@@ -474,7 +474,7 @@ func TestExecuteSyncUsersGroups_OrphanDeleteAtZeroDesiredCount(t *testing.T) {
 
 	// Zero desired users and zero desired groups -- the exact payload
 	// shape produced by detaching the last USER/GROUP template.
-	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false)
+	result := executeSyncUsersGroups(context.Background(), client, nil, nil, false, authDeferralInfo{})
 
 	if len(userDeleteCalls) != 1 || !strings.Contains(userDeleteCalls[0], "user-uuid-1") {
 		t.Errorf("expected exactly one delete call for orphaned user user-uuid-1, got %v", userDeleteCalls)
@@ -572,7 +572,7 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 				client, addedUsers, _ := newUserGroupTestServer(t)
 
 				users := []opnapi.APIUserPayload{safeUser, du.user}
-				result := executeSyncUsersGroups(context.Background(), client, users, nil, rejectDangerous)
+				result := executeSyncUsersGroups(context.Background(), client, users, nil, rejectDangerous, authDeferralInfo{})
 
 				if rejectDangerous {
 					if result.Success {
@@ -629,7 +629,7 @@ func TestExecuteSyncUsersGroups_DangerousGroupPrivGate(t *testing.T) {
 			client, _, addedGroups := newUserGroupTestServer(t)
 
 			groups := []opnapi.APIGroupPayload{safeGroup, dangerousGroup}
-			result := executeSyncUsersGroups(context.Background(), client, nil, groups, rejectDangerous)
+			result := executeSyncUsersGroups(context.Background(), client, nil, groups, rejectDangerous, authDeferralInfo{})
 
 			if rejectDangerous {
 				if result.Success {
@@ -732,6 +732,7 @@ func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExi
 		[]opnapi.APIUserPayload{dangerousUser},
 		[]opnapi.APIGroupPayload{dangerousGroup},
 		true, /* gate on */
+		authDeferralInfo{},
 	)
 
 	if result.Success {
@@ -753,5 +754,456 @@ func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExi
 	wantRejected := []string{"dangerous-group", "priv-user"}
 	if got := sortedCopy(rejectedNames); fmt.Sprint(got) != fmt.Sprint(wantRejected) {
 		t.Errorf("rejected results = %v, want %v", got, wantRejected)
+	}
+}
+
+// -----------------------------------------------------------------
+// GROUP external_members and the
+// stale-exclusion deferral, exercised through executeSyncUsersGroups.
+// -----------------------------------------------------------------
+
+// TestExecuteSyncUsersGroups_DefersNewUserWhenStale is the revert guard: a
+// brand-new USER whose name the AUTH pass could not (yet)
+// exclude from every managed directory server never reaches AddUser this
+// pass, while an unrelated safe USER in the same sync is created as usual.
+func TestExecuteSyncUsersGroups_DefersNewUserWhenStale(t *testing.T) {
+	client, addedUsers, _ := newUserGroupTestServer(t)
+
+	safeUser := opnapi.APIUserPayload{Name: "safe-user", Password: "$2y$hash", Scope: "user"}
+	staleUser := opnapi.APIUserPayload{Name: "new-admin", Password: "$2y$hash", Scope: "user"}
+
+	auth := authDeferralInfo{Active: true, StaleNames: map[string]bool{"new-admin": true}}
+	result := executeSyncUsersGroups(context.Background(), client,
+		[]opnapi.APIUserPayload{safeUser, staleUser}, nil, false, auth)
+
+	if got, want := sortedCopy(*addedUsers), []string{"safe-user"}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("AddUser calls = %v, want only %v (the stale name must never reach AddUser)", got, want)
+	}
+
+	var deferredNames []string
+	for _, r := range result.Results {
+		if r.Action == "deferred" {
+			deferredNames = append(deferredNames, r.Name)
+		}
+	}
+	if fmt.Sprint(deferredNames) != fmt.Sprint([]string{"new-admin"}) {
+		t.Errorf("deferred results = %v, want [new-admin]", deferredNames)
+	}
+
+	// Every AUTH result item carries a structured Code a consumer can key
+	// on together with Status, never on free-text parsing of Error --
+	// this deferral item is no exception, even though
+	// until now it existed only inside the free-text Error.
+	for _, r := range result.Results {
+		if r.Action == "deferred" && r.Code != authCodeUserDeferredExclusionStale {
+			t.Errorf("deferred item %q: Code = %q, want %q", r.Name, r.Code, authCodeUserDeferredExclusionStale)
+		}
+	}
+
+	// A deferral is a policy-driven withholding, same shape as the
+	// dangerous-field rejection gate (sync-reject-gates.md): it must FAIL
+	// the task with an actionable reason, never report a silent COMPLETED
+	// with the withholding buried in the per-item results. It is expected
+	// to self-heal on a LATER sync, which is why it is safe to leave
+	// FAILED rather than something more drastic -- but this pass must
+	// still say so.
+	if result.Success {
+		t.Error("expected failure (a deferral must fail the task, per sync-reject-gates.md), got success")
+	}
+	foundErr := false
+	for _, e := range result.Errors {
+		if strings.Contains(e, "new-admin") && strings.Contains(e, "USER_DEFERRED_EXCLUSION_STALE") {
+			foundErr = true
+		}
+	}
+	if !foundErr {
+		t.Errorf("errors = %v, want one naming new-admin and USER_DEFERRED_EXCLUSION_STALE", result.Errors)
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExistingUserUpdateNeverDeferred proves the
+// deferral is about NEW identities only: an EXISTING user being merely
+// updated is unaffected even if its name is (now) stale-excluded -- there
+// is nothing new to shadow, and withholding an update to an already-live
+// user would just leave it stale in a different way.
+func TestExecuteSyncUsersGroups_ExistingUserUpdateNeverDeferred(t *testing.T) {
+	var setCalls []string
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "u1", "name": "existing-admin", "descr": "[nd-template:base]", "uid": "1000"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/auth/user/set/", func(w http.ResponseWriter, r *http.Request) {
+		setCalls = append(setCalls, r.URL.Path)
+		_ = json.NewEncoder(w).Encode(opnapi.SetUserResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	auth := authDeferralInfo{Active: true, StaleNames: map[string]bool{"existing-admin": true}}
+	result := executeSyncUsersGroups(context.Background(), client,
+		[]opnapi.APIUserPayload{{Name: "existing-admin", Scope: "user"}}, nil, false, auth)
+
+	if len(setCalls) != 1 {
+		t.Errorf("SetUser calls = %v, want exactly one update (an existing user must never be deferred)", setCalls)
+	}
+	for _, r := range result.Results {
+		if r.Action == "deferred" {
+			t.Errorf("unexpected deferred result for an existing user: %+v", r)
+		}
+	}
+}
+
+// TestExecuteSyncUsersGroups_DefersNewGroupMemberWhenStale covers the
+// per-member granularity of the deferral: a member-managed GROUP's
+// already-live member is re-sent untouched, a brand-new safe member is
+// added, and a brand-new stale-named member is withheld and reported --
+// all in the same save.
+func TestExecuteSyncUsersGroups_DefersNewGroupMemberWhenStale(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "u1", "name": "existing-user", "uid": "1000"},
+				{"uuid": "u2", "name": "new-safe-user", "uid": "1002"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "g1", "name": "eng", "description": "[nd-template:base]", "gid": "2000", "member": "1000"},
+			},
+		})
+	})
+	var setBodies []map[string]interface{}
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		setBodies = append(setBodies, raw)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	auth := authDeferralInfo{Active: true, StaleNames: map[string]bool{"new-stale-user": true}}
+	groupPayload := opnapi.APIGroupPayload{
+		Name:    "eng",
+		Members: []string{"existing-user", "new-safe-user", "new-stale-user"},
+	}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, auth)
+
+	if len(setBodies) == 0 {
+		t.Fatal("expected at least one SetGroup call")
+	}
+	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
+	memberCSV, _ := groupRaw["member"].(string)
+	memberUIDs := opnapi.CSVToStrings(memberCSV)
+	wantUIDs := map[string]bool{"1000": true, "1002": true}
+	if len(memberUIDs) != len(wantUIDs) {
+		t.Fatalf("member = %q, want exactly uids 1000 and 1002 (not the stale new member)", memberCSV)
+	}
+	for _, uid := range memberUIDs {
+		if !wantUIDs[uid] {
+			t.Errorf("unexpected uid %q in member list %q", uid, memberCSV)
+		}
+	}
+
+	var deferredNames []string
+	for _, r := range result.Results {
+		if r.Action == "deferred" {
+			deferredNames = append(deferredNames, r.Name)
+		}
+	}
+	if len(deferredNames) != 1 || !strings.Contains(deferredNames[0], "new-stale-user") {
+		t.Errorf("deferred results = %v, want exactly one naming new-stale-user", deferredNames)
+	}
+	for _, r := range result.Results {
+		if r.Action == "deferred" && r.Code != authCodeUserDeferredExclusionStale {
+			t.Errorf("deferred item %q: Code = %q, want %q", r.Name, r.Code, authCodeUserDeferredExclusionStale)
+		}
+	}
+	if result.Success {
+		t.Error("expected failure -- a deferred group member must fail the task, per sync-reject-gates.md")
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExternalGroupNeverSendsMemberField is the
+// full end-to-end version of the opnapi-level unit test: an
+// external_members GROUP's create call must never carry a "member" key at
+// all on the wire, even though Members is non-empty in the payload
+// (defense-in-depth; NDManager's schema is the primary enforcement).
+func TestExecuteSyncUsersGroups_ExternalGroupNeverSendsMemberField(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	var addBody map[string]interface{}
+	mux.HandleFunc("/auth/group/add", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&addBody)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved", UUID: "g-eng-external"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	groupPayload := opnapi.APIGroupPayload{
+		Name:            "eng-external",
+		Members:         []string{"alice"}, // must never reach the wire
+		ExternalMembers: true,
+	}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+
+	if !result.Success {
+		t.Fatalf("expected success, got errors: %v", result.Errors)
+	}
+	groupRaw, _ := addBody["group"].(map[string]interface{})
+	if _, present := groupRaw["member"]; present {
+		t.Errorf("AddGroup body = %+v, want no \"member\" key for an external group", addBody)
+	}
+	privVal, privPresent := groupRaw["priv"]
+	if !privPresent || privVal != "" {
+		t.Errorf("AddGroup body priv = %#v (present=%v), want \"\" present", privVal, privPresent)
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExternalGroupUpdate_CleanMemberNeverRepaired
+// is the negative control for the external-GROUP member repair: an existing external
+// group whose stored member CSV is already clean must go through the
+// plain SetGroup path, unchanged from before the fix -- no repair read,
+// no "member" key on the wire. The repair path must never fire for the
+// overwhelming majority (healthy) case.
+func TestExecuteSyncUsersGroups_ExternalGroupUpdate_CleanMemberNeverRepaired(t *testing.T) {
+	var setBodies []map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "u1", "name": "e2e-tests", "uid": "2004"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "g1", "name": "eng-external", "description": "[nd-template:base]", "gid": "2000", "member": "2004"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		setBodies = append(setBodies, raw)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	groupPayload := opnapi.APIGroupPayload{Name: "eng-external", ExternalMembers: true, Priv: []string{"page-status-interfaces"}}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+
+	if !result.Success {
+		t.Fatalf("expected success, got errors: %v", result.Errors)
+	}
+	if len(setBodies) != 1 {
+		t.Fatalf("SetGroup calls = %d, want exactly 1", len(setBodies))
+	}
+	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
+	if _, present := groupRaw["member"]; present {
+		t.Errorf("body = %+v, want no \"member\" key when the stored value was already clean", setBodies[0])
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExternalGroupUpdate_RepairsEmptyTokenArtifact
+// is the repro-and-fix proof for an external group whose stored `member`
+// carries a leading-comma empty-token artifact (",2004" instead of
+// "2004"). That exact shape arises from ANY link into a group whose
+// stored `<member>` is present-but-empty -- most simply, a brand-new
+// external group's very first directory login (its `<member>` starts
+// empty, since NDAgent never sends one for an external group either), not
+// only a revoke-immediately-followed-by-restore cycle. Before this fix,
+// that artifact fails EVERY subsequent SetGroup call forever with
+// OPNsense's own "validation failed: {\"group.member\":\"Option [] not
+// in list.\"}", because OPNsense revalidates the group's full,
+// already-poisoned stored state on every update, regardless of what
+// NDAgent's own request body contains. With the fix, the sync succeeds:
+// NDAgent detects the artifact from a fresh read, sends an explicit
+// sanitized `member` that repairs it (without adding or removing the
+// real member, uid 2004), and the task reports success.
+func TestExecuteSyncUsersGroups_ExternalGroupUpdate_RepairsEmptyTokenArtifact(t *testing.T) {
+	var setBodies []map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "u1", "name": "e2e-tests", "uid": "2004"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				// The bad stored shape: a link into a present-but-empty
+				// <member> (a fresh group's first login, or a
+				// revoke-then-restore cycle) leaves a LEADING COMMA, not
+				// a clean "2004".
+				{"uuid": "g1", "name": "eng-external", "description": "[nd-template:base]", "gid": "2000", "member": ",2004"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		setBodies = append(setBodies, raw)
+		// A real OPNsense would reject a request that omits `member` here
+		// with the leading-comma validation error, because it revalidates the
+		// STORED (poisoned) value regardless of the request body. This
+		// mock instead asserts directly on what NDAgent actually sent,
+		// which is the reproducible, code-level claim this test needs.
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	groupPayload := opnapi.APIGroupPayload{Name: "eng-external", ExternalMembers: true, Priv: []string{"page-status-interfaces"}}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+
+	if !result.Success {
+		t.Fatalf("expected success (the whole point of the fix), got errors: %v", result.Errors)
+	}
+	if len(setBodies) != 1 {
+		t.Fatalf("SetGroup/RepairGroupMember calls = %d, want exactly 1", len(setBodies))
+	}
+	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
+	memberVal, present := groupRaw["member"]
+	if !present {
+		t.Fatalf("body = %+v, want an explicit \"member\" key to repair the poisoned value", setBodies[0])
+	}
+	if memberVal != "2004" {
+		t.Errorf("member = %v, want the sanitized \"2004\" -- the real member uid, artifact-free, never invented and never dropped", memberVal)
+	}
+	if groupRaw["priv"] != "page-status-interfaces" {
+		t.Errorf("priv = %v, want the ordinary update's priv carried through unchanged by the repair", groupRaw["priv"])
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExternalGroupUpdate_RepairsStaleUID covers the
+// second, independent artifact: a stored member CSV can also name a uid
+// whose user was deleted (UserController::delAction never scrubs other
+// groups' member CSV), which fails the same "Option [<uid>] not in
+// list." validation forever, even with no empty token at all. The repair
+// must drop only the stale uid (2999, no matching user) and keep the
+// still-current one (2004) untouched.
+func TestExecuteSyncUsersGroups_ExternalGroupUpdate_RepairsStaleUID(t *testing.T) {
+	var setBodies []map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				{"uuid": "u1", "name": "e2e-tests", "uid": "2004"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+			Rows: []map[string]interface{}{
+				// 2999 has no matching user row above -- its owner was
+				// deleted without OPNsense scrubbing this group.
+				{"uuid": "g1", "name": "eng-external", "description": "[nd-template:base]", "gid": "2000", "member": "2004,2999"},
+			},
+		})
+	})
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		setBodies = append(setBodies, raw)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	groupPayload := opnapi.APIGroupPayload{Name: "eng-external", ExternalMembers: true, Priv: []string{"page-status-interfaces"}}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+
+	if !result.Success {
+		t.Fatalf("expected success, got errors: %v", result.Errors)
+	}
+	if len(setBodies) != 1 {
+		t.Fatalf("SetGroup/RepairGroupMember calls = %d, want exactly 1", len(setBodies))
+	}
+	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
+	memberVal, present := groupRaw["member"]
+	if !present {
+		t.Fatalf("body = %+v, want an explicit \"member\" key to repair the stale uid", setBodies[0])
+	}
+	if memberVal != "2004" {
+		t.Errorf("member = %v, want the stale uid 2999 dropped and the current uid 2004 kept", memberVal)
+	}
+}
+
+// TestExecuteSyncUsersGroups_ExternalGroupUpdate_SearchErrorFailsOpen
+// covers updateExternalGroup's fail-open branch: if the fresh member read
+// itself fails (transport/decode error, not just a "group not found"),
+// the update must still go through as a plain SetGroup with no "member"
+// key -- the repair is a bonus recovery path, never a precondition for an
+// otherwise-healthy update.
+func TestExecuteSyncUsersGroups_ExternalGroupUpdate_SearchErrorFailsOpen(t *testing.T) {
+	var setBodies []map[string]interface{}
+	groupSearchCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+		groupSearchCalls++
+		if groupSearchCalls == 1 {
+			// Phase 1's ListAllGroups call -- needs to find the group so
+			// the update path is taken at all.
+			_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
+				Rows: []map[string]interface{}{
+					{"uuid": "g1", "name": "eng-external", "description": "[nd-template:base]", "gid": "2000", "member": "2004"},
+				},
+			})
+			return
+		}
+		// updateExternalGroup's own fresh read fails.
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+		var raw map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		setBodies = append(setBodies, raw)
+		_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	groupPayload := opnapi.APIGroupPayload{Name: "eng-external", ExternalMembers: true, Priv: []string{"page-status-interfaces"}}
+	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+
+	if !result.Success {
+		t.Fatalf("expected success (fail-open), got errors: %v", result.Errors)
+	}
+	if len(setBodies) != 1 {
+		t.Fatalf("SetGroup calls = %d, want exactly 1", len(setBodies))
+	}
+	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
+	if _, present := groupRaw["member"]; present {
+		t.Errorf("body = %+v, want no \"member\" key when the repair's own read failed", setBodies[0])
 	}
 }

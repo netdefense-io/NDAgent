@@ -128,7 +128,7 @@ type Decommissioner struct {
 // object families and the identity removals are then skipped, and the
 // irreversible half still runs. A deleted device must not keep the
 // package installed just because it could not reach its own API.
-func NewDecommissioner(apiClient *opnapi.Client, packageName string, shutdown func()) *Decommissioner {
+func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID string, configXMLPath string, shutdown func()) *Decommissioner {
 	d := &Decommissioner{
 		Shutdown: shutdown,
 		Backoffs: decommissionBackoffs,
@@ -148,7 +148,7 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, shutdown fu
 				return syncResultError(executeSyncAPI(ctx, apiClient, nil, nil))
 			}},
 			{Name: "users_groups", Reconcile: func(ctx context.Context) error {
-				return syncResultError(executeSyncUsersGroups(ctx, apiClient, nil, nil, false))
+				return syncResultError(executeSyncUsersGroups(ctx, apiClient, nil, nil, false, authDeferralInfo{}))
 			}},
 			{Name: "unbound", Reconcile: func(ctx context.Context) error {
 				return syncResultError(executeSyncUnbound(ctx, apiClient, nil, nil, nil, nil))
@@ -171,6 +171,20 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, shutdown fu
 			return removeAgentIdentity(ctx, apiClient)
 		}
 	}
+
+	// Placed AFTER the apiClient block, deliberately -- every other
+	// decommission family sits entirely inside `if apiClient != nil`.
+	// Auth servers have no REST API at all
+	// — the helper edits config.xml directly — so this family's
+	// ability to run never depended on apiClient in the first place, and
+	// appending it here means it runs even on a device with no OPNsense API
+	// credentials configured.
+	d.Families = append(d.Families, DecommissionFamily{
+		Name: "auth",
+		Reconcile: func(ctx context.Context) error {
+			return runAuthServerDecommission(deviceUUID, configXMLPath)
+		},
+	})
 
 	// Always wired, apiClient or not: this is the local removal path and
 	// the only one that can take netdefense-agent off the box.

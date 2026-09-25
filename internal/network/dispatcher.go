@@ -49,6 +49,13 @@ const (
 // It should send appropriate responses via the WebSocket.
 type TaskHandler func(ctx context.Context, ws *WebSocketClient, cmd Command) error
 
+// syncQueueCapacity is the SYNC-only FIFO's buffer size. Generous on
+// purpose: reaching it means dozens of SYNCs are
+// already backlogged behind one still running, at which point failing the
+// newest arrival fast (SYNC_QUEUE_FULL) is more useful than growing the
+// queue further — the next trigger simply re-syncs.
+const syncQueueCapacity = 64
+
 // CommandDispatcher handles command dispatching to task handlers.
 type CommandDispatcher struct {
 	handlers    map[string]TaskHandler
@@ -72,6 +79,33 @@ type CommandDispatcher struct {
 	ndmKeys map[string]ed25519.PublicKey // hex(kid) -> pubkey
 	// The agent's own UUID, bound into envelope verification.
 	deviceUUID string
+
+	// syncQueue and syncWorkerCtx implement the per-agent SYNC FIFO:
+	// every OTHER task type still runs in its
+	// own goroutine via dispatchCommand, but a SYNC command is enqueued
+	// here and a single worker drains it, so overlapping SYNCs can never
+	// finish out of dispatch order (the replay barrier already makes
+	// arrival order == dispatch_seq order — the FIFO just makes
+	// EXECUTION order match arrival order too).
+	//
+	// The CommandDispatcher itself is created exactly ONCE per process —
+	// by NewWebSocketClient, inside the constructor — and is reused across
+	// every ordinary WebSocket reconnect: WebSocketClient.Run loops on
+	// w.connect internally and keeps the same *CommandDispatcher for the
+	// life of the process; only a full return to Phase 1 (a permanent
+	// refusal) and a brand-new LifecycleManager.runWebSocketPhase call
+	// would ever construct a new one. Each call to
+	// ReceiveCommands, though, DOES get its own fresh loopCtx (built in
+	// runCommunicationLoop), which is cancelled when that connection ends.
+	// ensureSyncWorker must therefore be able to start a NEW worker bound
+	// to the NEW loopCtx once the OLD one's context is done — a plain
+	// sync.Once (which fires at most once for the dispatcher's entire
+	// lifetime) would leave the queue with no consumer at all after the
+	// first reconnect, silently wedging every SYNC behind it until the
+	// process restarts.
+	syncQueue     chan Command
+	syncWorkerMu  sync.Mutex
+	syncWorkerCtx context.Context // ctx of the currently-live worker; nil or Done() means none is running
 }
 
 // NewCommandDispatcher creates a new command dispatcher.
@@ -90,6 +124,7 @@ func NewCommandDispatcher(stateStore *state.Store, taskStore *taskstore.Store, l
 		lifecycleFor: lifecycleFor,
 		ndmKeys:      ndmKeys,
 		deviceUUID:   deviceUUID,
+		syncQueue:    make(chan Command, syncQueueCapacity),
 	}
 
 	// Note: Task handlers are registered by tasks.RegisterHandlers()
@@ -263,9 +298,117 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 			"kid", hex.EncodeToString(decoded.Kid),
 		)
 
+		// SYNC commands go through the per-agent
+		// FIFO instead of their own goroutine, so an older SYNC can never
+		// finish after a newer one and win. Every other task type is
+		// unaffected — dispatchCommand still runs in its own goroutine.
+		if cmd.TaskType == TaskTypeSync {
+			// Record IN_PROGRESS at ENQUEUE time, not when the worker
+			// eventually dequeues it. A SYNC can sit behind up to
+			// syncQueueCapacity-1 others; without this, a crash while
+			// this one is still queued (never yet reached
+			// dispatchCommand's own Begin call) leaves no row at all for
+			// the boot-time drain to find, so it can never send a
+			// terminal response for a task_id the broker is still
+			// waiting on. dispatchCommand's own Begin call right before
+			// the handler runs is idempotent against an already
+			// IN_PROGRESS row, so this is safe to do twice.
+			d.beginTaskState(cmd)
+
+			d.ensureSyncWorker(ctx, ws)
+			if !d.trySyncEnqueue(cmd) {
+				log.Warnw("SYNC queue full; failing this SYNC (the next trigger will re-sync)",
+					"task_id", cmd.TaskID, "capacity", syncQueueCapacity)
+				if err := ws.SendTaskResponse(cmd.TaskID, TaskStatusFailed,
+					"SYNC_QUEUE_FULL: a previous SYNC is still running and the queue is full; the next scheduled sync will retry", nil); err != nil {
+					log.Errorw("Failed to send SYNC_QUEUE_FULL response", "error", err)
+				}
+			}
+			continue
+		}
+
 		// Dispatch command in a goroutine
 		go d.dispatchCommand(ctx, ws, cmd)
 	}
+}
+
+// trySyncEnqueue attempts a non-blocking enqueue onto the SYNC FIFO.
+// Returns false when the queue is full (capacity syncQueueCapacity) — the
+// caller is responsible for reporting SYNC_QUEUE_FULL; this method touches
+// nothing but the channel, so it is testable without a WebSocketClient.
+func (d *CommandDispatcher) trySyncEnqueue(cmd Command) bool {
+	select {
+	case d.syncQueue <- cmd:
+		return true
+	default:
+		return false
+	}
+}
+
+// ensureSyncWorker starts the single SYNC-draining goroutine bound to ctx,
+// unless a worker already started under a still-live ctx is running. It is
+// called on every SYNC command ReceiveCommands sees (once per connection's
+// loopCtx), so it must both (a) never start a second concurrent worker for
+// the current connection, and (b) be able to start a fresh worker once the
+// previous connection's worker has stopped — see the syncWorkerCtx doc
+// comment on CommandDispatcher for why a one-shot sync.Once cannot do this
+// across a WebSocket reconnect. The worker calls dispatchCommand
+// SYNCHRONOUSLY (not in its own goroutine, unlike every other task type):
+// that is the FIFO — the next queued SYNC is not even started until
+// dispatchCommand returns from the previous one.
+//
+// The worker's own select loop gives workerCtx.Done() priority over the
+// queue (see the doc comment inside the goroutine below) — this function
+// decides "the previous worker is gone" purely from workerCtx.Err(), with
+// no synchronization against that worker's goroutine actually having
+// exited, so the two must agree that a done context always wins.
+func (d *CommandDispatcher) ensureSyncWorker(ctx context.Context, ws *WebSocketClient) {
+	d.syncWorkerMu.Lock()
+	defer d.syncWorkerMu.Unlock()
+
+	if d.syncWorkerCtx != nil && d.syncWorkerCtx.Err() == nil {
+		// A worker is already running for the current connection — this is
+		// the common case, since ensureSyncWorker is called on every SYNC
+		// command, not just the first.
+		return
+	}
+
+	d.syncWorkerCtx = ctx
+	go func(workerCtx context.Context) {
+		for {
+			// Check workerCtx.Done() with priority, via its own
+			// non-blocking select, before ever racing it against the
+			// queue. A single two-case `select { <-Done(); <-queue }`
+			// picks pseudo-randomly between them when BOTH are already
+			// ready — which they both are on every iteration after the
+			// connection this worker belongs to has ended (Done() does
+			// not merely become ready at some point; it STAYS ready).
+			// Without this, a worker whose connection already ended can
+			// keep winning that coin flip and go on dequeuing SYNCs
+			// under an already-cancelled context — precisely while
+			// ensureSyncWorker (above) is deciding, from the very same
+			// workerCtx.Err() != nil, that THIS worker is gone and a
+			// replacement is needed. Two workers draining d.syncQueue at
+			// once is exactly what the FIFO exists to prevent. A
+			// `default:` branch makes this check non-blocking, so a
+			// worker that still has nothing to do falls through to the
+			// real (blocking) select below exactly as before.
+			select {
+			case <-workerCtx.Done():
+				return
+			default:
+			}
+			select {
+			case <-workerCtx.Done():
+				return
+			case cmd, ok := <-d.syncQueue:
+				if !ok {
+					return
+				}
+				d.dispatchCommand(workerCtx, ws, cmd)
+			}
+		}
+	}(ctx)
 }
 
 // checkDispatchReplayBarrier enforces the dispatch-side replay barrier and
@@ -334,6 +477,31 @@ func abs(x int64) int64 {
 	return x
 }
 
+// beginTaskState records cmd as IN_PROGRESS in the local task registry,
+// nil-tolerant (tests, or environments without /var/db/ndagent write
+// access) and idempotent against an already-IN_PROGRESS row (taskstore.Begin
+// itself treats that as a no-op re-Begin) — safe to call more than once for
+// the same task_id, which is exactly what happens for a SYNC command: once
+// at enqueue time (ReceiveCommands) and again right before the handler
+// actually runs (dispatchCommand).
+func (d *CommandDispatcher) beginTaskState(cmd Command) {
+	if d.taskStore == nil || d.lifecycleFor == nil {
+		return
+	}
+	log := logging.Named("dispatcher")
+	if err := d.taskStore.Begin(cmd.TaskID, cmd.TaskType, d.lifecycleFor(cmd.TaskType)); err != nil {
+		// Don't block dispatch — the handler can still send a response;
+		// we just lose crash-recovery coverage for this one task.
+		// ErrAlreadyTerminal is expected if the broker redispatched a
+		// task we already finished; log at INFO so it's not noise.
+		log.Infow("taskstore.Begin failed",
+			"task_id", cmd.TaskID,
+			"task_type", cmd.TaskType,
+			"error", err,
+		)
+	}
+}
+
 // dispatchCommand dispatches a command to the appropriate handler.
 func (d *CommandDispatcher) dispatchCommand(ctx context.Context, ws *WebSocketClient, cmd Command) {
 	log := logging.Named("dispatcher")
@@ -375,23 +543,11 @@ func (d *CommandDispatcher) dispatchCommand(ctx context.Context, ws *WebSocketCl
 	}
 
 	// Record the task as IN_PROGRESS in the local registry before the
-	// handler runs. The lifecycle category drives boot-time drain
-	// behavior if the agent dies before the handler can send a final
-	// task_response (see internal/taskstore). nil-tolerant for tests.
-	if d.taskStore != nil && d.lifecycleFor != nil {
-		if err := d.taskStore.Begin(cmd.TaskID, cmd.TaskType, d.lifecycleFor(cmd.TaskType)); err != nil {
-			// Don't block dispatch — the handler can still send a
-			// response; we just lose crash-recovery coverage for this
-			// one task. ErrAlreadyTerminal is expected if the broker
-			// redispatched a task we already finished; log at INFO so
-			// it's not noise.
-			log.Infow("taskstore.Begin failed",
-				"task_id", cmd.TaskID,
-				"task_type", cmd.TaskType,
-				"error", err,
-			)
-		}
-	}
+	// handler runs (idempotent — beginTaskState may already have done
+	// this at enqueue time for a SYNC command). The lifecycle category
+	// drives boot-time drain behavior if the agent dies before the
+	// handler can send a final task_response (see internal/taskstore).
+	d.beginTaskState(cmd)
 
 	// Execute handler
 	if err := handler(taskCtx, ws, cmd); err != nil {

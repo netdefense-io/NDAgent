@@ -17,10 +17,12 @@ var decommissionRunner = func(
 	ctx context.Context,
 	apiClient *opnapi.Client,
 	packageName string,
+	deviceUUID string,
+	configXMLPath string,
 	shutdown func(),
 	deletedAt, kid string,
 ) error {
-	return tasks.NewDecommissioner(apiClient, packageName, shutdown).Run(ctx, deletedAt, kid)
+	return tasks.NewDecommissioner(apiClient, packageName, deviceUUID, configXMLPath, shutdown).Run(ctx, deletedAt, kid)
 }
 
 // runDecommission tears this device down after a verified tombstone.
@@ -65,7 +67,7 @@ func (l *LifecycleManager) runDecommission(ctx context.Context, req *network.Dec
 	}
 
 	started := time.Now()
-	if err := decommissionRunner(ctx, apiClient, version.PackageName, l.shutdown.RequestShutdown, deletedAt, kid); err != nil {
+	if err := decommissionRunner(ctx, apiClient, version.PackageName, l.cfg.DeviceUUID, l.cfg.ConfigXMLPath, l.shutdown.RequestShutdown, deletedAt, kid); err != nil {
 		log.Errorw("Self-decommission could not complete the uninstall step",
 			"error", err,
 			"log", tasks.DecommissionLogPath,

@@ -50,3 +50,23 @@ func TestIsProtectedGroup(t *testing.T) {
 		})
 	}
 }
+
+// TestIsProtectedGroup_CaseInsensitive is the revert guard: OPNsense's
+// own memberOf sync lowercases
+// every incoming group name and matches it against every local group by
+// lowercased name, so a differently-cased snippet name ("Admins", "ADMINS")
+// must resolve to the same protected group an exact-case check would miss.
+func TestIsProtectedGroup_CaseInsensitive(t *testing.T) {
+	tests := []string{"admins", "Admins", "ADMINS", "aDmIns", "netdefense-readonly", "Netdefense-ReadOnly", "NETDEFENSE-READONLY"}
+	for _, name := range tests {
+		t.Run(name, func(t *testing.T) {
+			if !IsProtectedGroup(name) {
+				t.Errorf("IsProtectedGroup(%q) = false, want true (case-insensitive match)", name)
+			}
+		})
+	}
+
+	if IsProtectedGroup("Someothergroup") {
+		t.Error("IsProtectedGroup(\"Someothergroup\") = true, want false (not a protected name in any case)")
+	}
+}

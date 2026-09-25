@@ -14,6 +14,8 @@ var syncSectionLabels = []struct {
 }{
 	{"alias", "Aliases"},
 	{"rule", "Rules"},
+	{"auth_server", "Auth servers"},
+	{"auth_facility", "Auth order"},
 	{"user", "Users"},
 	{"group", "Groups"},
 	{"host_override", "Unbound host-overrides"},
@@ -31,11 +33,20 @@ var syncSectionLabels = []struct {
 // used across executors (VPN emits "create", everything else emits
 // "created") into a single canonical form. Unrecognized values return
 // an empty string so the caller can skip them.
+//
+// "written" is the AUTH_ORDER facility's own vocabulary for "the value
+// changed" (its "unchanged" already reads unchanged) — counted as
+// "updated" so a facility write shows up in the summary the same way any
+// other family's modification does. Every other AUTH facility/server
+// action ("unresolved", "refused", "rejected", "blocked", "retained",
+// "deferred", etc.) is a non-mutating or blocked outcome and is
+// deliberately left unrecognized here — it belongs in errors, not in the
+// created/updated/deleted tally.
 func normalizeSyncAction(action string) string {
 	switch action {
 	case "create", "created":
 		return "created"
-	case "update", "updated":
+	case "update", "updated", "written":
 		return "updated"
 	case "delete", "deleted":
 		return "deleted"

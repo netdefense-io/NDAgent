@@ -52,12 +52,22 @@ type UserWrapper struct {
 
 // Group represents an OPNsense group for API operations.
 // Fields match the OPNsense auth/group API structure.
+//
+// Priv and SourceNetworks are deliberately NOT omitempty: an empty
+// string is OPNsense's own "clear this field" signal, so omitting the
+// key on a template-driven revoke would leave stale
+// privileges/networks on the device forever. Member stays omitempty: for a
+// member-managed GROUP an empty desired list still goes through the
+// existing len(Members)==0 skip in executeSyncUsersGroups (unrelated to
+// this struct tag), and for an external GROUP (external_members: true)
+// Member must never be sent at all -- see ConvertAPIToGroup, which never
+// populates it for those.
 type Group struct {
 	Name           string `json:"name"`
 	Description    string `json:"description"`
-	Priv           string `json:"priv,omitempty"`   // Comma-separated privileges
+	Priv           string `json:"priv"`             // Comma-separated privileges -- always sent, even ""
 	Member         string `json:"member,omitempty"` // Comma-separated UIDs
-	SourceNetworks string `json:"source_networks,omitempty"`
+	SourceNetworks string `json:"source_networks"`  // Always sent, even ""
 }
 
 // GroupWrapper wraps a group for API set operations.
@@ -94,6 +104,14 @@ type APIGroupPayload struct {
 	Members        []string `json:"members,omitempty"` // User NAMES (not UIDs)
 	SourceNetworks string   `json:"source_networks,omitempty"`
 	Templates      []string `json:"templates,omitempty"` // Template metadata
+
+	// ExternalMembers marks a GROUP whose membership the directory owns
+	// (org:su). NetDefense owns the group's
+	// existence, Priv and SourceNetworks only -- Members must be empty for
+	// an external group (enforced by NDManager's schema), and NDAgent never
+	// sends the `member` field for one regardless of what Members holds,
+	// see ConvertAPIToGroup and executeSyncUsersGroups's member phases.
+	ExternalMembers bool `json:"external_members,omitempty"`
 }
 
 // SetUserResponse is the response from user add/set endpoints.
@@ -196,4 +214,71 @@ func CSVToStrings(csv string) []string {
 		}
 	}
 	return result
+}
+
+// SanitizeMemberCSV strips structurally-empty tokens from a stored GROUP
+// "member" CSV, without altering any real member UID.
+//
+// OPNsense's own `Auth\Base::setGroupMembership` (login-time memberOf sync)
+// edits `<member>` directly via SimpleXMLElement, bypassing the MVC Group
+// model entirely, and any group whose stored `<member>` is present but
+// empty (e.g. a freshly created group's `<member></member>`, or one just
+// emptied by a directory-membership revoke) hits the same PHP quirk on its
+// next link: `explode(',', "")` returns `[""]`, not `[]`, so the merge
+// writes back a LEADING comma (e.g. ",2004" instead of "2004"). OPNsense's
+// `MemberField`/`BaseListField` validator then rejects the empty token
+// ("Option [] not in list."), and because `setBase()` revalidates the
+// WHOLE stored model on every `auth/group/set` call, this recurs on every
+// later update to the group, whatever that update sends.
+//
+// SanitizeMemberCSV never removes or reorders a real token -- it only
+// drops entries that are empty after TrimSpace, and returns the surviving
+// tokens' original bytes unchanged. changed is false whenever there is
+// nothing to repair, so a caller can decide whether an explicit repair
+// write is needed at all rather than sending "member" on every sync.
+func SanitizeMemberCSV(raw string) (sanitized string, changed bool) {
+	if raw == "" {
+		return "", false
+	}
+	parts := strings.Split(raw, ",")
+	kept := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if strings.TrimSpace(p) == "" {
+			changed = true
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, ","), changed
+}
+
+// SanitizeMemberCSVAgainstUsers extends SanitizeMemberCSV: besides
+// structurally-empty tokens, it also drops any token naming a uid with no
+// corresponding user left on the device. Deleting a user never scrubs
+// other groups' stored `member` CSV (`UserController::delAction` has no
+// safe-delete guard for this and never touches other groups), so a stale
+// uid left behind fails the same "Option [<uid>] not in list." validation
+// forever, exactly like the empty-token artifact, and needs the same kind
+// of repair. validUIDs is the caller's own snapshot of every uid currently
+// known to the device, taken in the same sync pass as this repair.
+//
+// Never drops a uid present in validUIDs, whatever its live membership
+// state -- only a token that resolves to no user at all is considered an
+// artifact here.
+func SanitizeMemberCSVAgainstUsers(raw string, validUIDs map[string]bool) (sanitized string, changed bool) {
+	deduped, emptyChanged := SanitizeMemberCSV(raw)
+	if deduped == "" {
+		return deduped, emptyChanged
+	}
+	parts := strings.Split(deduped, ",")
+	kept := make([]string, 0, len(parts))
+	staleChanged := false
+	for _, p := range parts {
+		if validUIDs[p] {
+			kept = append(kept, p)
+		} else {
+			staleChanged = true
+		}
+	}
+	return strings.Join(kept, ","), emptyChanged || staleChanged
 }
