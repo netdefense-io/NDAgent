@@ -11,7 +11,8 @@
 //     envelope's protected header (HdrDispatchSeq). Preferred over
 //     last_executed_task_id when present — fixes the case where a
 //     scheduled task's global task_id is lower than an already-executed
-//     immediate task's id (XM-12).
+//     immediate task's id, which the legacy task_id barrier alone would
+//     wrongly reject as a replay.
 //   - `next_response_seq`: device-monotonic counter included in the protected
 //     header of every outbound response envelope. Distinct from task_id
 //     because IN_PROGRESS and final responses share a task_id.

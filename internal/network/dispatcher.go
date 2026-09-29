@@ -420,8 +420,8 @@ func (d *CommandDispatcher) ensureSyncWorker(ctx context.Context, ws *WebSocketC
 //   - If decoded carries a signed dispatch_seq (HasDispatchSeq==true, i.e.
 //     NDManager minted signing.HdrDispatchSeq into the protected header),
 //     that per-device monotonic counter is authoritative and the legacy
-//     task_id barrier is skipped entirely for this envelope. This is the
-//     XM-12 fix: task_id is the GLOBAL autoincrement row id, so a
+//     task_id barrier is skipped entirely for this envelope. This matters
+//     because task_id is the GLOBAL autoincrement row id, so a
 //     scheduled task activated later can legitimately carry a lower
 //     task_id than an already-executed immediate task; gating on task_id
 //     in that case would silently drop a valid dispatch. Running both
@@ -429,9 +429,10 @@ func (d *CommandDispatcher) ensureSyncWorker(ctx context.Context, ws *WebSocketC
 //     whenever a valid dispatch_seq arrives alongside a stale task_id, so
 //     the fallback below must never also run in this branch.
 //   - Absent (an un-upgraded NDManager that hasn't started minting
-//     dispatch_seq yet) falls back to the legacy task_id barrier,
-//     unchanged from pre-XM-12 behavior. This is what makes the fix safe
-//     to ship ahead of the NDManager/NDBroker side.
+//     dispatch_seq yet) falls back to the legacy task_id barrier, the
+//     original behavior from before dispatch_seq existed. This is what
+//     lets a device run safely against an NDManager/NDBroker pair that
+//     hasn't been upgraded to mint dispatch_seq yet.
 //
 // Both barriers use strict `>` (gap-tolerant — a dropped or reordered-then-
 // caught-up sequence number is fine; only non-increasing is rejected).

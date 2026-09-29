@@ -28,7 +28,9 @@ const NDAgentWireGuardPrefix = "nd-vpn__"
 //
 // The model has exactly one field, so writing it back whole cannot clobber
 // unrelated plugin settings. The wrapper key is `general` — confirmed from
-// the GET template shape, per the OPNsense wrapper-key rule in CLAUDE.md.
+// the GET template shape (OPNsense plugin endpoints wrap their payload in
+// a key that is not always the entity name, so the wrapper must be
+// confirmed per endpoint rather than assumed).
 //
 // The switch is load-bearing beyond the tunnel itself: with it off, the
 // plugin creates no wgN interfaces, so OPNsense's `wireguard` interface

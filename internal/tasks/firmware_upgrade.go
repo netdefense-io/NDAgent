@@ -2,7 +2,7 @@ package tasks
 
 // firmware_upgrade.go — FIRMWARE_UPGRADE task handler.
 //
-// Implements the mode × reboot matrix from the plan:
+// Implements the mode × reboot matrix:
 //
 //	minor + reboot=false  → exec opnsense-update -pt (packages only, synchronous)
 //	minor + reboot=true   → REST POST /update (point release + auto-reboot)

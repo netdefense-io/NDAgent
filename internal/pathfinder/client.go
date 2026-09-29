@@ -65,9 +65,9 @@ type PeerOfflinePayload struct {
 // clean close frame — CloseNormalClosure (1000) or CloseGoingAway (1001) —
 // rather than an abrupt disconnect (1005/1006) or a network error. This is
 // NDPathFinder's cleaner-driven teardown path (session TTL expiry, idle
-// timeout) per API-CONTRACT.md's "Cleaner-driven WebSocket close frames"
-// section, and callers should classify it as a natural session end, not a
-// transport failure.
+// timeout), which always sends a real close frame with a stable reason
+// string rather than just dropping the connection, and callers should
+// classify it as a natural session end, not a transport failure.
 type ErrSessionEndedCleanly struct {
 	// Reason carries the close-frame text, e.g. "TTL expired (client never
 	// connected)" or "idle timeout (15m0s)". Callers should treat the exact
@@ -347,12 +347,13 @@ func (c *Client) RunFrameLoop(ctx context.Context) error {
 			messageType, data, err := conn.ReadMessage()
 			if err != nil {
 				// A clean close (1000/1001) is the relay's cleaner-driven
-				// teardown path (session TTL expiry, idle timeout) per
-				// API-CONTRACT.md's "Cleaner-driven WebSocket close frames"
-				// section — surface it as a typed sentinel so callers can
-				// classify it as a natural session end rather than a
-				// transport failure. Everything else (1005/1006, network
-				// errors, no close frame at all) keeps today's behavior.
+				// teardown path (session TTL expiry, idle timeout), which
+				// always sends a real close frame rather than just
+				// dropping the connection — surface it as a typed
+				// sentinel so callers can classify it as a natural
+				// session end rather than a transport failure. Everything
+				// else (1005/1006, network errors, no close frame at all)
+				// keeps today's behavior.
 				if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
 					reason := ""
 					if closeErr, ok := err.(*websocket.CloseError); ok {

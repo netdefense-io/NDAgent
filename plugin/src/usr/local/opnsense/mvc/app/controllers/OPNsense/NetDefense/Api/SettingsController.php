@@ -33,6 +33,7 @@ use OPNsense\Core\ACL;
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 
 /**
@@ -99,14 +100,26 @@ class SettingsController extends ApiMutableModelControllerBase
 
         Config::getInstance()->lock();
         $readonlyResult = ['result' => 'skipped'];
+        $passwordResult = ['result' => 'skipped', 'changed' => false];
         try {
-            $result = ApiCredsProvisioner::provision(false);
+            // provision() returns 'skipped' before it looks at an already
+            // configured user, so repair an empty password from an earlier
+            // release first. If it cannot be repaired the setup fails.
+            $passwordResult = ApiCredsProvisioner::ensurePassword();
+            $result = $passwordResult['result'] === 'failed'
+                ? ['result' => 'failed', 'message' => $passwordResult['message']]
+                : ApiCredsProvisioner::provision(false);
             // Provision the shared read-only WebAdmin user in the same
             // transaction so it exists from day one alongside the agent
-            // user. No API key, no password — only the curated read-only
-            // ACL. A failure here is non-fatal to API setup.
+            // user. No API key — only the curated read-only ACL and a
+            // scrambled password nobody knows. A failure here is non-fatal
+            // to API setup.
             $readonlyResult = ReadOnlyUserProvisioner::provision();
-            if ($result['result'] === 'ok' || $readonlyResult['result'] === 'ok') {
+            if (
+                $result['result'] === 'ok'
+                || $readonlyResult['result'] === 'ok'
+                || $passwordResult['changed']
+            ) {
                 Config::getInstance()->save();
             }
         } catch (\Exception $e) {
@@ -120,8 +133,11 @@ class SettingsController extends ApiMutableModelControllerBase
             $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
         }
 
-        if ($result['result'] === 'ok') {
+        if ($result['result'] === 'ok' || $passwordResult['changed']) {
             $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
+        }
+
+        if ($result['result'] === 'ok') {
             $backend->configdRun('template reload OPNsense/NetDefense');
 
             // Note: the generated API key/secret are intentionally not
@@ -138,6 +154,35 @@ class SettingsController extends ApiMutableModelControllerBase
         // the template so the conf reflects the current state.
         if ($readonlyResult['result'] === 'ok') {
             $backend->configdRun('template reload OPNsense/NetDefense');
+        }
+
+        // provision() answers 'skipped' once the credentials are in place, and
+        // the UI reads anything but 'ok' as a failed setup. Whatever this call
+        // wrote, a password or the read-only user and group, is a repair and
+        // answers 'ok'; 'skipped' is left for a call that changed nothing.
+        $passwords = [];
+        if ($passwordResult['changed']) {
+            $passwords[] = ApiCredsProvisioner::NETDEFENSE_USERNAME;
+        }
+        $readonlyPassword = $readonlyResult['password'] ?? LocalAccounts::PASSWORD_KEPT;
+        if ($readonlyPassword === LocalAccounts::PASSWORD_SET) {
+            $passwords[] = ReadOnlyUserProvisioner::READONLY_USERNAME;
+        }
+        $repairs = [];
+        if (!empty($passwords)) {
+            $repairs[] = 'account passwords repaired (' . implode(', ', $passwords) . ')';
+        }
+        // No password given, yet an 'ok' from the read-only provisioner still
+        // saved something: the group created, or its privileges or membership
+        // rewritten.
+        if ($readonlyResult['result'] === 'ok' && $readonlyPassword !== LocalAccounts::PASSWORD_SET) {
+            $repairs[] = 'read-only user and group reconciled (' . ReadOnlyUserProvisioner::READONLY_USERNAME . ')';
+        }
+        if ($result['result'] === 'skipped' && !empty($repairs)) {
+            return [
+                'result' => 'ok',
+                'message' => ucfirst(implode('; ', $repairs)) . '; API credentials were already configured.',
+            ];
         }
 
         return $result;

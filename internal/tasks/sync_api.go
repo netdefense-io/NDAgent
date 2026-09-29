@@ -1975,10 +1975,13 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 
 	// Phase 1: Get all users and groups for lookups.
 	//
-	// A discovery failure here fails fast (the sync-reject-gates.md
-	// precondition exception: the orphan sweep can't run safely against
-	// unreadable state) but must still preserve any dangerous-snippet
-	// rejections already recorded above.
+	// A discovery failure here fails fast: this is a whole-pass
+	// precondition (the orphan sweep can't run safely without knowing
+	// what already exists), not a per-element validation, so failing
+	// fast here is the correct exception rather than a violation of the
+	// "never fail fast" rule the per-element checks below follow. It
+	// must still preserve any dangerous-snippet rejections already
+	// recorded above.
 	allUsers, err := client.ListAllUsers(ctx)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to list users: %v", err)
@@ -2132,10 +2135,10 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 				Code:   authCodeUserDeferredExclusionStale,
 				Error:  msg,
 			})
-			// sync-reject-gates.md: a policy-driven withholding fails the
-			// TASK with an actionable reason — never a silent COMPLETED
-			// with the withholding buried in the per-item results, which
-			// is exactly what leaving `errors` untouched here would be
+			// A policy-driven withholding fails the TASK with an
+			// actionable reason — never a silent COMPLETED with the
+			// withholding buried in the per-item results, which is
+			// exactly what leaving `errors` untouched here would be
 			// (`success := len(errors) == 0` further down keys off it).
 			// The member stays out of THIS pass's create/update (above),
 			// but is untouched by the orphan-delete pass — same shape as
@@ -2172,7 +2175,7 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 			// See the matching group-member comment above: a deferral is
 			// a policy-driven withholding and must fail the task, not
 			// report a silent COMPLETED with the withholding buried in
-			// the item list (sync-reject-gates.md).
+			// the item list.
 			errors = append(errors, msg)
 			continue
 		}

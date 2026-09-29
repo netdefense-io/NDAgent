@@ -92,6 +92,10 @@ class ApiCredsProvisioner
      * the user model. When $rotateExisting=true, deletes all existing keys
      * for the user before generating a new one.
      *
+     * A user created here gets a scrambled password (LocalAccounts). An
+     * existing user's password is not looked at (the idempotent early
+     * return skips it), so ensurePassword() is the separate, explicit repair.
+     *
      * Failure compensation: if a fresh user is created here but key
      * generation fails, the just-added user is removed before returning so
      * a retry starts clean.
@@ -148,8 +152,15 @@ class ApiCredsProvisioner
             $existingUser->disabled = '0';
             $existingUser->scope = 'user';
             $existingUser->descr = 'NetDefense Agent API User (auto-generated)';
-            // Phase 1: full admin privileges (matches existing controller behavior).
+            // Full admin privileges (page-all), matching the existing controller behavior.
             $existingUser->priv = 'page-all';
+            // OPNsense refuses a user without a password; see LocalAccounts.
+            if (LocalAccounts::fillPassword($userMdl, $existingUser) === LocalAccounts::PASSWORD_FAILED) {
+                return [
+                    'result' => 'failed',
+                    'message' => 'Failed to generate a password hash for the ' . self::NETDEFENSE_USERNAME . ' user',
+                ];
+            }
             $createdFreshUser = true;
         }
 
@@ -208,6 +219,51 @@ class ApiCredsProvisioner
         return [
             'result' => 'ok',
             'message' => 'API credentials configured successfully',
+        ];
+    }
+
+    /**
+     * Give the existing netdefense-agent user a scrambled password when it
+     * has none. Never creates the user, never touches its API keys or the
+     * plugin settings, never replaces a password that is already set.
+     *
+     * Needed next to provision() because releases before this one created
+     * the user with no password, and provision() returns 'skipped' before
+     * it looks at the user once the credentials are in place. Call it before
+     * provision(): that call builds its own User model, which must see this
+     * one's result (see LocalAccounts::fillExistingPassword()).
+     *
+     * Caller owns the Config lock + save + Backend triggers, exactly as for
+     * provision(), and saves when 'changed' is true.
+     *
+     * @return array{result:string,changed:bool,message:string} result is
+     *         'ok' (password written), 'skipped' (user absent or already
+     *         has a password) or 'failed' (no hash could be generated)
+     */
+    public static function ensurePassword(): array
+    {
+        $outcome = LocalAccounts::fillExistingPassword(self::NETDEFENSE_USERNAME);
+
+        if ($outcome['failed']) {
+            return [
+                'result' => 'failed',
+                'changed' => $outcome['changed'],
+                'message' => 'Failed to generate a password hash for the ' . self::NETDEFENSE_USERNAME . ' user',
+            ];
+        }
+        if ($outcome['changed']) {
+            return [
+                'result' => 'ok',
+                'changed' => true,
+                'message' => 'Scrambled password set on the ' . self::NETDEFENSE_USERNAME . ' user',
+            ];
+        }
+        return [
+            'result' => 'skipped',
+            'changed' => false,
+            'message' => $outcome['found']
+                ? 'The ' . self::NETDEFENSE_USERNAME . ' user already has a password; no change.'
+                : 'The ' . self::NETDEFENSE_USERNAME . ' user does not exist; nothing to repair.',
         ];
     }
 

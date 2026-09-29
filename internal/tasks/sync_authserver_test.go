@@ -466,10 +466,10 @@ func TestExecuteSyncAuth_HelperProtocolFault(t *testing.T) {
 }
 
 // TestExecuteSyncAuth_HelperConsumerScanFailedFault pins CONSUMER_SCAN_FAILED
-// (added in PR #90's round-1/2 passes: "a failure of the curated scan
-// fails the family with CONSUMER_SCAN_FAILED") specifically, rather than
-// relying only on the generic AUTH_LOCK_TIMEOUT case above to exercise this
-// code path. Go has no fixed allow-list of helper fault codes — any code the
+// ("a failure of the curated scan fails the family with
+// CONSUMER_SCAN_FAILED") specifically, rather than relying only on the
+// generic AUTH_LOCK_TIMEOUT case above to exercise this code path. Go has
+// no fixed allow-list of helper fault codes — any code the
 // helper's top-level catch reports (auth_servers.php's own KNOWN_FAULT_CODES)
 // must surface verbatim, and this is the one this family's sync-mode
 // consumer pre-flight can actually produce on its own.
@@ -818,7 +818,7 @@ func TestMapAuthResponseToResult_LocalServerRisksPopulateStructuredField(t *test
 }
 
 // TestAuthFacilityBlockedMessage_AvailableAndBeforeAreDistinctFacts pins
-// the round-3 `available` wire field against `Before`: `Before`
+// the `available` wire field against `Before`: `Before`
 // is the facility's kept, unchanged order value, while `Available` is the
 // resolution set an unresolved entry was checked against ("the server
 // names that do exist") -- the two are never the same list here on
@@ -846,8 +846,8 @@ func TestAuthFacilityBlockedMessage_AvailableAndBeforeAreDistinctFacts(t *testin
 }
 
 // TestAuthFacilityBlockedMessage_OmittedAvailableIsSkipped guards the
-// backward-compat case: an older helper predating PR #90's round-3 pass
-// never sends `available` at all, which decodes to a nil slice. The
+// backward-compat case: an older helper that predates the `available`
+// field never sends it at all, which decodes to a nil slice. The
 // message must degrade gracefully (no "server names that do exist:"
 // clause with nothing after it) rather than panic or render an empty list.
 func TestAuthFacilityBlockedMessage_OmittedAvailableIsSkipped(t *testing.T) {
@@ -1098,8 +1098,8 @@ func TestAuthServerBlockedMessage_ConsumerReferencedWebadminRemedy(t *testing.T)
 }
 
 // TestAuthServerBlockedMessage_CreateActivatesLoginPathNamesConsumers pins
-// the dangling-token create check's CREATE_ACTIVATES_LOGIN_PATH message: the blocking login-order
-// entries now travel structurally in Consumers (PR #90 round 5), and Go
+// the dangling-token create check's CREATE_ACTIVATES_LOGIN_PATH message: the
+// blocking login-order entries travel structurally in Consumers, and Go
 // must render them by name instead of leaving the operator to go read the
 // device log for the helper's own "warnings" free text.
 func TestAuthServerBlockedMessage_CreateActivatesLoginPathNamesConsumers(t *testing.T) {
@@ -1114,8 +1114,8 @@ func TestAuthServerBlockedMessage_CreateActivatesLoginPathNamesConsumers(t *test
 }
 
 // TestAuthServerBlockedMessage_InvalidSubcodesGetDetail is a table test
-// over every AuthServerAlgo::AUTH_SERVER_INVALID_* sub-code (PR #90 round
-// 4) plus the pre-round-4 generic fallback: each must render its own
+// over every AuthServerAlgo::AUTH_SERVER_INVALID_* sub-code plus the
+// generic fallback: each must render its own
 // human-readable detail clause (authServerInvalidSubcodeDetail), and an
 // unrecognized code must degrade to just the bare code with no detail
 // clause appended (rather than panicking on a missing map entry).

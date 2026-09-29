@@ -27,8 +27,7 @@
  * (.../opnsense/FreeBSD:14:amd64/, .../opnsense/FreeBSD:15:amd64/) and,
  * for freebsd14 publishes only, also mirrors the same content to the flat
  * .../opnsense/ root as a bootstrap safety net for any device that never
- * runs this migration. See build/README.md's "Dual-ABI package
- * repository" section for the full design.
+ * runs this migration.
  *
  * Wired into +MANIFEST's post-install hook next to ensure_readonly.php,
  * so it runs on every `pkg install`/`pkg upgrade` — the PLUGIN_INSTALL

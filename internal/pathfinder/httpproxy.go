@@ -339,11 +339,11 @@ var firewallStateActionPattern = regexp.MustCompile(`^/api/diagnostics/firewall/
 
 // isMutatingRuntimeAction reports whether the given method+path is a
 // mutating request to a runtime-action route that OPNsense's ACL model
-// permits even for a read-only operator (see the ACL split documented in
-// CLAUDE.md: service start/stop/restart/reload/reconfigure, and firewall
-// state kill/flush, bypass the user-config-readonly backstop because they
-// are not config writes). GET/HEAD/OPTIONS are never mutating and must pass
-// through untouched — in particular, every OPNsense grid/list view loads via
+// permits even for a read-only operator: service
+// start/stop/restart/reload/reconfigure, and firewall state kill/flush,
+// bypass the user-config-readonly backstop because they are not config
+// writes. GET/HEAD/OPTIONS are never mutating and must pass through
+// untouched — in particular, every OPNsense grid/list view loads via
 // POST to search*/searchItem/search_* endpoints, which this function does
 // not match.
 func isMutatingRuntimeAction(method, path string) bool {

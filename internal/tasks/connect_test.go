@@ -272,8 +272,7 @@ func TestHandleConnectAllowsWhenPolicyFull(t *testing.T) {
 //
 // NDPathFinder's cleaner-driven teardown (session TTL expiry, idle timeout)
 // closes the WebSocket with a clean close frame (code 1000/1001) carrying a
-// stable reason string — see API-CONTRACT.md's "Cleaner-driven WebSocket
-// close frames" section. That must classify as a SUCCESS task, not FAILED;
+// stable reason string. That must classify as a SUCCESS task, not FAILED;
 // a genuine transport failure (1005/1006, network error) must still FAIL.
 
 // TestClassifyPathfinderSessionEnd_CleanCloseReasons pins the SUCCESS path

@@ -79,11 +79,13 @@ func TestDispatchSeqBarrier_StrictlyIncreasingAccepted_LEqRejected_GapsTolerated
 	}
 }
 
-// TestDispatchSeqBarrier_XM12Repro is the XM-12 repro at the agent layer:
-// seq 5 accepted -> seq 6 accepted -> a late seq 5 rejected, BUT a
-// task_id-only envelope (no dispatch_seq) is still governed by the
-// task_id barrier, independently.
-func TestDispatchSeqBarrier_XM12Repro(t *testing.T) {
+// TestDispatchSeqBarrier_TaskIDEnvelopeUnaffectedByDispatchSeqBarrier pins
+// that the two replay barriers are independent: seq 5 accepted -> seq 6
+// accepted -> a late seq 5 rejected, BUT a task_id-only envelope (no
+// dispatch_seq) arriving afterward is still governed by its own
+// independent task_id barrier, starting fresh, unaffected by any of the
+// dispatch_seq activity above.
+func TestDispatchSeqBarrier_TaskIDEnvelopeUnaffectedByDispatchSeqBarrier(t *testing.T) {
 	d := newTestDispatcher(t)
 
 	if err := d.checkDispatchReplayBarrier(envelopeWithDispatchSeq(1000, 5)); err != nil {
@@ -113,7 +115,8 @@ func TestDispatchSeqBarrier_XM12Repro(t *testing.T) {
 
 // TestDispatchSeqBarrier_AbsentFallsBackToTaskIDBarrier proves old-NDManager
 // compatibility: when dispatch_seq is never present, behavior is exactly
-// the pre-XM-12 task_id barrier (strict >, persisted, replay rejected).
+// the legacy task_id barrier from before dispatch_seq existed (strict >,
+// persisted, replay rejected).
 func TestDispatchSeqBarrier_AbsentFallsBackToTaskIDBarrier(t *testing.T) {
 	d := newTestDispatcher(t)
 
@@ -181,16 +184,17 @@ func TestDispatchSeqBarrier_PersistsAcrossRestart(t *testing.T) {
 	}
 }
 
-// TestDispatchSeqBarrier_NoCrossContamination is the core XM-12 fix
-// assertion: a dispatch_seq envelope whose task_id is LOWER than the
-// already-persisted last_executed_task_id is still ACCEPTED, because the
-// two barriers are independent and a present dispatch_seq always wins.
+// TestDispatchSeqBarrier_NoCrossContamination pins the core guarantee this
+// dual-barrier design exists for: a dispatch_seq envelope whose task_id is
+// LOWER than the already-persisted last_executed_task_id is still
+// ACCEPTED, because the two barriers are independent and a present
+// dispatch_seq always wins.
 func TestDispatchSeqBarrier_NoCrossContamination(t *testing.T) {
 	d := newTestDispatcher(t)
 
 	// Advance the task_id barrier via an immediate task with a HIGH
-	// task_id (as XM-12 describes: an immediate task fires after a
-	// deferred/scheduled task was already minted with a lower id).
+	// task_id (an immediate task fires after a deferred/scheduled task
+	// was already minted with a lower id).
 	if err := d.checkDispatchReplayBarrier(envelopeWithoutDispatchSeq(1001)); err != nil {
 		t.Fatalf("task_id=1001 should be accepted: %v", err)
 	}
@@ -200,12 +204,13 @@ func TestDispatchSeqBarrier_NoCrossContamination(t *testing.T) {
 
 	// Now the deferred/scheduled task activates: task_id=1000 (LOWER
 	// than last_executed_task_id=1001) but it carries a valid,
-	// strictly-increasing dispatch_seq. Under the old global task_id
-	// barrier this would have been silently dropped (1000 <= 1001) —
-	// that's exactly XM-12. With dispatch_seq present, the task_id
-	// barrier must be skipped entirely and this envelope accepted.
+	// strictly-increasing dispatch_seq. Under the legacy global task_id
+	// barrier alone this would have been silently dropped (1000 <= 1001)
+	// — the exact failure mode a per-device dispatch_seq exists to
+	// prevent. With dispatch_seq present, the task_id barrier must be
+	// skipped entirely and this envelope accepted.
 	if err := d.checkDispatchReplayBarrier(envelopeWithDispatchSeq(1000, 1)); err != nil {
-		t.Fatalf("XM-12 case: task_id=1000 (< last_executed=1001) with dispatch_seq=1 should be ACCEPTED, got: %v", err)
+		t.Fatalf("task_id=1000 (< last_executed=1001) with dispatch_seq=1 should be ACCEPTED, got: %v", err)
 	}
 	if got := d.state.LastDispatchSeq(); got != 1 {
 		t.Errorf("LastDispatchSeq() = %d, want 1", got)

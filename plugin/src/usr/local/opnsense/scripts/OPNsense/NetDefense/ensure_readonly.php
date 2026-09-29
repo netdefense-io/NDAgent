@@ -18,9 +18,11 @@
 
 /**
  * Token-free entry point: idempotently reconcile the netdefense-readonly
- * OPNsense user + group to the desired state (READONLY_PRIVS), and
- * grandfather any Settings field whose default changed after a device's
- * config.xml was last saved — on every package install or upgrade.
+ * OPNsense user + group to the desired state (READONLY_PRIVS), give the
+ * netdefense-agent and netdefense-readonly users a scrambled password when
+ * they have none, and grandfather any Settings field whose default changed
+ * after a device's config.xml was last saved — on every package install or
+ * upgrade.
  *
  * This script is invoked directly from the +MANIFEST post-install hook
  * after configd restarts, so it runs on every `pkg install` AND every
@@ -31,8 +33,15 @@
  *
  * Does NOT require --token. Does NOT touch the agent token, device_uuid,
  * API key/secret, or any other Settings field beyond the two narrow
- * default-migrations below. Only calls ReadOnlyUserProvisioner::provision()
- * and fires the necessary backend triggers.
+ * default-migrations below. Only calls ApiCredsProvisioner::ensurePassword()
+ * and ReadOnlyUserProvisioner::provision() and fires the necessary backend
+ * triggers.
+ *
+ * Passwords: earlier releases created both accounts with an empty one, which
+ * makes OPNsense's own migration runner abort once any <user> lacks a uuid
+ * attribute. An account with no password gets a random hash; one that already
+ * has a password is never replaced. The agent account is never created or
+ * deleted here. See LocalAccounts.
  *
  * Config-default migrations performed here. Both follow the same shape:
  * only touch config.xml when the plugin is already configured (token
@@ -51,16 +60,18 @@
  *     silently start rejecting dangerous SYNC_API snippet content it was
  *     already applying, now that Settings.xml's <Default> for this field
  *     is "1" (secure-by-default). This is the grandfathering mechanism for
- *     the reject_dangerous_snippets default flip — see CLAUDE.md's
- *     "Device-local dangerous-snippet gate" section for the full story
- *     (the Go-side default, this reconcile, and the rejection message
- *     format all need to stay in sync).
+ *     the reject_dangerous_snippets default flip (the Go-side default,
+ *     this reconcile, and the rejection message format all need to stay
+ *     in sync).
  *
  * Usage:
  *   ensure_readonly.php [--json]
  *
  * Exit codes:
- *   0   ok or skipped (no change needed)
+ *   0   ok or skipped (no change needed), or a password could not be hashed
+ *       — that is logged and reported as a warning but is never fatal, since
+ *       the +MANIFEST hook runs this script without `|| true` and a
+ *       password problem must not fail the pkg transaction
  *   1   failed
  */
 
@@ -70,28 +81,59 @@ require_once 'script/load_phalcon.php';
 
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
+use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
 
 $json = in_array('--json', $argv ?? [], true);
 
-function emit_ro(array $result, int $code, bool $asJson): void
+function emit_ro(array $result, int $code, bool $asJson, array $notes = []): void
 {
     if ($asJson) {
         echo json_encode($result, JSON_UNESCAPED_SLASHES) . "\n";
     } else {
         echo $result['message'] . "\n";
+        foreach ($notes as $note) {
+            echo $note . "\n";
+        }
     }
     exit($code);
 }
 
+/**
+ * Mirror a line to syslog: a bare `pkg upgrade` or the Firmware GUI do not
+ * keep the post-install stdout anywhere persistent, and the account
+ * passwords are otherwise changed silently.
+ *
+ * Opened once and never closed: on OPNsense 26.7 (syslog-ng 4.12) a closelog()
+ * followed by another openlog() in the same process loses every line after
+ * the first.
+ */
+function log_ro(int $priority, string $message): void
+{
+    static $opened = false;
+    if (!$opened) {
+        openlog('ndagent-ensure-readonly', LOG_PID, LOG_DAEMON);
+        $opened = true;
+    }
+    syslog($priority, $message);
+}
+
 $gotLock = false;
 $roResult = null;
+$agentPassword = ['result' => 'skipped', 'changed' => false, 'message' => ''];
 $settingsChanged = false;
 
 try {
     Config::getInstance()->lock();
     $gotLock = true;
+
+    // Fill in an empty password on the agent's own account. Runs before the
+    // read-only provisioner so each one builds its User model after the
+    // previous one was serialized: the whole user set is rewritten from
+    // whichever instance serializes last.
+    $agentPassword = ApiCredsProvisioner::ensurePassword();
 
     // Reconcile user + group + priv set to desired state.
     $roResult = ReadOnlyUserProvisioner::provision();
@@ -151,7 +193,7 @@ try {
         $settingsChanged = true;
     }
 
-    if ($roResult['result'] === 'ok' || $settingsChanged) {
+    if ($roResult['result'] === 'ok' || $agentPassword['changed'] || $settingsChanged) {
         Config::getInstance()->save();
     }
 
@@ -175,6 +217,10 @@ if ($roResult['result'] === 'ok') {
     $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
 }
 
+if ($agentPassword['changed']) {
+    $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
+}
+
 // Always reload the template so ndagent.conf reflects any state change —
 // the read-only user was just created/repaired, or one of the
 // webadminReadonlyUser / rejectDangerousSnippets defaults was just
@@ -190,8 +236,38 @@ $msg = isset($messages[$roResult['result']])
     ? $messages[$roResult['result']]
     : $roResult['message'] ?? 'Unknown result.';
 
-emit_ro(
-    ['result' => $roResult['result'], 'message' => $msg],
-    $roResult['result'] === 'failed' ? 1 : 0,
-    $json
-);
+$notes = [];
+$warnings = [];
+if ($agentPassword['result'] === 'ok') {
+    $notes[] = $agentPassword['message'];
+} elseif ($agentPassword['result'] === 'failed') {
+    $warnings[] = $agentPassword['message'];
+}
+$roPassword = $roResult['password'] ?? LocalAccounts::PASSWORD_KEPT;
+if ($roPassword === LocalAccounts::PASSWORD_SET) {
+    $notes[] = 'Scrambled password set on the ' . ReadOnlyUserProvisioner::READONLY_USERNAME . ' user';
+} elseif ($roPassword === LocalAccounts::PASSWORD_FAILED) {
+    $warnings[] = 'Failed to generate a password hash for the ' . ReadOnlyUserProvisioner::READONLY_USERNAME . ' user';
+}
+foreach ($notes as $note) {
+    log_ro(LOG_NOTICE, $note);
+}
+foreach ($warnings as $warning) {
+    log_ro(LOG_WARNING, $warning);
+    $notes[] = 'WARNING: ' . $warning . '. Retry with: configctl netdefense ensure-readonly';
+}
+
+$payload = [
+    'result' => $roResult['result'],
+    'message' => $msg,
+    'agent_password' => $agentPassword['result'],
+];
+if (!empty($warnings)) {
+    $payload['warnings'] = $warnings;
+}
+
+// A provisioner that failed only because it could not hash a password is a
+// warning, not a failure: see the exit codes above.
+$roFailed = $roResult['result'] === 'failed' && $roPassword !== LocalAccounts::PASSWORD_FAILED;
+
+emit_ro($payload, $roFailed ? 1 : 0, $json, $notes);

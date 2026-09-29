@@ -32,9 +32,10 @@ use OPNsense\Auth\User;
  * group, hardened with the global `user-config-readonly` deny-config-write
  * priv as defense-in-depth.
  *
- * The user has NO API key and NO password: it is never used for REST or a
- * real login, only as the forged-session identity. See
- * internal/tasks/connect.go (read_only flag) and
+ * The user has NO API key and a scrambled password nobody knows: it is
+ * never used for REST or a real login, only as the forged-session identity.
+ * The password exists because OPNsense rejects a user without one (see
+ * LocalAccounts). See internal/tasks/connect.go (read_only flag) and
  * internal/pathfinder/session.go (CreateSession).
  *
  * Mirrors ApiCredsProvisioner's idempotency contract: the caller owns the
@@ -402,25 +403,48 @@ class ReadOnlyUserProvisioner
      * Config tree via the User/Group models.
      *
      * Idempotency: if the group exists with the curated priv set, the user
-     * exists with the right shape, and the user is already a member, returns
+     * exists with a password, and the user is already a member, returns
      * ['result'=>'skipped',...] without churn. Otherwise it creates/repairs
-     * whichever pieces are missing (group, user, membership, priv set) and
-     * returns ['result'=>'ok',...].
+     * whichever pieces are missing (group, user, user password, membership,
+     * priv set) and returns ['result'=>'ok',...]. An existing password is
+     * never replaced; an empty one (from a release that created the user
+     * without) gets a scrambled hash, on every row of that name (a
+     * hand-edited or merged config.xml can hold it twice).
      *
-     * @return array{result:string,message:string}
+     * 'password' is 'set', 'kept' or 'failed' (LocalAccounts::PASSWORD_*);
+     * 'failed' wins when any row could not be hashed. A failure to hash never
+     * aborts the group reconcile of an existing user; only a user that cannot
+     * be created without a password returns result 'failed' for it, before
+     * anything is written.
+     *
+     * @return array{result:string,message:string,password:string}
      */
     public static function provision(): array
     {
         $changed = false;
+        $password = LocalAccounts::PASSWORD_KEPT;
 
         // --- User: ensure it exists with the correct shape. ---
         $userMdl = new User();
         $userUid = null;
+        $anyFailed = false;
         foreach ($userMdl->user->iterateItems() as $user) {
-            if ((string)$user->name === self::READONLY_USERNAME) {
-                $userUid = (string)$user->uid;
-                break;
+            if ((string)$user->name !== self::READONLY_USERNAME) {
+                continue;
             }
+            // The group <member> takes the uid of the first row; every row
+            // still needs its password, or OPNsense's validation rejects it.
+            if ($userUid === null) {
+                $userUid = (string)$user->uid;
+            }
+            $outcome = LocalAccounts::fillPassword($userMdl, $user);
+            $changed = $changed || $outcome === LocalAccounts::PASSWORD_SET;
+            $anyFailed = $anyFailed || $outcome === LocalAccounts::PASSWORD_FAILED;
+        }
+        if ($anyFailed) {
+            $password = LocalAccounts::PASSWORD_FAILED;
+        } elseif ($changed) {
+            $password = LocalAccounts::PASSWORD_SET;
         }
 
         if ($userUid === null) {
@@ -432,8 +456,17 @@ class ReadOnlyUserProvisioner
             $user->disabled = '0';
             $user->scope = 'user';
             $user->descr = 'NetDefense read-only WebAdmin user (auto-generated)';
-            // No password, no API key, no per-user priv. The group carries
-            // the curated ACL; the forged PHP session carries the identity.
+            // No API key, no per-user priv. The group carries the curated
+            // ACL; the forged PHP session carries the identity. The password
+            // is scrambled: OPNsense refuses a user without one.
+            if (LocalAccounts::fillPassword($userMdl, $user) === LocalAccounts::PASSWORD_FAILED) {
+                return [
+                    'result' => 'failed',
+                    'message' => 'Failed to generate a password hash for the ' . self::READONLY_USERNAME . ' user',
+                    'password' => LocalAccounts::PASSWORD_FAILED,
+                ];
+            }
+            $password = LocalAccounts::PASSWORD_SET;
             $changed = true;
         }
 
@@ -517,12 +550,14 @@ class ReadOnlyUserProvisioner
             return [
                 'result' => 'skipped',
                 'message' => 'Read-only webadmin user already provisioned; no change.',
+                'password' => $password,
             ];
         }
 
         return [
             'result' => 'ok',
             'message' => 'Read-only webadmin user provisioned successfully',
+            'password' => $password,
         ];
     }
 

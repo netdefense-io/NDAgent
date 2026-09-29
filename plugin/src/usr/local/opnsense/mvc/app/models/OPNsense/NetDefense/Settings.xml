@@ -92,8 +92,7 @@
                  (internal/tasks/connect.go) refuses or clamps before the
                  relay is dialed, and the pathfinder proxy's per-stream
                  chokepoint (internal/pathfinder/proxy.go) re-checks so the
-                 guarantee does not depend on a single caller. See CLAUDE.md's
-                 "Device-local remote-access ceiling" section. -->
+                 guarantee does not depend on a single caller. -->
             <Default>full</Default>
             <Required>Y</Required>
             <OptionValues>
@@ -123,8 +122,7 @@
                  rejectDangerousSnippets node. That migration is what preserves
                  the grandfathered permissive setting on fleets that predate
                  the secure-by-default flip — without it, those devices would
-                 silently tighten on upgrade. See CLAUDE.md's "Device-local
-                 dangerous-snippet gate" section. -->
+                 silently tighten on upgrade. -->
             <Default>0</Default>
             <Required>Y</Required>
         </allowAllSnippetContent>

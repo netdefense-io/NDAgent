@@ -62,6 +62,7 @@ require_once 'script/load_phalcon.php';
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
 
@@ -400,20 +401,30 @@ try {
     // is the more important half. We save what we have and report exit 21.
 
     $apiSetupResult = null;
+    $passwordResult = null;
     if ($doSetupApi) {
-        $apiSetupResult = ApiCredsProvisioner::provision(false);
+        // provision() returns 'skipped' before it looks at an already
+        // configured user, so repair an empty password from an earlier
+        // release first. If it cannot be repaired the API step fails:
+        // success would leave it unfixed with nothing pointing at it.
+        $passwordResult = ApiCredsProvisioner::ensurePassword();
+        $result['agent_password'] = $passwordResult['result'];
+        $apiSetupResult = $passwordResult['result'] === 'failed'
+            ? ['result' => 'failed', 'message' => $passwordResult['message']]
+            : ApiCredsProvisioner::provision(false);
         $result['api_setup'] = $apiSetupResult['result'];
         // Note: the actual key/secret are deliberately not propagated
         // here — they're already in config.xml and the rendered
         // ndagent.conf. The operator never needs to see them.
 
         // Provision the shared read-only WebAdmin user in the same
-        // transaction so it exists from day one. It has no API key and
-        // no password — only the curated read-only ACL — so a failure
-        // here is non-fatal to the agent (token/API are the load-bearing
-        // halves). Report it but don't change the exit path.
+        // transaction so it exists from day one. It has no API key — only
+        // the curated read-only ACL and a scrambled password nobody knows —
+        // so a failure here is non-fatal to the agent (token/API are the
+        // load-bearing halves). Report it but don't change the exit path.
         $readonlyResult = ReadOnlyUserProvisioner::provision();
         $result['readonly_setup'] = $readonlyResult['result'];
+        $result['readonly_password'] = $readonlyResult['password'] ?? LocalAccounts::PASSWORD_KEPT;
     }
 
     Config::getInstance()->save();
@@ -433,7 +444,11 @@ try {
 // Backend triggers (outside the Config lock).
 $backend = new Backend();
 
-if ($doSetupApi && isset($apiSetupResult) && $apiSetupResult['result'] === 'ok') {
+if (
+    $doSetupApi
+    && ((isset($apiSetupResult) && $apiSetupResult['result'] === 'ok')
+        || (isset($passwordResult) && $passwordResult['changed']))
+) {
     $backend->configdpRun('auth sync user', [ApiCredsProvisioner::NETDEFENSE_USERNAME]);
 }
 

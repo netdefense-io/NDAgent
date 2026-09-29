@@ -208,8 +208,9 @@ class AuthServerAlgo
     // (NDDataModels/Schema.py, `_ldap_parse_*` / `parse_ldap_extended_
     // query`) so both sides accept and reject exactly the same inputs —
     // pinned by the shared fixture table `tests/fixtures/auth/
-    // ldap_extended_query_parser.json` (copied verbatim from NDDataModels
-    // PR #43 @ 05131cc; see plugin/tests/fixtures/auth/SOURCE.md).
+    // ldap_extended_query_parser.json`, copied verbatim from NDDataModels'
+    // own fixture of the same name so both parsers are tested against
+    // identical inputs.
     //
     // Deliberately a "small parser": accepts `simple`, `present`,
     // `substring`, `and`, `or`, `not` and `extensible` filter items;
@@ -897,8 +898,7 @@ class AuthServerAlgo
     //
     // Ported verbatim from NDDataModels' `local_database_rule()` and
     // pinned against the same fixture table
-    // (tests/fixtures/auth/local_database_rule.json — see
-    // plugin/tests/fixtures/auth/SOURCE.md).
+    // (tests/fixtures/auth/local_database_rule.json).
     // -----------------------------------------------------------------
 
     /** @throws \RuntimeException naming only the rule, never the order. */
@@ -1302,15 +1302,15 @@ class AuthServerAlgo
     // OPNsense dependency, so this is unit-testable with plain XML
     // strings.
     //
-    // Round-2 fix (item 2): leaf TEXT alone is not the whole document.
-    // Two axes were previously invisible to this differ, both closeable
-    // without any OPNsense dependency:
+    // Leaf TEXT alone is not the whole document. The diff also covers two
+    // further axes, both without any OPNsense dependency:
     //   - XML ATTRIBUTES. `DOMNode::childNodes` never yields attribute
     //     nodes, so a value that moved from an element's text into (or
     //     out of) an attribute on that SAME element, or an attribute that
-    //     simply changed while the element's own text stayed put, was
-    //     invisible — outside the allow-list, that is exactly the kind of
-    //     mutation the write allow-list diff exists to catch.
+    //     simply changed while the element's own text stayed put, would
+    //     otherwise be invisible — outside the allow-list, that is
+    //     exactly the kind of mutation the write allow-list diff exists
+    //     to catch.
     //   - ELEMENT PRESENCE. Pure leaf-text diffing gets this right almost
     //     by construction (an absent leaf is `null`, a present-but-empty
     //     one is `''`, and `null !== ''`), but it depends on that

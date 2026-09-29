@@ -801,14 +801,14 @@ func TestExecuteSyncUsersGroups_DefersNewUserWhenStale(t *testing.T) {
 	}
 
 	// A deferral is a policy-driven withholding, same shape as the
-	// dangerous-field rejection gate (sync-reject-gates.md): it must FAIL
-	// the task with an actionable reason, never report a silent COMPLETED
-	// with the withholding buried in the per-item results. It is expected
-	// to self-heal on a LATER sync, which is why it is safe to leave
-	// FAILED rather than something more drastic -- but this pass must
-	// still say so.
+	// dangerous-field rejection gate: it must FAIL the task with an
+	// actionable reason, never report a silent COMPLETED with the
+	// withholding buried in the per-item results. It is expected to
+	// self-heal on a LATER sync, which is why it is safe to leave FAILED
+	// rather than something more drastic -- but this pass must still say
+	// so.
 	if result.Success {
-		t.Error("expected failure (a deferral must fail the task, per sync-reject-gates.md), got success")
+		t.Error("expected failure (a deferral must fail the task), got success")
 	}
 	foundErr := false
 	for _, e := range result.Errors {
@@ -932,7 +932,7 @@ func TestExecuteSyncUsersGroups_DefersNewGroupMemberWhenStale(t *testing.T) {
 		}
 	}
 	if result.Success {
-		t.Error("expected failure -- a deferred group member must fail the task, per sync-reject-gates.md")
+		t.Error("expected failure -- a deferred group member must fail the task")
 	}
 }
 

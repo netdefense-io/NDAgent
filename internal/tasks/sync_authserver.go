@@ -16,10 +16,10 @@ package tasks
 // AUTH_SERVER / AUTH_ORDER: the Go side of the NDAgent contract for LDAP/AD
 // directory integration. The PHP helper implementing the OPNsense-side
 // algorithm ships in `plugin/.../AuthServerHelper.php` and
-// `plugin/.../auth_servers.php` (PR #5, feature/auth-server-helper-pr5).
-// This file is the strict-parsing gate, the helper invocation with
-// its process-safety rules, and the response mapping back into the
-// same SyncAPIItemResult shape every other SYNC_API family reports.
+// `plugin/.../auth_servers.php`. This file is the strict-parsing gate,
+// the helper invocation with its process-safety rules, and the response
+// mapping back into the same SyncAPIItemResult shape every other
+// SYNC_API family reports.
 //
 // AUTH_SERVER has no OPNsense REST API at all — the legacy
 // system_authservers.php page writes system/authserver[] via write_config(),
@@ -28,9 +28,9 @@ package tasks
 // REST/MVC API (aliases, rules, users, groups, VPN, Unbound, Zabbix all go
 // through internal/opnapi's HTTP client). AUTH_SERVER/AUTH_ORDER instead
 // shell out to a PHP helper that edits config.xml directly, because there
-// is no REST surface to call. Do not follow this pattern for anything that
-// DOES have a REST/MVC model — see CLAUDE.md's "Firewall rules/aliases:
-// MVC API only" rule, which this does not relax.
+// is no REST surface to call. This is narrowly scoped to the one OPNsense
+// subsystem with no REST/MVC surface at all — do not follow this pattern
+// for anything that DOES have a REST/MVC model.
 
 import (
 	"bytes"
@@ -984,14 +984,14 @@ func mapAuthResponseToResult(resp authHelperSyncResponse, rejectDangerous bool) 
 }
 
 // authServerInvalidSubcodeDetail maps every AuthServerAlgo::AUTH_SERVER_
-// INVALID_* sub-code (PR #90 round 4, AuthServerAlgo.php's
-// AUTH_SERVER_INVALID_CODES catalogue — validateServerName/
-// validateServerFieldsShape/validateServerFieldsRequired) to a
-// human-readable detail clause, plus the pre-round-4 generic fallback
-// AUTH_SERVER_INVALID a helper predating that round (or an unexpected
-// exception the helper's own allow-list check declines to surface
-// verbatim) still reports. Grouped by rule CATEGORY, matching the PHP
-// side's own stated granularity — not one entry per exact sub-reason.
+// INVALID_* sub-code (AuthServerAlgo.php's AUTH_SERVER_INVALID_CODES
+// catalogue — validateServerName/validateServerFieldsShape/
+// validateServerFieldsRequired) to a human-readable detail clause, plus
+// the generic fallback AUTH_SERVER_INVALID that a helper without
+// per-field sub-codes (or an unexpected exception the helper's own
+// allow-list check declines to surface verbatim) still reports. Grouped
+// by rule CATEGORY, matching the PHP side's own stated granularity — not
+// one entry per exact sub-reason.
 var authServerInvalidSubcodeDetail = map[string]string{
 	"AUTH_SERVER_INVALID":                  "one of this server's fields failed device-side validation",
 	"AUTH_SERVER_INVALID_NAME":             "the server name is empty, too long, contains a disallowed character, has leading/trailing space, or is reserved (\"Local Database\"/\"Local API\")",
@@ -1110,8 +1110,8 @@ var authFacilityInvalidDetail = map[string]string{
 // names that do exist", checkRuleInterfaces-style wording) —
 // use it for that, rather than `Before` (the device's kept order value,
 // a distinct fact reported separately below). An older helper that
-// predates the `available` field (round-3 PR #90) simply omits the key,
-// which decodes to a nil slice here and is skipped.
+// predates the `available` field simply omits the key, which decodes to
+// a nil slice here and is skipped.
 func authFacilityBlockedMessage(fname string, f authHelperFacilityResult, release string) string {
 	msg := fmt.Sprintf("auth order %q: %s", fname, f.Code)
 	if len(f.Unresolved) > 0 {
