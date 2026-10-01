@@ -24,7 +24,7 @@
 package pkgmgr
 
 import (
-	"sync"
+	"context"
 	"time"
 )
 
@@ -38,12 +38,32 @@ const (
 	addURLTimeout = 900 * time.Second
 )
 
+// lock is a mutex that can also be waited for under a context, for a caller
+// that must not sit behind a ten-minute install past its own deadline. It is not
+// reentrant either.
+type lock struct{ token chan struct{} }
+
+func newLock() *lock { return &lock{token: make(chan struct{}, 1)} }
+
+func (l *lock) Lock()   { l.token <- struct{}{} }
+func (l *lock) Unlock() { <-l.token }
+
+// LockContext takes the lock, or returns the context's error if that ends first.
+func (l *lock) LockContext(ctx context.Context) error {
+	select {
+	case l.token <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // pkgMu serializes pkg(8) invocations within this process. Reads are
 // included deliberately: `pkg info` consults the same local database that
 // `pkg install` is writing, so letting them overlap would reintroduce the
 // collision this exists to prevent.
 //
 // Held only for the duration of one invocation. Never hold it across two,
-// and never call an exported wrapper from inside another — sync.Mutex is
-// not reentrant and would deadlock.
-var pkgMu sync.Mutex
+// and never call an exported wrapper from inside another — it is not
+// reentrant and would deadlock.
+var pkgMu = newLock()

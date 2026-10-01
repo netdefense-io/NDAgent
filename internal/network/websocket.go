@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -71,8 +72,13 @@ type AuthResponse struct {
 // fields below from the verified bytes. Outer task_id is reconciled
 // against the protected-header task_id for tamper-resistance.
 type Command struct {
-	TaskID            string // numeric, stringified for backwards compatibility
-	TaskType          string
+	TaskID   string // numeric, stringified for backwards compatibility
+	TaskType string
+	// ExpiresAt is the signed dispatch expiry in unix seconds, which NDManager
+	// sets to the task's own expiry: the moment it stops waiting for an answer.
+	// A task whose work can outlive the agent process bounds how long it keeps
+	// trying to report an outcome by it.
+	ExpiresAt         int64
 	Payload           map[string]interface{} // verified payload bytes parsed as JSON object
 	PathfinderSession string                 // CONNECT only; outer-frame routing token
 }
@@ -173,12 +179,20 @@ type WebSocketClient struct {
 	// plugin GUI via /var/run/ndagent.status. Optional; nil-safe.
 	statusWriter *status.Writer
 
-	// preDrainHook is called once after auth succeeds and before
-	// DrainUndelivered. It lets callers (lifecycle.go) run version-aware
-	// boot-time reconciliation (e.g. FIRMWARE_UPGRADE) before the generic
-	// ResolveStuck turns IN_PROGRESS rows into blunt COMPLETED/FAILED.
-	// Optional; nil-safe.
-	preDrainHook func(ctx context.Context, store *taskstore.Store)
+	// preDrainHook runs on every connect, after auth succeeds and before the
+	// drain. lifecycle.go uses it to let the FIRMWARE_UPGRADE reconciler decide
+	// the rows the drain leaves to it. Optional; nil-safe.
+	preDrainHook func(ctx context.Context)
+
+	// authenticated is true from the moment the broker accepted this
+	// connection's authentication message until the connection ends. Guarded by
+	// mu.
+	authenticated bool
+
+	// drainMu makes the drain's replay of undelivered rows and a task being
+	// resolved and sent by CompleteInProgressTask mutually exclusive, so a row
+	// that just turned terminal is sent by exactly one of them.
+	drainMu sync.Mutex
 }
 
 // NewWebSocketClient creates a new WebSocket client.
@@ -324,6 +338,7 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		}
 		w.mu.Lock()
 		w.conn = nil
+		w.authenticated = false
 		w.mu.Unlock()
 		w.markStatus(func(sw *status.Writer) error { return sw.MarkDisconnected(reason) })
 	}()
@@ -341,54 +356,88 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
 
+	w.mu.Lock()
+	w.authenticated = true
+	w.mu.Unlock()
+
 	log.Infow("Device authenticated successfully",
 		"device_uuid", w.cfg.DeviceUUID,
 	)
 	w.markStatus(func(sw *status.Writer) error { return sw.MarkConnected(w.cfg.ServerURIWS) })
 
-	// Pre-drain hook: firmware-aware reconciliation for FIRMWARE_UPGRADE rows
-	// that were left IN_PROGRESS by a reboot. Must run before DrainUndelivered
-	// so the firmware-specific rows are resolved before the generic
-	// ResolveStuck applies the LifecycleRestartCompletes rule.
-	if w.preDrainHook != nil && w.taskStore != nil {
-		hookCtx, hookCancel := context.WithTimeout(ctx, 15*time.Second)
-		w.preDrainHook(hookCtx, w.taskStore)
-		hookCancel()
-	}
-
-	// Drain any task responses left over from a previous agent process
-	// (PLUGIN_INSTALL drop files; RESTART/REBOOT come-back-success; or
-	// any handler that started but didn't deliver its terminal frame).
-	// Runs after auth completes (so SendTaskResponse will succeed) and
-	// before runCommunicationLoop starts pulling new commands (so we
-	// don't race against fresh dispatcher writes). Idempotent across
-	// reconnects — nothing to drain once we've delivered the backlog.
-	if w.taskStore != nil {
-		dctx, dcancel := context.WithTimeout(ctx, 30*time.Second)
-		sent, derr := taskstore.DrainUndelivered(
-			dctx,
-			w.taskStore,
-			taskstore.DefaultPendingResultsDir,
-			w,
-			func(format string, args ...interface{}) {
-				log.Infow(fmt.Sprintf(format, args...))
-			},
-			pluginInstallPkgChecker,
-		)
-		dcancel()
-		if derr != nil {
-			log.Warnw("Task store drain returned error",
-				"sent", sent, "error", derr,
-			)
-		} else if sent > 0 {
-			log.Infow("Task store drain delivered responses",
-				"count", sent,
-			)
-		}
-	}
+	w.reconcileAndDrain(ctx)
 
 	// Run communication loop
 	return w.runCommunicationLoop(ctx)
+}
+
+// preDrainHookTimeout and drainTimeout bound the two halves of the connect-time
+// sequence.
+const (
+	preDrainHookTimeout = 15 * time.Second
+	drainTimeout        = 30 * time.Second
+)
+
+// drainPendingResultsDir is where helpers leave their result files. A variable
+// so tests can point it at a temp dir.
+var drainPendingResultsDir = taskstore.DefaultPendingResultsDir
+
+// reconcileAndDrain is what every connect does, right after auth and before the
+// command loop starts pulling new commands: let the FIRMWARE_UPGRADE reconciler
+// look at its rows, then replay what earlier handlers left behind.
+//
+// It runs on every reconnect, not once per agent start. A reconnect does not
+// mean the agent restarted (the previous connection's handlers may still be
+// winding down), and it does not mean the device rebooted (an update may still
+// be running), so the drain leaves two kinds of row alone: a task whose handler
+// is live in this process, and FIRMWARE_UPGRADE, whose outcome only the
+// reconciler can read from the device. Both stay IN_PROGRESS and nothing is
+// sent for them. What the reconciler resolves is already terminal by the time
+// the drain replays it.
+//
+// Idempotent across reconnects: once the backlog is delivered there is nothing
+// to send.
+func (w *WebSocketClient) reconcileAndDrain(ctx context.Context) {
+	if w.taskStore == nil {
+		return
+	}
+	log := logging.Named("websocket")
+	logf := func(format string, args ...interface{}) {
+		log.Infow(fmt.Sprintf(format, args...))
+	}
+
+	// The hook may resolve rows through CompleteInProgressTask, which takes
+	// drainMu itself, so it runs before the drain takes it.
+	if w.preDrainHook != nil {
+		hookCtx, cancel := context.WithTimeout(ctx, preDrainHookTimeout)
+		w.preDrainHook(hookCtx)
+		cancel()
+	}
+
+	w.drainMu.Lock()
+	defer w.drainMu.Unlock()
+
+	dctx, dcancel := context.WithTimeout(ctx, drainTimeout)
+	defer dcancel()
+	sent, derr := taskstore.DrainUndelivered(
+		dctx,
+		w.taskStore,
+		drainPendingResultsDir,
+		w,
+		logf,
+		pluginInstallPkgChecker,
+		taskstore.WithDeferredTypes(TaskTypeFirmwareUpgrade),
+		taskstore.WithLiveness(w.dispatcher.IsTaskLive),
+	)
+	if derr != nil {
+		log.Warnw("Task store drain returned error",
+			"sent", sent, "error", derr,
+		)
+	} else if sent > 0 {
+		log.Infow("Task store drain delivered responses",
+			"count", sent,
+		)
+	}
 }
 
 // authenticate sends authentication message and waits for response.
@@ -580,6 +629,13 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 	if syncErrors, ok := data["errors"]; ok {
 		inner["errors"] = syncErrors
 	}
+	// A PULL of a user or a group carries the device's verdict on whether the
+	// account is administrator-equivalent. NDBroker reads it from this signed
+	// response; a key added to data and not here never reaches it, and nothing
+	// fails. Only a bool counts: anything else is no verdict.
+	if adminEquivalent, ok := data["admin_equivalent"].(bool); ok {
+		inner["admin_equivalent"] = adminEquivalent
+	}
 
 	return inner
 }
@@ -596,7 +652,8 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 //	}
 //
 // The envelope's payload is the JSON-serialized response object
-// ({status, message, content, results, validation_errors, errors}).
+// ({status, message, content, results, validation_errors, errors,
+// admin_equivalent}).
 //
 // Concurrency: multiple task goroutines can call this simultaneously
 // (e.g. an IN_PROGRESS heartbeat from one task racing with a final
@@ -608,6 +665,43 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 // strict-> replay barrier on Device.last_response_seq depends on this.
 // Distinct from the connection mutex so heartbeats stay live.
 func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data map[string]interface{}) error {
+	return w.sendTaskResponse(taskID, status, message, data, true)
+}
+
+// CompleteInProgressTask resolves a task this process has no handler for and
+// delivers the outcome. It is for the party that decides after the handler is
+// gone (the FIRMWARE_UPGRADE reconciler), as opposed to SendTaskResponse, which
+// is the handler's own.
+//
+// The write is a compare-and-set on IN_PROGRESS, so at most one caller ever
+// resolves a task, and the response is sent without rewriting the row, so a
+// second writer cannot replace what the first recorded. The returned bool says
+// whether this call resolved the task. When it did and the send failed the
+// error is returned as well: the row is terminal and undelivered, and the next
+// connect's drain replays it.
+func (w *WebSocketClient) CompleteInProgressTask(taskID, status, message string) (bool, error) {
+	if w.taskStore == nil {
+		return false, fmt.Errorf("no task store")
+	}
+	w.drainMu.Lock()
+	defer w.drainMu.Unlock()
+
+	inner := buildTaskResponseInner(status, message, nil, logging.Named("websocket"))
+	resultBytes, err := json.Marshal(inner)
+	if err != nil {
+		return false, fmt.Errorf("marshal inner response: %w", err)
+	}
+	won, err := w.taskStore.CompleteIfInProgress(taskID, status, message, resultBytes)
+	if err != nil || !won {
+		return false, err
+	}
+	return true, w.sendTaskResponse(taskID, status, message, nil, false)
+}
+
+// sendTaskResponse is SendTaskResponse with the choice of whether a terminal
+// status is first written to the task store. record=false is for a caller that
+// has already written the row (CompleteInProgressTask).
+func (w *WebSocketClient) sendTaskResponse(taskID, status, message string, data map[string]interface{}, record bool) error {
 	log := logging.Named("websocket")
 
 	inner := buildTaskResponseInner(status, message, data, log)
@@ -634,6 +728,34 @@ func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data 
 		// Should never happen — NewWebSocketClient sets it.
 		return fmt.Errorf("internal: state store not wired into WebSocketClient")
 	}
+
+	// Record the terminal status to the task registry BEFORE the wire
+	// send. If the wire send fails we still have the result on disk; the
+	// next connect's drain will replay it. IN_PROGRESS frames don't touch
+	// the store — only terminal rows are interesting for replay.
+	isTerminal := status == TaskStatusCompleted || status == TaskStatusFailed
+	if isTerminal && record && w.taskStore != nil {
+		var resultBytes []byte
+		if len(inner) > 0 {
+			if b, mErr := json.Marshal(inner); mErr == nil {
+				resultBytes = b
+			}
+		}
+		if cErr := w.taskStore.Complete(taskID, status, message, resultBytes); cErr != nil {
+			log.Warnw("taskstore.Complete failed; response will go out unrecorded",
+				"task_id", taskID, "error", cErr,
+			)
+		}
+	}
+
+	// A frame written before the broker accepted the authentication message
+	// would be read as that message. A handler left over from the previous
+	// connection, or the reconciler, can call in that window. The outcome is
+	// recorded above, so the drain that follows authentication delivers it.
+	if !w.isAuthenticated() {
+		return errNotAuthenticated
+	}
+
 	seq, err := w.state.AcquireNextResponseSeq()
 	if err != nil {
 		return fmt.Errorf("acquire response seq: %w", err)
@@ -658,34 +780,15 @@ func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data 
 		"envelope_size", len(envelope),
 	)
 
-	// Record the terminal status to the task registry BEFORE the wire
-	// send. If the wire send fails we still have the result on disk; the
-	// next boot's drain will replay it. IN_PROGRESS frames don't touch
-	// the store — only terminal rows are interesting for replay.
-	isTerminal := status == TaskStatusCompleted || status == TaskStatusFailed
-	if isTerminal && w.taskStore != nil {
-		var resultBytes []byte
-		if len(inner) > 0 {
-			if b, mErr := json.Marshal(inner); mErr == nil {
-				resultBytes = b
-			}
-		}
-		if cErr := w.taskStore.Complete(taskID, status, message, resultBytes); cErr != nil {
-			log.Warnw("taskstore.Complete failed; response will go out unrecorded",
-				"task_id", taskID, "error", cErr,
-			)
-		}
-	}
-
 	if err := w.SendJSON(frame); err != nil {
 		return err
 	}
 
-	// Wire send succeeded — mark delivered so the boot-time drain
+	// Wire send succeeded — mark delivered so the connect-time drain
 	// doesn't replay this response on the next reauth.
 	if isTerminal && w.taskStore != nil {
 		if dErr := w.taskStore.MarkDelivered(taskID); dErr != nil {
-			log.Warnw("taskstore.MarkDelivered failed; response may be re-sent on next boot",
+			log.Warnw("taskstore.MarkDelivered failed; response may be re-sent on the next connect",
 				"task_id", taskID, "error", dErr,
 			)
 		}
@@ -716,6 +819,16 @@ func (w *WebSocketClient) devicePrivkey() (ed25519.PrivateKey, []byte, error) {
 // GetTLSConfig returns the TLS configuration for the WebSocket connection.
 func (w *WebSocketClient) GetTLSConfig() *tls.Config {
 	return w.cfg.GetTLSConfig()
+}
+
+// errNotAuthenticated is what a task response gets when the connection has not
+// been authenticated (or has ended): the response is recorded, not sent.
+var errNotAuthenticated = errors.New("websocket not authenticated")
+
+func (w *WebSocketClient) isAuthenticated() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.authenticated && w.conn != nil
 }
 
 // IsConnected returns true if the WebSocket is connected.
@@ -824,23 +937,22 @@ func (w *WebSocketClient) GetAPIClient() *opnapi.Client {
 
 // GetTaskStore returns the per-task persistence registry. Task handlers may
 // call this to persist extra metadata (e.g. PLUGIN_INSTALL stores package name
-// and target version via store.SetTaskMeta so the boot-time drain can perform
+// and target version via store.SetTaskMeta so the connect-time drain can perform
 // a version-aware resolution). Returns nil when the store was not opened (tests
 // or environments without /var/db/ndagent write access).
 func (w *WebSocketClient) GetTaskStore() *taskstore.Store {
 	return w.taskStore
 }
 
-// SetPreDrainHook registers a callback that runs after WS auth and before
-// DrainUndelivered. lifecycle.go uses this to perform firmware-aware
-// boot-time reconciliation for FIRMWARE_UPGRADE rows before the generic
-// ResolveStuck applies the blunt LifecycleRestartCompletes rule.
-func (w *WebSocketClient) SetPreDrainHook(fn func(ctx context.Context, store *taskstore.Store)) {
+// SetPreDrainHook registers a callback that runs on every connect, after WS
+// auth and before the drain. lifecycle.go uses it to let the FIRMWARE_UPGRADE
+// reconciler resolve the rows the drain leaves to it. Set it before Run.
+func (w *WebSocketClient) SetPreDrainHook(fn func(ctx context.Context)) {
 	w.preDrainHook = fn
 }
 
 // pluginInstallPkgChecker is the PluginInstallChecker wired into the
-// boot-time drain. It queries pkg(8) for the installed version of
+// connect-time drain. It queries pkg(8) for the installed version of
 // packageName and returns it so the drain can determine whether a
 // PLUGIN_INSTALL task that lacks a drop file actually succeeded.
 //

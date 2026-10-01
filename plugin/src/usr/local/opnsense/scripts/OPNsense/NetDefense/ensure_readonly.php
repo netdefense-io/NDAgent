@@ -31,6 +31,14 @@
  * ship a new package, and the updated priv set is reconciled on every
  * device at next upgrade without any manual intervention.
  *
+ * The group is granted READONLY_PRIVS narrowed to the privileges the running
+ * OPNsense knows, and that set moves with the system rather than with this
+ * package. So it also runs at boot (the plugin's plugins.inc.d bootup hook)
+ * and after a core update (rc.syshook.d/update), both with
+ * --reload-on-change. Installing or removing another plugin at runtime
+ * triggers nothing: run `configctl netdefense ensure-readonly` afterwards, or
+ * press Setup.
+ *
  * Does NOT require --token. Does NOT touch the agent token, device_uuid,
  * API key/secret, or any other Settings field beyond the two narrow
  * default-migrations below. Only calls ApiCredsProvisioner::ensurePassword()
@@ -65,7 +73,15 @@
  *     in sync).
  *
  * Usage:
- *   ensure_readonly.php [--json]
+ *   ensure_readonly.php [--json] [--reload-on-change]
+ *
+ * --json adds privs_granted (how many privileges the group holds),
+ * privs_left_out (the READONLY_PRIVS ids not granted) and privs_catalog_trusted
+ * (false when the privilege catalog could not be read: the group then gains
+ * nothing, and privs_left_out also lists ids the catalog may well know). With a
+ * catalog the ids left out are also logged at NOTICE. --reload-on-change
+ * reloads the template only when a Settings default was written, instead of on
+ * every run.
  *
  * Exit codes:
  *   0   ok or skipped (no change needed), or a password could not be hashed
@@ -87,6 +103,7 @@ use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
 
 $json = in_array('--json', $argv ?? [], true);
+$reloadOnChange = in_array('--reload-on-change', $argv ?? [], true);
 
 function emit_ro(array $result, int $code, bool $asJson, array $notes = []): void
 {
@@ -224,8 +241,13 @@ if ($agentPassword['changed']) {
 // Always reload the template so ndagent.conf reflects any state change —
 // the read-only user was just created/repaired, or one of the
 // webadminReadonlyUser / rejectDangerousSnippets defaults was just
-// written to config.xml.
-$backend->configdRun('template reload OPNsense/NetDefense');
+// written to config.xml. With --reload-on-change (the boot and core-update
+// runs) only a Settings default calls for it: rendering truncates and rewrites
+// ndagent.conf and /etc/rc.conf.d/ndagent in place, which must not overlap the
+// agent starting at boot.
+if (!$reloadOnChange || $settingsChanged) {
+    $backend->configdRun('template reload OPNsense/NetDefense');
+}
 
 $messages = [
     'ok'      => 'Read-only WebAdmin user provisioned.',
@@ -249,6 +271,14 @@ if ($roPassword === LocalAccounts::PASSWORD_SET) {
 } elseif ($roPassword === LocalAccounts::PASSWORD_FAILED) {
     $warnings[] = 'Failed to generate a password hash for the ' . ReadOnlyUserProvisioner::READONLY_USERNAME . ' user';
 }
+$privs = $roResult['privs'] ?? null;
+if ($privs !== null && !$privs['catalog_trusted']) {
+    $warnings[] = 'The OPNsense privilege catalog could not be read; the ' . ReadOnlyUserProvisioner::READONLY_GROUPNAME
+        . ' group keeps the privileges it already holds and gains none';
+} elseif ($privs !== null && !empty($privs['left_out'])) {
+    $notes[] = 'Left out of the read-only group, unknown to this OPNsense (' . count($privs['left_out']) . '): '
+        . implode(', ', $privs['left_out']);
+}
 foreach ($notes as $note) {
     log_ro(LOG_NOTICE, $note);
 }
@@ -262,6 +292,11 @@ $payload = [
     'message' => $msg,
     'agent_password' => $agentPassword['result'],
 ];
+if ($privs !== null) {
+    $payload['privs_granted'] = $privs['granted'];
+    $payload['privs_left_out'] = $privs['left_out'];
+    $payload['privs_catalog_trusted'] = $privs['catalog_trusted'];
+}
 if (!empty($warnings)) {
     $payload['warnings'] = $warnings;
 }

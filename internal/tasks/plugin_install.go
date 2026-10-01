@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -77,7 +76,7 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	}
 
 	// Persist package name and target version in the task registry so the
-	// boot-time drain can perform a version-aware resolution without the
+	// connect-time drain can perform a version-aware resolution without the
 	// original command payload. Best-effort — a store write failure does not
 	// prevent the install from proceeding.
 	if store := ws.GetTaskStore(); store != nil {
@@ -131,15 +130,7 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	// exit code; on the next agent boot the drain step reconciles that
 	// file into the task store and replays the task_response (see
 	// internal/taskstore). $2 must be passed (even empty) so $3 lines up.
-	args := []string{version.PackageName, targetVersion, cmd.TaskID}
-	cmdExec := exec.Command(helperScriptPath, args...)
-	// Detach: own session, own process group, no controlling terminal —
-	// pkg's `rc.d ndagent stop` sends SIGTERM to the agent's PID/PGID, not
-	// to ours. Without Setsid the helper rides the same pgrp and dies too.
-	cmdExec.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmdExec.Stdout = nil
-	cmdExec.Stderr = nil
-	cmdExec.Stdin = nil
+	cmdExec := newPluginInstallHelperCmd(version.PackageName, targetVersion, cmd.TaskID)
 
 	if err := cmdExec.Start(); err != nil {
 		log.Errorw("Failed to start plugin-install helper",
@@ -164,6 +155,12 @@ func HandlePluginInstall(ctx context.Context, ws *network.WebSocketClient, cmd n
 	ws.RequestShutdown()
 
 	return nil
+}
+
+// newPluginInstallHelperCmd builds the helper invocation. The task id is
+// $3, so an empty target version is still passed as $2.
+func newPluginInstallHelperCmd(packageName, targetVersion, taskID string) *exec.Cmd {
+	return newDetachedHelperCmd(helperScriptPath, packageName, targetVersion, taskID)
 }
 
 // alreadyAtTargetVersion reports whether the requested install would be a

@@ -26,7 +26,7 @@ const peerOfflineGraceWindow = 10 * time.Second
 
 // connectSendResponse is the terminal-response sender used by HandleConnect's
 // policy refusal path. Indirected so tests can assert the refusal without a
-// live WebSocket, mirroring firmwareNoRebootSendResponse.
+// live WebSocket, mirroring firmwareSendResponse.
 var connectSendResponse = SendTaskResponse
 
 // effectiveReadOnly applies the device-local ceiling to the session the

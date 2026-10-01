@@ -25,6 +25,12 @@
 
 set -u
 
+# The agent that forked this helper has rc.d's PATH, which lacks /usr/local.
+# pkg hands its own environment to the hook scripts, and the OPNsense PHP they
+# run calls tools in /usr/local by bare name.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+
 LOG=/var/log/ndagent-plugin-install.log
 DROP_DIR=/var/db/ndagent/pending-results
 PKG_NAME="${1:?missing pkg name}"

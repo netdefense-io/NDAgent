@@ -1,8 +1,12 @@
 package pathfinder
 
 import (
+	"fmt"
+	"io"
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	ndconfig "github.com/netdefense-io/ndagent/internal/config"
 )
@@ -130,4 +134,92 @@ func TestZeroPolicyDoesNotGate(t *testing.T) {
 			t.Fatalf("zero-value policy wrongly gated ssh: %v", err)
 		}
 	}
+}
+
+// TestPolicyReadOnlyGatesWebadminRequestsWithoutClamp is the same independence test
+// for the request denylist and the secret scrubber inside the webadmin stream: under
+// a "readonly" ceiling they apply although ReadOnly was left false, so they do not
+// depend on one caller having remembered to clamp either. The stream goes through
+// ProxyStreamToLocal, as a real one does.
+func TestPolicyReadOnlyGatesWebadminRequestsWithoutClamp(t *testing.T) {
+	ts, hits := newSentinelBackend("acted")
+	defer ts.Close()
+
+	for _, tt := range []struct {
+		name string
+		cfg  ProxyConfig
+		want bool
+	}{
+		{"ceiling readonly, not clamped", ProxyConfig{Policy: ndconfig.RemoteAccessReadOnly}, true},
+		{"read-only session", ProxyConfig{ReadOnly: true}, true},
+		{"both", ProxyConfig{Policy: ndconfig.RemoteAccessReadOnly, ReadOnly: true}, true},
+		{"full", ProxyConfig{Policy: ndconfig.RemoteAccessFull}, false},
+		{"no policy", ProxyConfig{}, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.cfg.WebadminSessionDir = t.TempDir()
+			proxy := NewTCPProxyWithConfig(tt.cfg)
+			if proxy.httpProxy.readOnly != tt.want {
+				t.Fatalf("the webadmin proxy's read-only gate = %v, want %v", proxy.httpProxy.readOnly, tt.want)
+			}
+		})
+	}
+
+	proxy := NewTCPProxyWithConfig(ProxyConfig{Policy: ndconfig.RemoteAccessReadOnly, WebadminSessionDir: t.TempDir()})
+	u := strings.TrimPrefix(ts.URL, "https://")
+	host, port, _ := strings.Cut(u, ":")
+	proxy.httpProxy.localHost = host
+	fmt.Sscanf(port, "%d", &proxy.httpProxy.localPort)
+
+	var requests []streamRequest
+	for _, raw := range []string{
+		rawRequest("POST", "/api/core/service/restart/openvpn", "", ""),
+		rawRequest("GET", "/api/trust/ca/del/"+certUUID, "", ""),
+		rawRequest("POST", "/api/trust/cert/generate_file/"+certUUID+"/prv", "", ""),
+	} {
+		requests = append(requests, streamRequest{raw, refused})
+	}
+	runs := make([]struct {
+		stream *Stream
+		cap    *handleStreamCapture
+		done   chan error
+	}, len(requests))
+	for i, request := range requests {
+		stream, cap := newHandleStreamTestStream()
+		stream.serviceName = ServiceWebadmin
+		done := make(chan error, 1)
+		go func() { done <- proxy.ProxyStreamToLocal(stream) }()
+		runs[i].stream, runs[i].cap, runs[i].done = stream, cap, done
+		stream.readBuf <- []byte(request.raw)
+	}
+	for i, request := range requests {
+		resp := waitForHandleStreamResponse(t, runs[i].cap)
+		if resp.StatusCode != request.want {
+			t.Errorf("%q: status = %d, want %d", strings.SplitN(request.raw, "\r\n", 2)[0], resp.StatusCode, request.want)
+		}
+	}
+	waitNeverHit(t, 500*time.Millisecond, hits)
+	for i := range runs {
+		closeHandleStreamTestStream(runs[i].stream)
+		<-runs[i].done
+	}
+
+	// The scrubber is on under the same ceiling: the secret in a response is blanked.
+	secretBackend, _ := newSentinelBackend(userGetBody)
+	defer secretBackend.Close()
+	scrubbing := NewTCPProxyWithConfig(ProxyConfig{Policy: ndconfig.RemoteAccessReadOnly, WebadminSessionDir: t.TempDir()})
+	host, port, _ = strings.Cut(strings.TrimPrefix(secretBackend.URL, "https://"), ":")
+	scrubbing.httpProxy.localHost = host
+	fmt.Sscanf(port, "%d", &scrubbing.httpProxy.localPort)
+	stream, cap := newHandleStreamTestStream()
+	stream.serviceName = ServiceWebadmin
+	done := make(chan error, 1)
+	go func() { done <- scrubbing.ProxyStreamToLocal(stream) }()
+	stream.readBuf <- []byte(rawRequest("GET", "/api/auth/user/get/u1", "", ""))
+	resp := waitForHandleStreamResponse(t, cap)
+	if body, _ := io.ReadAll(resp.Body); resp.StatusCode != http.StatusOK || string(body) != userGetCleaned {
+		t.Errorf("under a readonly ceiling that was not clamped, the response was %d %s, want 200 %s", resp.StatusCode, body, userGetCleaned)
+	}
+	closeHandleStreamTestStream(stream)
+	<-done
 }

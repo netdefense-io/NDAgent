@@ -1,0 +1,69 @@
+{
+ "schema": 1,
+ "kind": "protected-names-vectors",
+ "fixture_sha256": "ec5c0240f4cca491d764bcf624d0157d1dc82badb232ea691246841bc4b3ad62",
+ "protected_groups": [
+  "admins",
+  "netdefense-readonly"
+ ],
+ "protected_users": [
+  "netdefense-agent",
+  "netdefense-readonly",
+  "root"
+ ],
+ "builtin_admin_gid": 1999,
+ "group_rule": "trim, lowercase, then exact match against protected_groups",
+ "group_entry_rule": "split a USER 'groups' entry on ',', then apply group_rule to every part",
+ "user_rule": "exact match against protected_users: no trimming, no case folding",
+ "group_names": [
+  {"name": "admins", "protected": true},
+  {"name": "Admins", "protected": true},
+  {"name": "ADMINS", "protected": true},
+  {"name": " admins", "protected": true},
+  {"name": "admins ", "protected": true},
+  {"name": " ADMINS ", "protected": true},
+  {"name": "\tAdmins\n", "protected": true},
+  {"name": "netdefense-readonly", "protected": true},
+  {"name": "Netdefense-Readonly", "protected": true},
+  {"name": "NETDEFENSE-READONLY", "protected": true},
+  {"name": "  netdefense-readonly\r\n", "protected": true},
+  {"name": "administrators", "protected": false},
+  {"name": "admin", "protected": false},
+  {"name": "adminsx", "protected": false},
+  {"name": "xadmins", "protected": false},
+  {"name": "ad mins", "protected": false},
+  {"name": "netdefense-agent", "protected": false},
+  {"name": "root", "protected": false},
+  {"name": "operators", "protected": false},
+  {"name": "", "protected": false}
+ ],
+ "group_entries": [
+  {"entry": "admins", "names_a_protected_group": true},
+  {"entry": "Admins", "names_a_protected_group": true},
+  {"entry": " ADMINS ", "names_a_protected_group": true},
+  {"entry": "ops,admins", "names_a_protected_group": true},
+  {"entry": "ops, admins", "names_a_protected_group": true},
+  {"entry": "ops,,netdefense-readonly", "names_a_protected_group": true},
+  {"entry": "NETDEFENSE-READONLY,ops", "names_a_protected_group": true},
+  {"entry": "ops", "names_a_protected_group": false},
+  {"entry": "operators,helpdesk", "names_a_protected_group": false},
+  {"entry": ",", "names_a_protected_group": false},
+  {"entry": "", "names_a_protected_group": false},
+  {"entry": "adminsx,xadmins", "names_a_protected_group": false}
+ ],
+ "user_names": [
+  {"name": "root", "protected": true},
+  {"name": "netdefense-agent", "protected": true},
+  {"name": "netdefense-readonly", "protected": true},
+  {"name": "jdoe", "protected": false},
+  {"name": "rootx", "protected": false},
+  {"name": "xroot", "protected": false},
+  {"name": "admins", "protected": false},
+  {"name": "netdefense", "protected": false},
+  {"name": "Root", "protected": false},
+  {"name": "ROOT", "protected": false},
+  {"name": " root", "protected": false},
+  {"name": "root ", "protected": false},
+  {"name": "Netdefense-Readonly", "protected": false}
+ ]
+}

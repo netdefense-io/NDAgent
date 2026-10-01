@@ -34,7 +34,7 @@ func RegisterHandlers(ws *network.WebSocketClient) {
 
 // LifecycleFor returns the taskstore Lifecycle category for a given task
 // type. The dispatcher consults this at Begin time to record how the
-// boot-time drain should treat any row left IN_PROGRESS — see the
+// connect-time drain should treat any row left IN_PROGRESS — see the
 // taskstore.Lifecycle docs for the per-category rules.
 //
 // Unknown task types default to LifecycleSynchronous: a crashed-mid-task
@@ -47,11 +47,13 @@ func LifecycleFor(taskType string) taskstore.Lifecycle {
 	case network.TaskTypePluginInstall:
 		return taskstore.LifecycleHelperResolves
 	case network.TaskTypeFirmwareUpgrade:
-		// Worst-case lifecycle: reboot=true paths kill the agent mid-task.
-		// LifecycleRestartCompletes covers this — the boot-time drain
-		// re-reads /status and /running to determine the real outcome.
-		// The reboot=false (synchronous) path sends a terminal response
-		// before returning, so no IN_PROGRESS row survives to the next boot.
+		// Not what decides a FIRMWARE_UPGRADE row. The drain skips the type
+		// whatever lifecycle a row carries, and the firmware reconciler
+		// (internal/core) resolves it from the device's state, because a row can
+		// outlive its handler on any path: the update is a detached OPNsense
+		// process, a package in the run can restart the agent, and the box
+		// reboots. This value is what an agent that predates the reconciler does
+		// with such a row (completes it when it returns), which is why it is kept.
 		return taskstore.LifecycleRestartCompletes
 	default:
 		return taskstore.LifecycleSynchronous

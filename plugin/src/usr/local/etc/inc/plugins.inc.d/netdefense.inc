@@ -26,6 +26,30 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+function netdefense_configure()
+{
+    return [
+        'bootup' => ['netdefense_bootup'],
+    ];
+}
+
+/*
+ * The read-only group holds what the running OPNsense knows, which a reboot
+ * can change (a major upgrade, a plugin installed since). Detached, so boot
+ * does not wait for it, and through the action that reloads the template only
+ * when a Settings default was written: a render rewrites ndagent.conf in place
+ * and could overlap the agent starting. plugins_configure() catches only
+ * \Error: an exception escaping here would abort rc.bootup, so nothing may.
+ */
+function netdefense_bootup($verbose = false)
+{
+    try {
+        configd_run('netdefense reconcile-readonly', true);
+    } catch (\Throwable $e) {
+        error_log($e);
+    }
+}
+
 function netdefense_enabled()
 {
     return !empty((string)(new \OPNsense\NetDefense\Settings())->enabled);

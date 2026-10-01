@@ -3,13 +3,15 @@
 // Every dispatched task is recorded here with its lifecycle category at
 // Begin time, gets its terminal status (COMPLETED / FAILED) written via
 // Complete, and is marked delivered after the corresponding task_response
-// successfully leaves the wire. Rows that are still IN_PROGRESS on the
-// next boot are resolved by ResolveStuck per their category — see the
-// Lifecycle docs below.
+// successfully leaves the wire. Rows that are still IN_PROGRESS when the
+// connect-time drain runs are resolved by ResolveStuck per their category —
+// see the Lifecycle docs below — unless something still owns them: a handler
+// alive in this process, or a task type with its own reconciler
+// (FIRMWARE_UPGRADE, whose outcome only the device can tell).
 //
 // Storage is a single SQLite file at DefaultStorePath. The store is
 // goroutine-safe via SQLite's own locking; callers don't need their own
-// mutex. WAL journal mode lets the dispatcher and the boot-time drain
+// mutex. WAL journal mode lets the dispatcher and the connect-time drain
 // touch the DB concurrently without writer starvation.
 //
 // Retention is enforced by MarkDelivered: each successful delivery prunes
@@ -52,7 +54,7 @@ const (
 )
 
 // Lifecycle declares how a task type relates to the agent process lifetime
-// — and therefore what to do with rows still IN_PROGRESS on the next boot.
+// — and therefore what to do with rows still IN_PROGRESS when the drain runs.
 //
 // Set once by the dispatcher at Begin time (see internal/tasks/register.go
 // for the task-type → lifecycle map). The drain step consults it after
@@ -61,14 +63,14 @@ type Lifecycle int
 
 const (
 	// LifecycleSynchronous: the handler is expected to send a final
-	// task_response from the same process. An IN_PROGRESS row on boot
-	// means the agent died mid-task → ResolveStuck marks it FAILED with
-	// "agent restarted mid-task".
+	// task_response from the same process. An IN_PROGRESS row whose handler
+	// is no longer alive means the agent died mid-task → ResolveStuck marks
+	// it FAILED with "agent restarted mid-task".
 	LifecycleSynchronous Lifecycle = iota
 
 	// LifecycleRestartCompletes: the act of restarting the agent (or the
 	// device) is the task's success signal. RESTART and REBOOT use this.
-	// An IN_PROGRESS row on boot means the restart finished → ResolveStuck
+	// An IN_PROGRESS row once the agent is back means the restart finished → ResolveStuck
 	// marks it COMPLETED. There is no time-based heuristic; a 10-minute
 	// device reboot resolves correctly whenever the agent comes back.
 	LifecycleRestartCompletes
@@ -80,7 +82,7 @@ const (
 	// row with this lifecycle, the helper was killed before producing a
 	// result → mark FAILED with "helper did not produce result file".
 	// A slow helper (e.g. a 20-minute OS update) is fine: the drop file
-	// just lands later, and the next boot's drain picks it up.
+	// just lands later, and the next connect's drain picks it up.
 	LifecycleHelperResolves
 )
 
@@ -122,6 +124,9 @@ type Record struct {
 	ResultData []byte
 	StartedAt  time.Time
 	EndedAt    time.Time
+	// Delivered is set only by Get: the rows the other queries return are
+	// selected by it.
+	Delivered bool
 }
 
 // Store is the SQLite-backed task-state registry. Construct with Open;
@@ -231,7 +236,7 @@ func isDuplicateColumnError(err error) bool {
 }
 
 // PluginInstallMeta is the metadata stored at Begin time for PLUGIN_INSTALL
-// tasks. It is written by BeginWithMeta and read by the boot-time drain to
+// tasks. It is written by BeginWithMeta and read by the connect-time drain to
 // perform a version-aware stuck-row resolution without requiring the original
 // command payload.
 type PluginInstallMeta struct {
@@ -322,10 +327,33 @@ func (s *Store) GetPluginInstallMeta(taskID string) (*PluginInstallMeta, error) 
 	return &m, nil
 }
 
+// GetTaskMeta decodes the metadata SetTaskMeta stored for taskID into dst.
+// found is false when the row does not exist, carries no metadata, or holds a
+// blob that does not decode into dst: a caller cannot tell those apart and
+// must treat all three as "metadata absent" (a row written by an agent that
+// stored none).
+func (s *Store) GetTaskMeta(taskID string, dst interface{}) (found bool, err error) {
+	var raw sql.NullString
+	err = s.db.QueryRow("SELECT task_meta FROM task_states WHERE task_id = ?", taskID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("query task_meta for %s: %w", taskID, err)
+	}
+	if !raw.Valid || raw.String == "" {
+		return false, nil
+	}
+	if err := json.Unmarshal([]byte(raw.String), dst); err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 // Complete writes a terminal status for `taskID`. If the row doesn't
 // exist (Begin was skipped or the store was wiped between dispatch and
 // completion), the row is created so the drain step can still deliver
-// the response on the next boot.
+// the response on the next connect.
 //
 // Status must be StatusCompleted or StatusFailed. IN_PROGRESS is rejected
 // — callers should use SendInProgressResponse for that, which doesn't
@@ -351,6 +379,32 @@ ON CONFLICT(task_id) DO UPDATE SET
 		return fmt.Errorf("complete: %w", err)
 	}
 	return nil
+}
+
+// CompleteIfInProgress is Complete for a caller that is not the task's owner:
+// it writes the terminal status only while the row is still IN_PROGRESS and
+// reports whether it did. Complete overwrites whatever is there, which is right
+// for the handler that owns the task and wrong for anyone else, who could
+// otherwise replace an outcome the owner recorded a moment earlier. A caller
+// that gets false lost the race (or the row is gone) and must not send a
+// response of its own.
+func (s *Store) CompleteIfInProgress(taskID, status, message string, data []byte) (bool, error) {
+	if status != StatusCompleted && status != StatusFailed {
+		return false, fmt.Errorf("taskstore: CompleteIfInProgress called with non-terminal status %q", status)
+	}
+	res, err := s.db.Exec(`
+UPDATE task_states
+SET status = ?, message = ?, result_data = ?, ended_at = ?
+WHERE task_id = ? AND status = ?
+`, status, message, data, nowFn().Unix(), taskID, StatusInProgress)
+	if err != nil {
+		return false, fmt.Errorf("complete if in progress: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("complete if in progress: %w", err)
+	}
+	return n == 1, nil
 }
 
 // MarkDelivered stamps delivered_at and runs retention in the same
@@ -429,10 +483,40 @@ ORDER BY started_at ASC
 	return out, rows.Err()
 }
 
+// Get returns the row for taskID, or found=false when there is none.
+func (s *Store) Get(taskID string) (rec Record, found bool, err error) {
+	var (
+		lifecycleStr string
+		data         []byte
+		startedAt    int64
+		endedAt      sql.NullInt64
+		deliveredAt  sql.NullInt64
+	)
+	err = s.db.QueryRow(`
+SELECT task_id, task_type, lifecycle, status, message, result_data, started_at, ended_at, delivered_at
+FROM task_states
+WHERE task_id = ?
+`, taskID).Scan(&rec.TaskID, &rec.TaskType, &lifecycleStr, &rec.Status, &rec.Message, &data, &startedAt, &endedAt, &deliveredAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Record{}, false, nil
+	}
+	if err != nil {
+		return Record{}, false, fmt.Errorf("get %s: %w", taskID, err)
+	}
+	rec.Lifecycle = parseLifecycle(lifecycleStr)
+	rec.ResultData = data
+	rec.StartedAt = time.Unix(startedAt, 0)
+	if endedAt.Valid {
+		rec.EndedAt = time.Unix(endedAt.Int64, 0)
+	}
+	rec.Delivered = deliveredAt.Valid
+	return rec, true, nil
+}
+
 // InProgressByType returns all rows still IN_PROGRESS for the given task type.
-// Used by the boot-time firmware reconciliation step to find FIRMWARE_UPGRADE
-// tasks that need version-aware resolution (rather than the generic
-// LifecycleRestartCompletes "Device returned" message).
+// The FIRMWARE_UPGRADE reconciler uses it to find the tasks it has to decide
+// from the device's state, and the PLUGIN_INSTALL drain uses it for its
+// drop-file wait.
 func (s *Store) InProgressByType(taskType string) ([]Record, error) {
 	rows, err := s.db.Query(`
 SELECT task_id, task_type, lifecycle, status, message, result_data, started_at, ended_at
@@ -466,13 +550,56 @@ ORDER BY started_at ASC
 	return out, rows.Err()
 }
 
+// ResolveOption narrows which IN_PROGRESS rows ResolveStuck may resolve.
+type ResolveOption func(*resolveConfig)
+
+type resolveConfig struct {
+	deferredTypes map[string]struct{}
+	isLive        func(taskID string) bool
+}
+
+// WithDeferredTypes leaves the rows of the given task types IN_PROGRESS: their
+// outcome is decided by something that can read the device (FIRMWARE_UPGRADE's
+// reconciler), not by the blanket lifecycle rule. The rule is keyed on the task
+// type and not on the lifecycle stored in the row, so rows written by an agent
+// that predates the option are covered too.
+func WithDeferredTypes(types ...string) ResolveOption {
+	return func(c *resolveConfig) {
+		if c.deferredTypes == nil {
+			c.deferredTypes = make(map[string]struct{}, len(types))
+		}
+		for _, t := range types {
+			c.deferredTypes[t] = struct{}{}
+		}
+	}
+}
+
+// WithLiveness leaves alone every row whose handler is still running, or still
+// queued, in this process. A row is only stuck once nothing here owns it any
+// more; resolving one that is owned would report a running task as dead, and
+// the owner's later terminal write would then overwrite that.
+func WithLiveness(isLive func(taskID string) bool) ResolveOption {
+	return func(c *resolveConfig) { c.isLive = isLive }
+}
+
 // ResolveStuck walks every row still IN_PROGRESS and applies the
 // lifecycle-category rule. Returns the number of rows changed.
 //
 // Callers should run ReconcileDropFiles FIRST so helper-resolved tasks
 // with a drop file already on disk get their real outcome instead of
 // the "helper did not produce result file" fallback.
-func (s *Store) ResolveStuck() (int, error) {
+//
+// It runs at every WebSocket connect, not only at boot, so a row whose handler
+// is alive in this process must be left to that handler (WithLiveness) and a
+// type whose outcome needs the device's state must be left to its reconciler
+// (WithDeferredTypes). Each write is a compare-and-set: a row that turns
+// terminal between the scan and the write keeps the outcome its handler gave it.
+func (s *Store) ResolveStuck(opts ...ResolveOption) (int, error) {
+	var cfg resolveConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
 	rows, err := s.db.Query("SELECT task_id, task_type, lifecycle FROM task_states WHERE status = ?", StatusInProgress)
 	if err != nil {
 		return 0, fmt.Errorf("query stuck: %w", err)
@@ -500,6 +627,12 @@ func (s *Store) ResolveStuck() (int, error) {
 
 	changed := 0
 	for _, p := range pending {
+		if _, deferred := cfg.deferredTypes[p.taskType]; deferred {
+			continue
+		}
+		if cfg.isLive != nil && cfg.isLive(p.taskID) {
+			continue
+		}
 		var status, message string
 		switch p.lifecycle {
 		case LifecycleRestartCompletes:
@@ -512,10 +645,13 @@ func (s *Store) ResolveStuck() (int, error) {
 			status = StatusFailed
 			message = "agent restarted mid-task"
 		}
-		if err := s.Complete(p.taskID, status, message, nil); err != nil {
+		won, err := s.CompleteIfInProgress(p.taskID, status, message, nil)
+		if err != nil {
 			return changed, err
 		}
-		changed++
+		if won {
+			changed++
+		}
 	}
 	return changed, nil
 }

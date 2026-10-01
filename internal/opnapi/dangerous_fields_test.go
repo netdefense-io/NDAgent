@@ -58,8 +58,8 @@ func TestDangerousUserFields(t *testing.T) {
 			want: []string{"priv"},
 		},
 		{
-			name: "unrelated priv is safe",
-			user: APIUserPayload{Name: "u", Priv: []string{"page-status-services", "page-diagnostics-arp"}},
+			name: "reviewed ordinary privs are safe",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-status-services", "page-diagnostics-arptable"}},
 			want: nil,
 		},
 		{
@@ -74,7 +74,7 @@ func TestDangerousUserFields(t *testing.T) {
 		},
 		{
 			name: "comma-joined priv element with no dangerous token is safe",
-			user: APIUserPayload{Name: "u", Priv: []string{"page-status-services,page-diagnostics-arp"}},
+			user: APIUserPayload{Name: "u", Priv: []string{"page-status-services,page-diagnostics-arptable"}},
 			want: nil,
 		},
 		{
@@ -103,11 +103,44 @@ func TestDangerousUserFields(t *testing.T) {
 			want: []string{"priv"},
 		},
 		{
-			// Negative: contains "system" but not "admin" — must NOT match
-			// the system+admin rule, and matches neither of the other two
-			// canonical rules either.
-			name: "page-system-information priv is safe (system without admin)",
-			user: APIUserPayload{Name: "u", Priv: []string{"page-system-information"}},
+			// Negative: a reviewed ID that contains "system" but not "admin"
+			// matches none of the three structural rules and is ordinary in
+			// the catalog.
+			name: "page-diagnostics-system-activity priv is safe (system without admin)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-diagnostics-system-activity"}},
+			want: nil,
+		},
+		{
+			// The structural rules alone missed this: it has no -all suffix
+			// and no "admin", yet it lets its holder edit users, groups and
+			// privileges, and so promote themselves.
+			name: "page-system-usermanager priv is dangerous (catalog, not the structural rules)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-system-usermanager"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "page-system-groupmanager priv is dangerous (26.1 split of the user manager)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-system-groupmanager"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "page-system-usermanager-addprivs priv is dangerous (26.1 split of the user manager)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-system-usermanager-addprivs"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "page-diagnostics-backup-restore priv is dangerous (whole config export)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-diagnostics-backup-restore"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "an ID the catalog does not know is dangerous (unknown means elevated)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-nobody-reviewed-this"}},
+			want: []string{"priv"},
+		},
+		{
+			name: "page-system-usermanager-passwordmg priv is safe (self-service password page)",
+			user: APIUserPayload{Name: "u", Priv: []string{"page-system-usermanager-passwordmg"}},
 			want: nil,
 		},
 		{
@@ -136,21 +169,52 @@ func TestDangerousUserFields(t *testing.T) {
 			want: []string{"authorizedkeys"},
 		},
 		{
+			name: "membership in admins is dangerous",
+			user: APIUserPayload{Name: "u", Groups: []string{"admins"}},
+			want: []string{"groups"},
+		},
+		{
+			name: "membership in admins is dangerous whatever the case or padding",
+			user: APIUserPayload{Name: "u", Groups: []string{"ops", " ADMINS "}},
+			want: []string{"groups"},
+		},
+		{
+			name: "membership in admins packed in one entry is dangerous",
+			user: APIUserPayload{Name: "u", Groups: []string{"ops,admins"}},
+			want: []string{"groups"},
+		},
+		{
+			name: "membership in the read-only group is dangerous",
+			user: APIUserPayload{Name: "u", Groups: []string{"netdefense-readonly"}},
+			want: []string{"groups"},
+		},
+		{
+			name: "membership in ordinary groups is safe",
+			user: APIUserPayload{Name: "u", Groups: []string{"monitors", "operators,helpdesk", "adminsx"}},
+			want: nil,
+		},
+		{
+			name: "groups is reported once however many entries name a protected group",
+			user: APIUserPayload{Name: "u", Groups: []string{"admins", "Admins", "netdefense-readonly"}},
+			want: []string{"groups"},
+		},
+		{
 			name: "multiple dangerous fields all reported",
 			user: APIUserPayload{
 				Name:           "u",
 				Priv:           []string{"page-all"},
+				Groups:         []string{"admins"},
 				Scope:          "system",
 				Shell:          "/bin/csh",
 				AuthorizedKeys: "ssh-ed25519 AAAA...",
 			},
-			want: []string{"authorizedkeys", "priv", "scope", "shell"},
+			want: []string{"authorizedkeys", "groups", "priv", "scope", "shell"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := sortedStrings(DangerousUserFields(tt.user))
+			got := sortedStrings(DangerousUserFields(tt.user, PrivPolicy{}))
 			want := sortedStrings(tt.want)
 			if !reflect.DeepEqual(got, want) {
 				t.Errorf("DangerousUserFields() = %v, want %v", got, want)
@@ -206,19 +270,51 @@ func TestDangerousGroupFields(t *testing.T) {
 			want:  []string{"priv"},
 		},
 		{
-			name:  "page-system-information is safe (system without admin)",
-			group: APIGroupPayload{Name: "g", Priv: []string{"page-system-information"}},
+			name:  "page-diagnostics-system-activity is safe (system without admin)",
+			group: APIGroupPayload{Name: "g", Priv: []string{"page-diagnostics-system-activity"}},
 			want:  nil,
+		},
+		{
+			name:  "page-system-usermanager is dangerous (catalog)",
+			group: APIGroupPayload{Name: "g", Priv: []string{"page-system-usermanager"}},
+			want:  []string{"priv"},
+		},
+		{
+			name:  "an ID the catalog does not know is dangerous",
+			group: APIGroupPayload{Name: "g", Priv: []string{"page-nobody-reviewed-this"}},
+			want:  []string{"priv"},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DangerousGroupFields(tt.group)
+			got := DangerousGroupFields(tt.group, PrivPolicy{})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("DangerousGroupFields() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestDangerousFieldsFollowThePrivPolicy holds the local gate to the same
+// policy the clearance gate uses: an ID that is ordinary as reviewed becomes
+// dangerous when the policy elevates the floor-dependent ones.
+func TestDangerousFieldsFollowThePrivPolicy(t *testing.T) {
+	elevated := PrivPolicy{FloorDependentElevated: true}
+	user := APIUserPayload{Name: "u", Priv: []string{"page-filter-api"}}
+	group := APIGroupPayload{Name: "g", Priv: []string{"page-filter-api"}}
+
+	if got := DangerousUserFields(user, PrivPolicy{}); got != nil {
+		t.Errorf("default policy: user fields = %v, want none", got)
+	}
+	if got := DangerousUserFields(user, elevated); !reflect.DeepEqual(got, []string{"priv"}) {
+		t.Errorf("elevating policy: user fields = %v, want [priv]", got)
+	}
+	if got := DangerousGroupFields(group, PrivPolicy{}); got != nil {
+		t.Errorf("default policy: group fields = %v, want none", got)
+	}
+	if got := DangerousGroupFields(group, elevated); !reflect.DeepEqual(got, []string{"priv"}) {
+		t.Errorf("elevating policy: group fields = %v, want [priv]", got)
 	}
 }
 

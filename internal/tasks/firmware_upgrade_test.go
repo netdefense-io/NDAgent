@@ -150,28 +150,6 @@ func TestValidateFirmwareSuffix_Rejected(t *testing.T) {
 	}
 }
 
-// ─── Classification helpers ────────────────────────────────────────────────
-
-func TestCountNonRebootPackages(t *testing.T) {
-	pkgs := []opnapi.FirmwarePackageEntry{
-		{Name: "opnsense"},
-		{Name: "curl"},
-		{Name: "base"},
-		{Name: "kernel"},
-	}
-	got := countNonRebootPackages(pkgs)
-	if got != 2 {
-		t.Errorf("countNonRebootPackages=%d want 2", got)
-	}
-}
-
-func TestCountNonRebootPackages_Empty(t *testing.T) {
-	got := countNonRebootPackages(nil)
-	if got != 0 {
-		t.Errorf("countNonRebootPackages(nil)=%d want 0", got)
-	}
-}
-
 // ─── TailLines ────────────────────────────────────────────────────────────
 
 func TestTailLines(t *testing.T) {
@@ -417,6 +395,14 @@ type stubFirmwareClient struct {
 	// postStatusResp is returned on the 2nd+ call to GetFirmwareUpgradeStatus.
 	postStatusResp  *opnapi.FirmwareUpgradeStatus
 	statusCallCount int
+
+	// release is what InstalledRelease reports; empty means the version the
+	// status response carries.
+	release    string
+	releaseErr error
+	// onUpdate and onUpgrade run when the corresponding trigger is called.
+	onUpdate  func()
+	onUpgrade func()
 }
 
 func (s *stubFirmwareClient) TriggerFirmwareCheck(_ context.Context) error { return s.checkErr }
@@ -428,10 +414,26 @@ func (s *stubFirmwareClient) GetFirmwareUpgradeStatus(_ context.Context) (*opnap
 	return s.statusResp, s.statusErr
 }
 func (s *stubFirmwareClient) TriggerFirmwareUpdate(_ context.Context) (*opnapi.FirmwareUpdateResponse, error) {
+	if s.onUpdate != nil {
+		s.onUpdate()
+	}
 	return s.updateResp, s.updateErr
 }
 func (s *stubFirmwareClient) TriggerFirmwareUpgrade(_ context.Context) (*opnapi.FirmwareUpgradeResponse, error) {
+	if s.onUpgrade != nil {
+		s.onUpgrade()
+	}
 	return s.upgradeResp, s.upgradeErr
+}
+func (s *stubFirmwareClient) InstalledRelease(_ context.Context) (opnapi.ProductRelease, error) {
+	if s.releaseErr != nil {
+		return opnapi.ProductRelease{}, s.releaseErr
+	}
+	raw := s.release
+	if raw == "" && s.statusResp != nil {
+		raw = s.statusResp.ProductVersion
+	}
+	return opnapi.ProductRelease{Raw: raw}, nil
 }
 func (s *stubFirmwareClient) GetFirmwareUpgradeProgress(_ context.Context) (*opnapi.FirmwareProgressStatus, error) {
 	return s.progressResp, s.progressErr
@@ -448,7 +450,7 @@ func (noopLogger) Infow(_ string, _ ...interface{}) {}
 // ─── handleMinorNoReboot: terminal-response coverage (Blocker B) ─────────────
 //
 // These tests verify that EVERY exit path of handleMinorNoReboot calls
-// firmwareNoRebootSendResponse (the production alias for SendTaskResponse)
+// firmwareSendResponse (the production alias for SendTaskResponse)
 // before returning. A missing call would leave the task leaking as IN_PROGRESS
 // in NDBroker until the 15-minute TTL fires.
 //
@@ -456,20 +458,20 @@ func (noopLogger) Infow(_ string, _ ...interface{}) {}
 // terminal call was made, and (b) that the expected status (COMPLETED/FAILED)
 // was sent.
 
-// capturedResponse records one call to firmwareNoRebootSendResponse.
+// capturedResponse records one call to firmwareSendResponse.
 type capturedResponse struct {
 	taskID  string
 	success bool // true = COMPLETED, false = FAILED
 	message string
 }
 
-// installNoRebootSendCapture replaces firmwareNoRebootSendResponse with a
+// installNoRebootSendCapture replaces firmwareSendResponse with a
 // recorder and returns a pointer to the slice of captured calls plus a
 // restore function.
 func installNoRebootSendCapture(t *testing.T) (*[]capturedResponse, func()) {
 	t.Helper()
 	calls := &[]capturedResponse{}
-	restore := SetFirmwareNoRebootSendResponseForTest(func(_ *network.WebSocketClient, taskID string, result TaskResult) error {
+	restore := SetFirmwareSendResponseForTest(func(_ *network.WebSocketClient, taskID string, result TaskResult) error {
 		*calls = append(*calls, capturedResponse{
 			taskID:  taskID,
 			success: result.Success,
@@ -480,11 +482,11 @@ func installNoRebootSendCapture(t *testing.T) (*[]capturedResponse, func()) {
 	return calls, restore
 }
 
-// installNoopInProgress replaces firmwareNoRebootSendInProgress with a no-op
+// installNoopInProgress replaces firmwareSendInProgress with a no-op
 // for tests that don't care about IN_PROGRESS calls.
 func installNoopInProgress(t *testing.T) func() {
 	t.Helper()
-	return SetFirmwareNoRebootSendInProgressForTest(func(_ *network.WebSocketClient, _, _ string) error {
+	return SetFirmwareSendInProgressForTest(func(_ *network.WebSocketClient, _, _ string) error {
 		return nil
 	})
 }
@@ -507,7 +509,12 @@ func minorNoRebootCmd(taskID string) network.Command {
 func minorNoRebootPreStatus(nonRebootNames []string, includeBaseKernel bool) *opnapi.FirmwareUpgradeStatus {
 	pkgs := make([]opnapi.FirmwarePackageEntry, 0, len(nonRebootNames)+2)
 	for _, n := range nonRebootNames {
-		pkgs = append(pkgs, opnapi.FirmwarePackageEntry{Name: n})
+		e := opnapi.FirmwarePackageEntry{Name: n}
+		if n == "opnsense" {
+			// The core package's planned version is the release the run reaches.
+			e.CurrentVersion, e.NewVersionAlt = "26.1.2", "26.1.9"
+		}
+		pkgs = append(pkgs, e)
 	}
 	if includeBaseKernel {
 		pkgs = append(pkgs, opnapi.FirmwarePackageEntry{Name: "base"})
@@ -704,6 +711,7 @@ func TestHandleMinorNoReboot_TerminalResponseOnPostStatusFail(t *testing.T) {
 	// post-apply read failing). The pre-apply status is already in initialStatus.
 	errClient := &stubFirmwareClient{
 		statusErr: errors.New("connection refused"),
+		release:   "26.1.2",
 	}
 
 	err := handleMinorNoReboot(context.Background(), nil, minorNoRebootCmd("14"), errClient, &firmwareUpgradePayload{Reboot: false, Mode: "minor"}, preStatus)
@@ -843,29 +851,6 @@ func TestHandleMinorNoReboot_MixedStateFromPreApplyData(t *testing.T) {
 	}
 }
 
-// TestHasBaseOrKernelPending verifies the helper used to derive mixed_state.
-func TestHasBaseOrKernelPending(t *testing.T) {
-	cases := []struct {
-		name string
-		pkgs []opnapi.FirmwarePackageEntry
-		want bool
-	}{
-		{"empty", nil, false},
-		{"only non-reboot", []opnapi.FirmwarePackageEntry{{Name: "opnsense"}, {Name: "curl"}}, false},
-		{"has base", []opnapi.FirmwarePackageEntry{{Name: "opnsense"}, {Name: "base"}}, true},
-		{"has kernel", []opnapi.FirmwarePackageEntry{{Name: "kernel"}}, true},
-		{"has both", []opnapi.FirmwarePackageEntry{{Name: "base"}, {Name: "kernel"}, {Name: "opnsense"}}, true},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := hasBaseOrKernelPending(tc.pkgs)
-			if got != tc.want {
-				t.Errorf("hasBaseOrKernelPending=%v want %v (pkgs=%v)", got, tc.want, tc.pkgs)
-			}
-		})
-	}
-}
-
 // containsStr is a simple substring check (mirrors contains in plugin_install_test.go).
 func containsStr(s, sub string) bool {
 	return len(s) >= len(sub) && (s == sub || len(sub) == 0 ||
@@ -912,7 +897,7 @@ func assertFirmwareJSON(t *testing.T, msg string, wantFields map[string]interfac
 
 // captureHandleFirmwareUpgrade runs HandleFirmwareUpgrade with a stubbed
 // sendResponse and returns the captured terminal TaskResult.
-// The test installs a SendTaskResponse stub via firmwareNoRebootSendResponse
+// The test installs a SendTaskResponse stub via firmwareSendResponse
 // for the no-reboot path; for the full handler path it captures at the ws level.
 func captureNoRebootResult(
 	t *testing.T,
@@ -922,12 +907,12 @@ func captureNoRebootResult(
 ) (TaskResult, error) {
 	t.Helper()
 	var captured TaskResult
-	restoreSend := SetFirmwareNoRebootSendResponseForTest(func(_ *network.WebSocketClient, _ string, result TaskResult) error {
+	restoreSend := SetFirmwareSendResponseForTest(func(_ *network.WebSocketClient, _ string, result TaskResult) error {
 		captured = result
 		return nil
 	})
 	defer restoreSend()
-	defer SetFirmwareNoRebootSendInProgressForTest(func(_ *network.WebSocketClient, _, _ string) error { return nil })()
+	defer SetFirmwareSendInProgressForTest(func(_ *network.WebSocketClient, _, _ string) error { return nil })()
 
 	restoreExec := SetFirmwareExecFuncForTest(func(_ context.Context, _ ...string) ([]byte, []byte, int) {
 		return []byte("packages updated\n"), nil, 0

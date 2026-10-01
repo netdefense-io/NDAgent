@@ -1,0 +1,14 @@
+#!/bin/sh
+
+# A core update can change the privilege catalog. rc.syshook runs this after
+# 10-refresh.sh has flushed the ACL cache, so the read-only group is
+# reconciled against the new catalog. rc.syshook reports a failing hook as a
+# failed core post-install: this one always exits 0.
+
+RECONCILE=/usr/local/opnsense/scripts/OPNsense/NetDefense/ensure_readonly.php
+
+if [ -f /conf/config.xml ] && [ -f "${RECONCILE}" ]; then
+    /usr/local/bin/php "${RECONCILE}" --reload-on-change
+fi
+
+exit 0

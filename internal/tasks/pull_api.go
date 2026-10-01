@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
@@ -43,36 +44,8 @@ func HandlePullAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	)
 
 	// Fetch by config type
-	var content map[string]interface{}
-	var err error
-
-	switch configType {
-	case "alias":
-		content, err = pullAlias(ctx, apiClient, name)
-	case "rule":
-		content, err = pullRule(ctx, apiClient, name)
-	case "user":
-		content, err = pullUser(ctx, apiClient, name)
-	case "group":
-		content, err = pullGroup(ctx, apiClient, name)
-	case "unbound_host_override":
-		content, err = pullHostOverride(ctx, apiClient, name)
-	case "unbound_domain_forward":
-		content, err = pullDomainForward(ctx, apiClient, name)
-	case "unbound_host_alias":
-		content, err = pullHostAlias(ctx, apiClient, name)
-	case "unbound_acl":
-		content, err = pullUnboundACL(ctx, apiClient, name)
-	case "zabbix_settings":
-		// Singleton — the `name` parameter is used as the destination
-		// snippet name only; the agent always returns the full
-		// zabbixagent settings tree.
-		content, err = pullZabbixSettings(ctx, apiClient)
-	case "zabbix_userparameter":
-		content, err = pullZabbixUserParameter(ctx, apiClient, name)
-	case "zabbix_alias":
-		content, err = pullZabbixAlias(ctx, apiClient, name)
-	default:
+	content, adminEquivalent, err := pullConfig(ctx, apiClient, configType, name)
+	if errors.Is(err, errUnsupportedConfigType) {
 		result := NewFailureResult(fmt.Sprintf("Unsupported config_type: %s", configType))
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
@@ -102,11 +75,70 @@ func HandlePullAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	)
 
 	// Return success with content
+	result := NewSuccessResultWithData(fmt.Sprintf("Found %s '%s'", configType, name), pullResultData(content, adminEquivalent))
+	return SendTaskResponse(ws, cmd.TaskID, result)
+}
+
+var errUnsupportedConfigType = errors.New("unsupported config_type")
+
+// pullConfig fetches the object a PULL names.
+//
+// adminEquivalent is set only for a user or a group that was found: the device's
+// verdict, from its live rows, on whether the account or group is
+// administrator-equivalent. It is a verdict about the device, not content, so it
+// travels beside the content and never inside it, and NDBroker reads it from the
+// signed response. An absent verdict means "not vouched for": an agent that
+// predates it sends none.
+func pullConfig(ctx context.Context, client *opnapi.Client, configType, name string) (content map[string]interface{}, adminEquivalent *bool, err error) {
+	switch configType {
+	case "alias":
+		content, err = pullAlias(ctx, client, name)
+	case "rule":
+		content, err = pullRule(ctx, client, name)
+	case "user":
+		var verdict bool
+		content, verdict, err = pullUser(ctx, client, name)
+		if err == nil && content != nil {
+			adminEquivalent = &verdict
+		}
+	case "group":
+		var verdict bool
+		content, verdict, err = pullGroup(ctx, client, name)
+		if err == nil && content != nil {
+			adminEquivalent = &verdict
+		}
+	case "unbound_host_override":
+		content, err = pullHostOverride(ctx, client, name)
+	case "unbound_domain_forward":
+		content, err = pullDomainForward(ctx, client, name)
+	case "unbound_host_alias":
+		content, err = pullHostAlias(ctx, client, name)
+	case "unbound_acl":
+		content, err = pullUnboundACL(ctx, client, name)
+	case "zabbix_settings":
+		// Singleton — the `name` parameter is used as the destination
+		// snippet name only; the agent always returns the full
+		// zabbixagent settings tree.
+		content, err = pullZabbixSettings(ctx, client)
+	case "zabbix_userparameter":
+		content, err = pullZabbixUserParameter(ctx, client, name)
+	case "zabbix_alias":
+		content, err = pullZabbixAlias(ctx, client, name)
+	default:
+		return nil, nil, errUnsupportedConfigType
+	}
+	return content, adminEquivalent, err
+}
+
+// pullResultData is the data a successful PULL hands to the task response.
+func pullResultData(content map[string]interface{}, adminEquivalent *bool) map[string]interface{} {
 	data := map[string]interface{}{
 		"content": content,
 	}
-	result := NewSuccessResultWithData(fmt.Sprintf("Found %s '%s'", configType, name), data)
-	return SendTaskResponse(ws, cmd.TaskID, result)
+	if adminEquivalent != nil {
+		data["admin_equivalent"] = *adminEquivalent
+	}
+	return data
 }
 
 // pullAlias searches for an alias by exact name match.
@@ -120,30 +152,35 @@ func pullRule(ctx context.Context, client *opnapi.Client, description string) (m
 	return client.GetRuleByDescription(ctx, description)
 }
 
-// pullUser searches for a user by exact name match and returns portable format.
-func pullUser(ctx context.Context, client *opnapi.Client, name string) (map[string]interface{}, error) {
+// pullUser searches for a user by exact name match and returns the portable
+// format, without the password, and whether the live rows make the account
+// administrator-equivalent.
+func pullUser(ctx context.Context, client *opnapi.Client, name string) (map[string]interface{}, bool, error) {
 	// Find user by name
 	rawUser, err := client.GetUserByName(ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if rawUser == nil {
-		return nil, nil // Not found
+		return nil, false, nil // Not found
 	}
 
-	// Get all groups for name resolution
+	// Get all groups for name resolution, and for the verdict: an account is
+	// administrator-equivalent through the groups it belongs to as much as
+	// through its own privileges.
 	groups, err := client.ListAllGroups(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list groups for resolution: %w", err)
+		return nil, false, fmt.Errorf("failed to list groups for resolution: %w", err)
 	}
 
 	// Convert to portable format
 	payload := opnapi.ConvertUserToAPI(rawUser, groups)
 
+	_, reasons := opnapi.BuildAccessIndex([]map[string]interface{}{rawUser}, groups, adminPrivPolicy(ctx, client), livePrivCatalog(ctx, client)).ElevatedUser(payload.Name)
+
 	// Return as map for consistent API response
 	return map[string]interface{}{
 		"name":           payload.Name,
-		"password":       payload.Password,
 		"disabled":       payload.Disabled,
 		"scope":          payload.Scope,
 		"descr":          payload.Descr,
@@ -156,28 +193,31 @@ func pullUser(ctx context.Context, client *opnapi.Client, name string) (map[stri
 		"comment":        payload.Comment,
 		"language":       payload.Language,
 		"landing_page":   payload.LandingPage,
-	}, nil
+	}, len(reasons) > 0, nil
 }
 
-// pullGroup searches for a group by exact name match and returns portable format.
-func pullGroup(ctx context.Context, client *opnapi.Client, name string) (map[string]interface{}, error) {
+// pullGroup searches for a group by exact name match and returns the portable
+// format and whether the group is administrator-equivalent.
+func pullGroup(ctx context.Context, client *opnapi.Client, name string) (map[string]interface{}, bool, error) {
 	// Find group by name
 	rawGroup, err := client.GetGroupByName(ctx, name)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if rawGroup == nil {
-		return nil, nil // Not found
+		return nil, false, nil // Not found
 	}
 
 	// Get all users for member name resolution
 	users, err := client.ListAllUsers(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to list users for resolution: %w", err)
+		return nil, false, fmt.Errorf("failed to list users for resolution: %w", err)
 	}
 
 	// Convert to portable format
 	payload := opnapi.ConvertGroupToAPI(rawGroup, users)
+
+	_, reasons := opnapi.BuildAccessIndex(nil, []map[string]interface{}{rawGroup}, adminPrivPolicy(ctx, client), livePrivCatalog(ctx, client)).ElevatedGroup(payload.Name)
 
 	// Return as map for consistent API response
 	return map[string]interface{}{
@@ -186,7 +226,7 @@ func pullGroup(ctx context.Context, client *opnapi.Client, name string) (map[str
 		"priv":            payload.Priv,
 		"members":         payload.Members,
 		"source_networks": payload.SourceNetworks,
-	}, nil
+	}, len(reasons) > 0, nil
 }
 
 // pullHostOverride searches for a host override by hostname.domain and returns portable format.

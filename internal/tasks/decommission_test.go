@@ -408,3 +408,11 @@ func TestSyncResultError(t *testing.T) {
 		t.Error("a failed result with no detail must still be an error")
 	}
 }
+
+func TestDecommissionHelperCmd(t *testing.T) {
+	t.Setenv("PATH", rcdPATH)
+
+	cmd := decommissionHelperCmd("os-netdefense-qa")
+
+	assertDetachedHelperCmd(t, cmd, "/usr/local/sbin/ndagent-decommission.sh", []string{"os-netdefense-qa"})
+}

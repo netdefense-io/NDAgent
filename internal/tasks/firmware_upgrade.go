@@ -10,12 +10,24 @@ package tasks
 //	major + reboot=false  → FAILED (invalid; rejected at payload validation)
 //
 // Lifecycle:
-//   - reboot=false: synchronous — handler sends IN_PROGRESS, runs exec, sends
-//     terminal response before returning. No reconciliation needed.
-//   - reboot=true (minor/major): handler sends IN_PROGRESS then triggers the
-//     REST apply; OPNsense reboots mid-process. The agent dies with the system.
-//     Boot-time drain (lifecycle = LifecycleRestartCompletes) re-reads /status
-//     and /running to resolve the row.
+//   - The task is marked on its row when the handler takes it up, and the run is
+//     recorded in full, then stamped as triggered, before anything is triggered
+//     (firmware_meta.go): the row can outlive the handler, and the reconciler
+//     has to tell a run that started from one that never did.
+//   - Only one FIRMWARE_UPGRADE runs at a time in this process; the others wait
+//     (bounded by their own expiry) and, if the agent stops meanwhile, are left
+//     IN_PROGRESS with their marker.
+//   - reboot=false: the handler sends IN_PROGRESS, runs opnsense-update as its
+//     own child and normally sends the terminal response before returning. If a
+//     package in the run replaces the agent's own, the agent is stopped under
+//     it and the row is left IN_PROGRESS.
+//   - reboot=true (minor/major, firmware_rest.go): the handler triggers the REST
+//     apply and watches. The run is OPNsense's detached process tree; the handler
+//     ends with a verdict from firmware.Evaluate, or leaves the row IN_PROGRESS
+//     when the connection is lost or the box reboots (it then holds its place
+//     until the reboot stops the agent).
+//   - A row left IN_PROGRESS is resolved by the reconciler (internal/core) from
+//     the device's state, never by the drain's blanket rule.
 
 import (
 	"context"
@@ -25,6 +37,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/firmware"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -105,20 +118,19 @@ var firmwareCheckTimeoutVar = firmwareCheckTimeout
 // a real *opnapi.Client via the ws.OPNsenseClient() accessor.
 var opnAPIClientForFirmware firmwareOPNAPIClient
 
-// firmwareNoRebootSendResponse is the indirection point used by
-// handleMinorNoReboot (and sendMinorNoRebootResult) to emit terminal task
-// responses. Tests override this to capture calls without needing a real
-// WebSocket connection. The production value delegates to the standard
-// SendTaskResponse helper.
+// firmwareSendResponse is the indirection point every FIRMWARE_UPGRADE path uses
+// to emit terminal task responses. Tests override this to capture calls without
+// needing a real WebSocket connection. The production value delegates to the
+// standard SendTaskResponse helper.
 //
 // Signature mirrors SendTaskResponse: (ws, taskID, result) → error.
-var firmwareNoRebootSendResponse = func(ws *network.WebSocketClient, taskID string, result TaskResult) error {
+var firmwareSendResponse = func(ws *network.WebSocketClient, taskID string, result TaskResult) error {
 	return SendTaskResponse(ws, taskID, result)
 }
 
-// firmwareNoRebootSendInProgress is the indirection for IN_PROGRESS sends in
-// the reboot=false path. Tests can override to a no-op or recorder.
-var firmwareNoRebootSendInProgress = func(ws *network.WebSocketClient, taskID, message string) error {
+// firmwareSendInProgress is the indirection for IN_PROGRESS sends. Tests can
+// override to a no-op or recorder.
+var firmwareSendInProgress = func(ws *network.WebSocketClient, taskID, message string) error {
 	return SendInProgressResponse(ws, taskID, message)
 }
 
@@ -132,6 +144,7 @@ type firmwareOPNAPIClient interface {
 	TriggerFirmwareUpgrade(ctx context.Context) (*opnapi.FirmwareUpgradeResponse, error)
 	GetFirmwareUpgradeProgress(ctx context.Context) (*opnapi.FirmwareProgressStatus, error)
 	GetFirmwareRunning(ctx context.Context) (*opnapi.FirmwareRunning, error)
+	InstalledRelease(ctx context.Context) (opnapi.ProductRelease, error)
 }
 
 // firmwareGetSuffixFunc is the indirection for reading the firmware type
@@ -250,7 +263,7 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 	payload, err := parseFirmwareUpgradePayload(cmd)
 	if err != nil {
 		log.Warnw("Invalid FIRMWARE_UPGRADE payload", "task_id", cmd.TaskID, "error", err)
-		return SendTaskResponse(ws, cmd.TaskID, NewFailureResult("Invalid payload: "+err.Error()))
+		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult("Invalid payload: "+err.Error()))
 	}
 
 	log.Infow("FIRMWARE_UPGRADE parameters",
@@ -265,7 +278,7 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 	// Real apply in test mode → block (dry_run is exempt).
 	if isTestMode && !payload.DryRun {
 		log.Warn("Test mode: FIRMWARE_UPGRADE blocked (use dry_run=true to preview)")
-		return SendTaskResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("FIRMWARE_UPGRADE blocked in test mode (set dry_run=true to preview the plan)"))
 	}
 
@@ -277,12 +290,42 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		client = raw
 	}
 	if client == nil {
-		return SendTaskResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("OPNsense API client not configured (api_key/api_secret missing)"))
 	}
 
+	// ── One firmware task at a time ──────────────────────────────────────────
+	// OPNsense runs one firmware job at a time and a request that finds its lock
+	// held is dropped. Two tasks are dispatched in the same second every Sunday
+	// (the daily and the weekly schedule) and would each trigger, poll the same
+	// progress log and be judged by the other's run. The second waits for the
+	// first to end and then does its own work: normally there is nothing left to
+	// apply and it completes as a no-op. A first run that ends in a reboot ends
+	// with the agent being stopped, and the second, which never started, is left
+	// for the reconciler (the marker below is what tells it so).
+	marked := recordFirmwareMarker(ws, cmd, log, payload.Mode, payload.Reboot)
+	waitCtx, endWait := firmwareWaitContext(ctx, cmd)
+	defer endWait()
+	release, err := firmware.Acquire(waitCtx, func() {
+		log.Infow("Another firmware task is running on this device; waiting for it", "task_id", cmd.TaskID)
+		if err := firmwareSendInProgress(ws, cmd.TaskID,
+			"Waiting for another firmware task on this device to finish..."); err != nil {
+			log.Warnw("Failed to send IN_PROGRESS", "error", err)
+		}
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return leftBeforeTheTrigger(ctx, log, cmd, marked)
+		}
+		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(taskExpiredWhileWaiting))
+	}
+	defer release()
+	if firmwareExpired(cmd) {
+		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(taskExpiredWhileWaiting))
+	}
+
 	// ── Send IN_PROGRESS ─────────────────────────────────────────────────────
-	if err := SendInProgressResponse(ws, cmd.TaskID, "Checking firmware status..."); err != nil {
+	if err := firmwareSendInProgress(ws, cmd.TaskID, "Checking firmware status..."); err != nil {
 		log.Warnw("Failed to send IN_PROGRESS", "error", err)
 	}
 
@@ -300,11 +343,24 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 	// ── Read /status → from_version + classification ─────────────────────────
 	status, err := client.GetFirmwareUpgradeStatus(ctx)
 	if err != nil {
-		return SendTaskResponse(ws, cmd.TaskID,
+		if ctx.Err() != nil {
+			return leftBeforeTheTrigger(ctx, log, cmd, marked)
+		}
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("Failed to read firmware status: "+err.Error()))
 	}
 
-	fromVersion := status.ProductVersion
+	// The version this task reports is the installed one, read from the local
+	// version file: /status's top-level product_version is the cached result of
+	// the last check. A real run insists on it (see the reboot paths); a preview
+	// or a no-op can do with the status's own.
+	fromVersion, versionErr := installedVersion(ctx, client)
+	if versionErr != nil {
+		log.Warnw("Could not read the installed release; using the firmware status's",
+			"task_id", cmd.TaskID, "error", versionErr)
+		fromVersion = status.ProductVersion
+	}
+	plan := firmware.PlannedPackages(status)
 	log.Infow("Firmware status read",
 		"from_version", fromVersion,
 		"opnsense_status", status.Status,
@@ -339,7 +395,7 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 				"reboot_performed": false,
 				"opnsense_status":  status.Status,
 			}
-			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+			return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
 				Success: true,
 				Message: firmwareSuccessJSON(d),
 			})
@@ -355,7 +411,7 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 				"reboot_performed": false,
 				"opnsense_status":  status.Status,
 			}
-			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+			return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
 				Success: true,
 				Message: firmwareSuccessJSON(d),
 			})
@@ -372,8 +428,9 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		if payload.Mode == "major" {
 			reboots = 2 // major can reboot twice
 			toVersion = status.UpgradeMajorVersion
-		} else if status.ProductLatest != "" {
-			toVersion = status.ProductLatest
+		} else if toVersion = firmware.CoreVersion(plan); toVersion == "" {
+			// A plan that leaves the core package alone leaves the release alone.
+			toVersion = fromVersion
 		}
 
 		log.Infow("DRY_RUN: plan computed", "task_id", cmd.TaskID,
@@ -388,12 +445,12 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 			"applied":          false,
 			"dry_run":          true,
 			"no_update":        false,
-			"packages_applied": len(status.UpgradePackages),
+			"packages_applied": firmware.PackagesApplied(plan),
 			"mixed_state":      false,
 			"opnsense_status":  status.Status,
 			"needs_reboot":     status.NeedsReboot,
 		}
-		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
+		return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
 			Success: true,
 			Message: firmwareSuccessJSON(d),
 		})
@@ -409,10 +466,49 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		return handleMajorWithReboot(ctx, ws, cmd, client, payload, status)
 	default:
 		// Unreachable: parseFirmwareUpgradePayload already rejected major+reboot=false.
-		return SendTaskResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult(fmt.Sprintf("unsupported mode/reboot combination: mode=%s reboot=%v",
 				payload.Mode, payload.Reboot)))
 	}
+}
+
+// taskExpiredWhileWaiting is what a task is failed with when its own lifetime
+// ran out before it got its turn: NDManager has already given up on it, and
+// running it now would apply an update nobody is waiting for.
+const taskExpiredWhileWaiting = "The firmware task expired while it waited for another firmware task on this device; " +
+	"nothing was started."
+
+// firmwareWaitContext bounds the wait for the firmware slot by the task's own
+// expiry, when the command carries one.
+func firmwareWaitContext(ctx context.Context, cmd network.Command) (context.Context, context.CancelFunc) {
+	if cmd.ExpiresAt <= 0 {
+		return context.WithCancel(ctx)
+	}
+	remaining := time.Unix(cmd.ExpiresAt, 0).Sub(firmwareNow())
+	if remaining < time.Nanosecond {
+		remaining = time.Nanosecond
+	}
+	return context.WithTimeout(ctx, remaining)
+}
+
+// firmwareExpired reports whether the task's own lifetime has run out.
+func firmwareExpired(cmd network.Command) bool {
+	return cmd.ExpiresAt > 0 && !firmwareNow().Before(time.Unix(cmd.ExpiresAt, 0))
+}
+
+// leftBeforeTheTrigger ends a task whose context was cancelled (the connection
+// dropped, or the agent is stopping) before it triggered anything. The row is
+// left IN_PROGRESS with the marker, so the reconciler says the task never
+// started; the dispatcher, given an error, would record the generic "task was
+// cancelled" instead. Without a marker there is nothing for the reconciler to
+// go on and the dispatcher's record is all there is.
+func leftBeforeTheTrigger(ctx context.Context, log interface{ Infow(string, ...interface{}) }, cmd network.Command, marked bool) error {
+	if !marked {
+		return ctx.Err()
+	}
+	log.Infow("Context cancelled before the firmware update was triggered; leaving the task IN_PROGRESS for the reconciler",
+		"task_id", cmd.TaskID)
+	return nil
 }
 
 // waitForFirmwareReady polls GET /core/firmware/running until OPNsense reports
@@ -492,10 +588,20 @@ func handleMinorNoReboot(
 ) error {
 	log := logging.Named("FIRMWARE_UPGRADE")
 
-	fromVersion := initialStatus.ProductVersion
-	pkgCount := len(initialStatus.UpgradePackages)
+	fromVersion, err := installedVersion(ctx, client)
+	if err != nil {
+		return firmwareSendResponse(ws, cmd.TaskID,
+			NewFailureResult("Could not read the installed OPNsense release: "+err.Error()))
+	}
+	plan := firmware.PlannedPackages(initialStatus)
+	pkgCount := firmware.PackagesApplied(plan)
 
-	if err := firmwareNoRebootSendInProgress(ws, cmd.TaskID,
+	// The exec below is the agent's own child. If a package in the run replaces
+	// the agent's, the agent is stopped and the row is left IN_PROGRESS, so what
+	// the run started from is recorded first.
+	meta := recordFirmwareRun(ws, cmd, log, "minor", false, fromVersion, initialStatus)
+
+	if err := firmwareSendInProgress(ws, cmd.TaskID,
 		fmt.Sprintf("Applying %d package(s) without reboot...", pkgCount)); err != nil {
 		log.Warnw("Failed to send IN_PROGRESS", "error", err)
 	}
@@ -503,11 +609,11 @@ func handleMinorNoReboot(
 	// Derive suffix from the on-device pluginctl; validate it before exec.
 	suffix, err := firmwareGetSuffixFunc(ctx)
 	if err != nil {
-		return firmwareNoRebootSendResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("Could not determine firmware suffix: "+err.Error()))
 	}
 	if err := ValidateFirmwareSuffix(suffix); err != nil {
-		return firmwareNoRebootSendResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("Invalid firmware suffix: "+err.Error()))
 	}
 
@@ -519,10 +625,22 @@ func handleMinorNoReboot(
 	)
 
 	// Run the exec (synchronous). [Error path]
+	markFirmwareTriggered(ws, cmd, log, &meta)
 	result, err := RunFirmwarePackagesOnly(ctx, suffix)
 	if err != nil {
-		return firmwareNoRebootSendResponse(ws, cmd.TaskID,
+		return firmwareSendResponse(ws, cmd.TaskID,
 			NewFailureResult("Failed to execute opnsense-update: "+err.Error()))
+	}
+
+	// A cancelled context (the connection dropped, or the agent is stopping,
+	// which a package in this very run can cause) kills opnsense-update, but pkg,
+	// which it started, goes on. That is not a failed run and not a finished one:
+	// the row is left IN_PROGRESS with the plan recorded above, and the
+	// reconciler checks it once package tools have stopped.
+	if ctx.Err() != nil && result.ExitCode != 0 {
+		log.Infow("Context cancelled during opnsense-update; leaving the task IN_PROGRESS for the reconciler",
+			"task_id", cmd.TaskID, "exit_code", result.ExitCode)
+		return nil
 	}
 
 	// [Non-zero exit path]
@@ -532,7 +650,7 @@ func handleMinorNoReboot(
 			"exit_code", result.ExitCode,
 			"stderr", result.Stderr,
 		)
-		return firmwareNoRebootSendResponse(ws, cmd.TaskID, NewFailureResult(
+		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(
 			fmt.Sprintf("opnsense-update exited with code %d: %s",
 				result.ExitCode, firstNonEmptyLogLine(result.Stderr))))
 	}
@@ -540,13 +658,16 @@ func handleMinorNoReboot(
 	// ── exit 0: packages applied ──────────────────────────────────────────────
 	// exit 0 is the source of truth for a successful apply. Derive result fields
 	// from the PRE-apply snapshot to avoid reading a stale /status cache.
-	preNonRebootPkgs := countNonRebootPackages(initialStatus.UpgradePackages)
+	preNonRebootPkgs := firmware.PackagesApplied(plan)
 
 	// mixed_state: base or kernel was in the pending list pre-exec — they remain
 	// deferred (expected outcome of the packages-only path).
-	mixedState := hasBaseOrKernelPending(initialStatus.UpgradePackages)
+	mixedState := firmware.HasBaseOrKernel(plan)
 
-	toVersion := initialStatus.ProductLatest
+	// The release the run reaches is the core package's planned version. The
+	// status's product_latest is derived from the installed changelog and does
+	// not move with the update, so it is not used.
+	toVersion := firmware.CoreVersion(plan)
 	if toVersion == "" {
 		toVersion = fromVersion
 	}
@@ -568,12 +689,12 @@ func handleMinorNoReboot(
 		log.Warnw("Post-apply /status read failed; skipping ABI/series guard", "error", postErr)
 	} else {
 		if postStatus.ProductSeries != initialStatus.ProductSeries {
-			return firmwareNoRebootSendResponse(ws, cmd.TaskID, NewFailureResult(
+			return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(
 				fmt.Sprintf("post-apply series changed unexpectedly: %s → %s",
 					initialStatus.ProductSeries, postStatus.ProductSeries)))
 		}
 		if postStatus.ProductABI != initialStatus.ProductABI {
-			return firmwareNoRebootSendResponse(ws, cmd.TaskID, NewFailureResult(
+			return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(
 				fmt.Sprintf("post-apply ABI changed unexpectedly: %s → %s",
 					initialStatus.ProductABI, postStatus.ProductABI)))
 		}
@@ -581,30 +702,6 @@ func handleMinorNoReboot(
 
 	// [Packages applied path]
 	return sendMinorNoRebootResult(ws, cmd.TaskID, fromVersion, toVersion, initialStatus, result, false, mixedState, preNonRebootPkgs)
-}
-
-// hasBaseOrKernelPending reports whether the pending package list contains
-// "base" or "kernel" — the packages that are always deferred in the
-// reboot=false path. Used to derive mixed_state from pre-apply data.
-func hasBaseOrKernelPending(pkgs []opnapi.FirmwarePackageEntry) bool {
-	for _, p := range pkgs {
-		if p.Name == "base" || p.Name == "kernel" {
-			return true
-		}
-	}
-	return false
-}
-
-// countNonRebootPackages counts packages in the list that are not "base" or "kernel"
-// (those require a reboot and are left behind in the packages-only path).
-func countNonRebootPackages(pkgs []opnapi.FirmwarePackageEntry) int {
-	n := 0
-	for _, p := range pkgs {
-		if p.Name != "base" && p.Name != "kernel" {
-			n++
-		}
-	}
-	return n
 }
 
 // packageNames returns the package names from a slice of FirmwarePackageEntry.
@@ -657,231 +754,10 @@ func sendMinorNoRebootResult(
 		"packages_applied":  packagesApplied,
 		"remaining_pending": remaining,
 	}
-	return firmwareNoRebootSendResponse(ws, taskID, TaskResult{
+	return firmwareSendResponse(ws, taskID, TaskResult{
 		Success: true,
 		Message: firmwareSuccessJSON(data),
 	})
-}
-
-// handleMinorWithReboot implements: minor + reboot=true
-// REST POST /update → monitor /upgradestatus → store IN_PROGRESS (reboot kills us).
-// Boot-time drain (LifecycleRestartCompletes) reconciles on return.
-func handleMinorWithReboot(
-	ctx context.Context,
-	ws *network.WebSocketClient,
-	cmd network.Command,
-	client firmwareOPNAPIClient,
-	payload *firmwareUpgradePayload,
-	initialStatus *opnapi.FirmwareUpgradeStatus,
-) error {
-	log := logging.Named("FIRMWARE_UPGRADE")
-
-	fromVersion := initialStatus.ProductVersion
-
-	if err := SendInProgressResponse(ws, cmd.TaskID,
-		fmt.Sprintf("Triggering minor update from %s; OPNsense will reboot...",
-			fromVersion)); err != nil {
-		log.Warnw("Failed to send IN_PROGRESS", "error", err)
-	}
-
-	resp, err := client.TriggerFirmwareUpdate(ctx)
-	if err != nil {
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult("Failed to trigger firmware update: "+err.Error()))
-	}
-	if resp.Status != "ok" {
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult(fmt.Sprintf("Firmware update returned status %q (expected \"ok\")", resp.Status)))
-	}
-
-	log.Infow("Firmware update triggered; waiting for completion or reboot",
-		"task_id", cmd.TaskID,
-		"msg_uuid", resp.MsgUUID,
-		"from_version", fromVersion,
-	)
-
-	// Poll /upgradestatus until done/reboot/error or context cancellation.
-	// When OPNsense reboots mid-poll, the connection drops and the context
-	// will be cancelled — that's expected. The taskstore row stays IN_PROGRESS
-	// with LifecycleRestartCompletes; the drain resolves it on return.
-	sentinel := pollUpgradeStatus(ctx, client, log)
-
-	log.Infow("Firmware update sentinel", "sentinel", sentinel)
-
-	// If we are still alive after the sentinel (unlikely for reboot case but
-	// possible if the update was packages-only), do an in-session resolution.
-	switch sentinel {
-	case "done":
-		// No reboot occurred. Verify version advanced.
-		postStatus, err := client.GetFirmwareUpgradeStatus(ctx)
-		if err != nil {
-			// Can't verify in-session; leave it as COMPLETED (best-effort).
-			d := map[string]interface{}{
-				"resolved_mode":    "minor",
-				"from_version":     fromVersion,
-				"reboot_performed": false,
-				"reboots_expected": 1,
-				"applied":          true,
-				"status_sentinel":  sentinel,
-				"opnsense_status":  "unknown",
-			}
-			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
-				Success: true,
-				Message: firmwareSuccessJSON(d),
-			})
-		}
-		toVersion := postStatus.ProductVersion
-		d := map[string]interface{}{
-			"resolved_mode":    "minor",
-			"from_version":     fromVersion,
-			"to_version":       toVersion,
-			"reboot_performed": false,
-			"reboots_expected": 1,
-			"applied":          true,
-			"status_sentinel":  sentinel,
-			"opnsense_status":  postStatus.Status,
-		}
-		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
-			Success: true,
-			Message: firmwareSuccessJSON(d),
-		})
-	case "reboot":
-		// System is rebooting. The task row stays IN_PROGRESS;
-		// LifecycleRestartCompletes resolves it on boot return.
-		// We do NOT send a terminal response here — the drain does.
-		log.Infow("System rebooting; leaving task IN_PROGRESS for boot-time drain",
-			"task_id", cmd.TaskID)
-		// The agent will be killed by the reboot. Nothing left to do.
-		return nil
-	case "error":
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult("Firmware update reported an error (***ERROR*** sentinel)"))
-	default:
-		// Context cancelled (likely the reboot killed the connection).
-		log.Infow("Context cancelled during upgrade status poll (likely reboot); leaving IN_PROGRESS",
-			"task_id", cmd.TaskID)
-		return nil
-	}
-}
-
-// handleMajorWithReboot implements: major + reboot=true
-// REST POST /upgrade → monitor /upgradestatus → reboot kills us (up to 2×).
-// Boot-time drain (LifecycleRestartCompletes) reconciles on return.
-func handleMajorWithReboot(
-	ctx context.Context,
-	ws *network.WebSocketClient,
-	cmd network.Command,
-	client firmwareOPNAPIClient,
-	payload *firmwareUpgradePayload,
-	initialStatus *opnapi.FirmwareUpgradeStatus,
-) error {
-	log := logging.Named("FIRMWARE_UPGRADE")
-
-	fromVersion := initialStatus.ProductVersion
-	toSeries := initialStatus.UpgradeMajorVersion
-
-	if err := SendInProgressResponse(ws, cmd.TaskID,
-		fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense may reboot up to 2 times...",
-			initialStatus.ProductSeries, toSeries)); err != nil {
-		log.Warnw("Failed to send IN_PROGRESS", "error", err)
-	}
-
-	resp, err := client.TriggerFirmwareUpgrade(ctx)
-	if err != nil {
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult("Failed to trigger firmware upgrade: "+err.Error()))
-	}
-	if resp.Status != "ok" {
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult(fmt.Sprintf("Firmware upgrade returned status %q (expected \"ok\")", resp.Status)))
-	}
-
-	log.Infow("Major firmware upgrade triggered",
-		"task_id", cmd.TaskID,
-		"msg_uuid", resp.MsgUUID,
-		"from_series", initialStatus.ProductSeries,
-		"to_series", toSeries,
-	)
-
-	// Poll until context cancellation or a sentinel. For major upgrades,
-	// OPNsense typically reboots before ***DONE*** appears. Either way,
-	// LifecycleRestartCompletes covers us on return.
-	sentinel := pollUpgradeStatus(ctx, client, log)
-
-	log.Infow("Major upgrade sentinel", "sentinel", sentinel)
-
-	switch sentinel {
-	case "done":
-		// Rare in practice for major (usually reboots). Resolve in-session.
-		postStatus, err := client.GetFirmwareUpgradeStatus(ctx)
-		if err != nil {
-			d := map[string]interface{}{
-				"resolved_mode":    "major",
-				"from_version":     fromVersion,
-				"reboots_expected": 2,
-				"applied":          true,
-				"status_sentinel":  sentinel,
-			}
-			return SendTaskResponse(ws, cmd.TaskID, TaskResult{
-				Success: true,
-				Message: firmwareSuccessJSON(d),
-			})
-		}
-		d := map[string]interface{}{
-			"resolved_mode":    "major",
-			"from_version":     fromVersion,
-			"to_version":       postStatus.ProductVersion,
-			"reboots_expected": 2,
-			"reboot_performed": false,
-			"applied":          true,
-			"status_sentinel":  sentinel,
-			"opnsense_status":  postStatus.Status,
-		}
-		return SendTaskResponse(ws, cmd.TaskID, TaskResult{
-			Success: true,
-			Message: firmwareSuccessJSON(d),
-		})
-	case "reboot":
-		log.Infow("System rebooting during major upgrade; leaving IN_PROGRESS",
-			"task_id", cmd.TaskID)
-		return nil
-	case "error":
-		return SendTaskResponse(ws, cmd.TaskID,
-			NewFailureResult("Major upgrade reported an error (***ERROR*** sentinel)"))
-	default:
-		log.Infow("Context cancelled during major upgrade poll (likely reboot); leaving IN_PROGRESS",
-			"task_id", cmd.TaskID)
-		return nil
-	}
-}
-
-// upgradeStatusPollInterval is the time between /upgradestatus polls.
-// Overridable in tests via setUpgradeStatusPollIntervalForTest.
-var upgradeStatusPollInterval = 5 * time.Second
-
-// pollUpgradeStatus polls GET /upgradestatus until a sentinel appears or
-// the context is cancelled. Returns the sentinel string: "done", "reboot",
-// "error", or "" (context cancelled / connection lost).
-func pollUpgradeStatus(ctx context.Context, client firmwareOPNAPIClient, log interface{ Infow(string, ...interface{}) }) string {
-	ticker := time.NewTicker(upgradeStatusPollInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ""
-		case <-ticker.C:
-			prog, err := client.GetFirmwareUpgradeProgress(ctx)
-			if err != nil {
-				// Connection drop is expected during reboot.
-				return ""
-			}
-			switch prog.Status {
-			case "done", "reboot", "error":
-				return prog.Status
-			}
-		}
-	}
 }
 
 // firstNonEmptyLogLine returns the first non-empty line from s. Used to

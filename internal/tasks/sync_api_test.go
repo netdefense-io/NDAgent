@@ -305,7 +305,7 @@ func TestParseUserContent_RejectsProtectedIdentities(t *testing.T) {
 
 	for _, name := range protected {
 		t.Run(name, func(t *testing.T) {
-			content := `{"name": "` + name + `", "password": "$2y$hash", "scope": "user"}`
+			content := `{"name": "` + name + `", "password": "fixture-password", "scope": "user"}`
 			_, err := parseUserContent(content, nil)
 			if err == nil {
 				t.Fatalf("parseUserContent(%q) expected error for protected user, got nil", name)
@@ -314,7 +314,7 @@ func TestParseUserContent_RejectsProtectedIdentities(t *testing.T) {
 	}
 
 	// Sanity: a non-protected user still parses fine.
-	_, err := parseUserContent(`{"name": "regularuser", "password": "$2y$hash", "scope": "user"}`, nil)
+	_, err := parseUserContent(`{"name": "regularuser", "password": "fixture-password", "scope": "user"}`, nil)
 	if err != nil {
 		t.Errorf("parseUserContent(regularuser) unexpected error: %v", err)
 	}
@@ -539,7 +539,10 @@ func newUserGroupTestServer(t *testing.T) (client *opnapi.Client, addedUsers, ad
 }
 
 // TestExecuteSyncUsersGroups_DangerousFieldGate is the revert guard for the
-// device-local dangerous-field gate. Table-driven over each dangerous USER
+// device-local dangerous-field gate. Its priv and scope fixtures are
+// Superuser-cleared so that the owner's policy is exercised on its own: what an
+// element without clearance may not do is covered in
+// sync_admin_equivalence_test.go. Table-driven over each dangerous USER
 // field individually (mirrors NDManager's producer-side dangerous-field set):
 // with the gate OFF, a dangerous user is applied same as any other (no
 // regression versus pre-gate behavior); with the gate ON, the dangerous user
@@ -551,7 +554,7 @@ func newUserGroupTestServer(t *testing.T) (client *opnapi.Client, addedUsers, ad
 func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 	safeUser := opnapi.APIUserPayload{
 		Name:     "safe-user",
-		Password: "$2y$hash",
+		Password: "fixture-password",
 		Scope:    "user",
 		Shell:    "/usr/sbin/nologin",
 	}
@@ -560,10 +563,10 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 		field string
 		user  opnapi.APIUserPayload
 	}{
-		{"priv", opnapi.APIUserPayload{Name: "priv-user", Password: "$2y$hash", Scope: "user", Priv: []string{"page-all"}}},
-		{"scope", opnapi.APIUserPayload{Name: "scope-user", Password: "$2y$hash", Scope: "system"}},
-		{"shell", opnapi.APIUserPayload{Name: "shell-user", Password: "$2y$hash", Scope: "user", Shell: "/bin/sh"}},
-		{"authorizedkeys", opnapi.APIUserPayload{Name: "keys-user", Password: "$2y$hash", Scope: "user", AuthorizedKeys: "ssh-ed25519 AAAAtest"}},
+		{"priv", opnapi.APIUserPayload{Name: "priv-user", Password: "fixture-password", Scope: "user", Priv: []string{"page-all"}, SuperuserCleared: true}},
+		{"scope", opnapi.APIUserPayload{Name: "scope-user", Password: "fixture-password", Scope: "system", SuperuserCleared: true}},
+		{"shell", opnapi.APIUserPayload{Name: "shell-user", Password: "fixture-password", Scope: "user", Shell: "/bin/sh"}},
+		{"authorizedkeys", opnapi.APIUserPayload{Name: "keys-user", Password: "fixture-password", Scope: "user", AuthorizedKeys: "ssh-ed25519 AAAAtest"}},
 	}
 
 	for _, du := range dangerousUsers {
@@ -622,7 +625,7 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 // sync is unaffected either way.
 func TestExecuteSyncUsersGroups_DangerousGroupPrivGate(t *testing.T) {
 	safeGroup := opnapi.APIGroupPayload{Name: "safe-group", Priv: []string{"page-status-services"}}
-	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}}
+	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}, SuperuserCleared: true}
 
 	for _, rejectDangerous := range []bool{false, true} {
 		t.Run(fmt.Sprintf("reject=%v", rejectDangerous), func(t *testing.T) {
@@ -725,8 +728,8 @@ func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExi
 
 	// Same names as the pre-existing managed rows above; both carry a
 	// dangerous priv so the gate rejects them.
-	dangerousUser := opnapi.APIUserPayload{Name: "priv-user", Password: "$2y$hash", Scope: "user", Priv: []string{"page-all"}}
-	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}}
+	dangerousUser := opnapi.APIUserPayload{Name: "priv-user", Password: "fixture-password", Scope: "user", Priv: []string{"page-all"}, SuperuserCleared: true}
+	dangerousGroup := opnapi.APIGroupPayload{Name: "dangerous-group", Priv: []string{"page-all"}, SuperuserCleared: true}
 
 	result := executeSyncUsersGroups(context.Background(), client,
 		[]opnapi.APIUserPayload{dangerousUser},
@@ -769,8 +772,8 @@ func TestExecuteSyncUsersGroups_DangerousFieldRejectionDoesNotOrphanDeletePreExi
 func TestExecuteSyncUsersGroups_DefersNewUserWhenStale(t *testing.T) {
 	client, addedUsers, _ := newUserGroupTestServer(t)
 
-	safeUser := opnapi.APIUserPayload{Name: "safe-user", Password: "$2y$hash", Scope: "user"}
-	staleUser := opnapi.APIUserPayload{Name: "new-admin", Password: "$2y$hash", Scope: "user"}
+	safeUser := opnapi.APIUserPayload{Name: "safe-user", Password: "fixture-password", Scope: "user"}
+	staleUser := opnapi.APIUserPayload{Name: "new-admin", Password: "fixture-password", Scope: "user"}
 
 	auth := authDeferralInfo{Active: true, StaleNames: map[string]bool{"new-admin": true}}
 	result := executeSyncUsersGroups(context.Background(), client,

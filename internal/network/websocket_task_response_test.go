@@ -76,6 +76,47 @@ func TestBuildTaskResponseInner_NilData(t *testing.T) {
 	}
 }
 
+// TestBuildTaskResponseInner_CarriesAdminEquivalent: the PULL verdict is a
+// top-level key of the signed response. The function copies only the keys it
+// knows, so a verdict that is not listed there is dropped with no error.
+func TestBuildTaskResponseInner_CarriesAdminEquivalent(t *testing.T) {
+	log := logging.Named("test")
+
+	for _, verdict := range []bool{true, false} {
+		data := map[string]interface{}{
+			"content":          map[string]interface{}{"name": "alice-admin"},
+			"admin_equivalent": verdict,
+		}
+		inner := buildTaskResponseInner("COMPLETED", "Found user 'alice-admin'", data, log)
+
+		got, ok := inner["admin_equivalent"]
+		if !ok || got != verdict {
+			t.Errorf("verdict %v: inner[admin_equivalent] = %v (present %v), want %v", verdict, got, ok, verdict)
+		}
+		if _, ok := inner["content"]; !ok {
+			t.Error("content must still be carried")
+		}
+	}
+}
+
+// TestBuildTaskResponseInner_AdminEquivalentOnlyWhenABool: absent, or anything
+// that is not a bool, is no verdict and must not appear as one.
+func TestBuildTaskResponseInner_AdminEquivalentOnlyWhenABool(t *testing.T) {
+	log := logging.Named("test")
+
+	for name, data := range map[string]map[string]interface{}{
+		"absent":    {"content": "x"},
+		"a string":  {"content": "x", "admin_equivalent": "true"},
+		"a number":  {"content": "x", "admin_equivalent": 1},
+		"nil value": {"content": "x", "admin_equivalent": nil},
+	} {
+		inner := buildTaskResponseInner("COMPLETED", "ok", data, log)
+		if v, ok := inner["admin_equivalent"]; ok {
+			t.Errorf("%s: inner carries admin_equivalent = %v, want no key", name, v)
+		}
+	}
+}
+
 func keysOf(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {

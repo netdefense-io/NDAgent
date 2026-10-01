@@ -189,50 +189,88 @@ func TestHTTPProxyForwardRequest(t *testing.T) {
 	}
 }
 
-// TestIsMutatingRuntimeAction is revert-sensitive for the read-only proxy
-// denylist: it must block the service-action family on mutating methods
-// while never touching GET/HEAD/OPTIONS or the OPNsense grid/list search
-// endpoints (POST search*/searchItem/search_*), which every RO list view
-// depends on.
-func TestIsMutatingRuntimeAction(t *testing.T) {
+// A request-target such as "http:@host:port/x" carries a host of its own. The
+// only place the proxy sends a request to is the local webadmin, whatever the
+// target says, and a session that is not read-only is held to that too.
+func TestHTTPProxyForwardRequestIgnoresHostInTarget(t *testing.T) {
+	local, localHits := newSentinelBackend("local webadmin")
+	defer local.Close()
+	other, otherHits := newSentinelBackend("another host")
+	defer other.Close()
+	_, otherPort, err := net.SplitHostPort(strings.TrimPrefix(other.URL, "https://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	proxy := newHandleStreamTestProxy(t, local, false)
+	session := &Session{ID: "test123session456id789abcdef01234", Username: "testuser"}
+
+	for _, target := range []string{
+		fmt.Sprintf("http:@127.0.0.1:%s/internal/admin", otherPort),
+		fmt.Sprintf("http://127.0.0.1:%s/internal/admin", otherPort),
+		fmt.Sprintf("https:127.0.0.1:%s", otherPort),
+	} {
+		raw := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: x\r\n\r\n", target)
+		req, err := http.ReadRequest(bufio.NewReader(strings.NewReader(raw)))
+		if err != nil {
+			t.Fatalf("ReadRequest(%q): %v", target, err)
+		}
+		if resp, err := proxy.forwardRequest(context.Background(), req, session); err == nil {
+			resp.Body.Close()
+		}
+	}
+
+	if got := atomic.LoadInt32(otherHits); got != 0 {
+		t.Fatalf("another host was hit %d time(s); a request-target must not choose the host the proxy calls", got)
+	}
+	if got := atomic.LoadInt32(localHits); got == 0 {
+		t.Fatal("the local webadmin was never reached; the requests must still be served from it")
+	}
+}
+
+// TestReadOnlyRefusal is revert-sensitive for the read-only proxy denylist: it
+// must refuse the service-action family on mutating methods while never
+// touching GET/HEAD or the OPNsense grid/list search endpoints (POST
+// search*/searchItem/search_*), which every RO list view depends on.
+func TestReadOnlyRefusal(t *testing.T) {
 	tests := []struct {
 		name   string
 		method string
-		path   string
-		want   bool
+		target string
+		want   int
 	}{
 		// Must ALLOW: list/grid views load via POST to search endpoints.
-		{"search rule", "POST", "/api/firewall/filter/searchRule", false},
-		{"search alias item", "POST", "/api/firewall/alias/searchItem", false},
-		{"search wireguard server", "POST", "/api/wireguard/server/search_server", false},
-		{"GET service restart is safe method", "GET", "/api/core/service/restart/openvpn", false},
-		{"HEAD service restart is safe method", "HEAD", "/api/core/service/restart/openvpn", false},
-		{"OPTIONS service restart is safe method", "OPTIONS", "/api/core/service/restart/openvpn", false},
-		{"unrelated POST", "POST", "/api/core/firmware/status", false},
-		{"GET firewall state killStates is safe method", "GET", "/api/diagnostics/firewall/killStates", false},
-		{"search state grid load", "POST", "/api/diagnostics/firewall/searchState", false},
+		{"search rule", "POST", "/api/firewall/filter/searchRule", forwarded},
+		{"search alias item", "POST", "/api/firewall/alias/searchItem", forwarded},
+		{"search wireguard server", "POST", "/api/wireguard/server/search_server", forwarded},
+		{"GET service restart is a safe method", "GET", "/api/core/service/restart/openvpn", forwarded},
+		{"HEAD service restart is a safe method", "HEAD", "/api/core/service/restart/openvpn", forwarded},
+		{"unrelated POST", "POST", "/api/core/firmware/status", forwarded},
+		{"GET firewall state killStates is a safe method", "GET", "/api/diagnostics/firewall/killStates", forwarded},
+		{"search state grid load", "POST", "/api/diagnostics/firewall/searchState", forwarded},
 
 		// Must DENY: mutating requests to the service-action family.
-		{"POST service restart", "POST", "/api/core/service/restart/openvpn", true},
-		{"POST service stop with svc", "POST", "/api/core/service/stop/openvpn", true},
-		{"POST openvpn service reconfigure", "POST", "/api/openvpn/service/reconfigure", true},
-		{"POST service start no id", "POST", "/api/core/service/start", true},
-		{"DELETE service restart", "DELETE", "/api/core/service/restart/openvpn", true},
-		{"PUT service reload", "PUT", "/api/core/service/reload/openvpn", true},
-		{"PATCH service reconfigure", "PATCH", "/api/core/service/reconfigure", true},
+		{"POST service restart", "POST", "/api/core/service/restart/openvpn", refused},
+		{"POST service stop with svc", "POST", "/api/core/service/stop/openvpn", refused},
+		{"POST openvpn service reconfigure", "POST", "/api/openvpn/service/reconfigure", refused},
+		{"POST service start no id", "POST", "/api/core/service/start", refused},
+		{"DELETE service restart", "DELETE", "/api/core/service/restart/openvpn", refused},
+		{"PUT service reload", "PUT", "/api/core/service/reload/openvpn", refused},
+		{"PATCH service reconfigure", "PATCH", "/api/core/service/reconfigure", refused},
+		{"OPTIONS is not a method a read-only session uses", "OPTIONS", "/api/core/service/search", refused},
 
 		// Must DENY: mutating requests to the diagnostics firewall-state
 		// mutator family.
-		{"POST killStates", "POST", "/api/diagnostics/firewall/killStates", true},
-		{"POST flushStates", "POST", "/api/diagnostics/firewall/flushStates", true},
-		{"POST delState with ids", "POST", "/api/diagnostics/firewall/delState/12345/0", true},
-		{"DELETE flushStates", "DELETE", "/api/diagnostics/firewall/flushStates", true},
+		{"POST killStates", "POST", "/api/diagnostics/firewall/killStates", refused},
+		{"POST flushStates", "POST", "/api/diagnostics/firewall/flushStates", refused},
+		{"POST delState with ids", "POST", "/api/diagnostics/firewall/delState/12345/0", refused},
+		{"DELETE flushStates", "DELETE", "/api/diagnostics/firewall/flushStates", refused},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := isMutatingRuntimeAction(tt.method, tt.path); got != tt.want {
-				t.Errorf("isMutatingRuntimeAction(%q, %q) = %v, want %v", tt.method, tt.path, got, tt.want)
+			if got := readOnlyRefusal(tt.method, tt.target, false); got != tt.want {
+				t.Errorf("readOnlyRefusal(%q, %q) = %d, want %d", tt.method, tt.target, got, tt.want)
 			}
 		})
 	}
@@ -296,10 +334,10 @@ func TestNewHTTPProxy(t *testing.T) {
 // HandleStream-level integration tests for the read-only runtime-action gate
 // ---------------------------------------------------------------------------
 //
-// The unit tests above (TestIsMutatingRuntimeAction, the SetReadOnly default,
+// The unit tests above (TestReadOnlyRefusal, the SetReadOnly default,
 // the ProxyConfig wiring test) each exercise one piece of the gate in
 // isolation. None of them would fail if the gate itself — the
-// `if p.readOnly && isMutatingRuntimeAction(...)` block inside HandleStream —
+// `if p.readOnly` block that calls readOnlyRefusal inside HandleStream —
 // were inverted, had its `continue` dropped, or were deleted outright: the
 // pure function and the field-setter would still behave correctly even if
 // nothing in HandleStream ever consulted them. The tests below drive
@@ -313,11 +351,13 @@ func TestNewHTTPProxy(t *testing.T) {
 type handleStreamCapture struct {
 	mu     sync.Mutex
 	frames []*Frame
+	sentAt []time.Time // when each frame was written, by index
 }
 
 func (c *handleStreamCapture) add(f *Frame) {
 	c.mu.Lock()
 	c.frames = append(c.frames, f)
+	c.sentAt = append(c.sentAt, time.Now())
 	c.mu.Unlock()
 }
 
@@ -334,6 +374,33 @@ func (c *handleStreamCapture) dataBytes() []byte {
 		}
 	}
 	return buf.Bytes()
+}
+
+// closeSent reports whether HandleStream sent a CLOSE frame for the stream.
+func (c *handleStreamCapture) closeSent() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, f := range c.frames {
+		if f.Type == FrameTypeClose {
+			return true
+		}
+	}
+	return false
+}
+
+// afterFirstResponse returns what the stream carried after its first complete
+// response: nothing, when the proxy answered one request and took no other.
+func (c *handleStreamCapture) afterFirstResponse() []byte {
+	data := c.dataBytes()
+	r := bufio.NewReader(bytes.NewReader(data))
+	resp, err := http.ReadResponse(r, nil)
+	if err != nil {
+		return data
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	rest, _ := io.ReadAll(r)
+	return rest
 }
 
 // newHandleStreamTestStream builds a *Stream (id 1) wired to a StreamManager
@@ -469,12 +536,14 @@ func runHandleStream(proxy *HTTPProxy, stream *Stream) <-chan error {
 // waitHandleStreamDone waits for HandleStream to return after the stream is
 // closed, failing the test on timeout so a goroutine leak surfaces loudly
 // instead of silently under -race.
-func waitHandleStreamDone(t *testing.T, done <-chan error) {
+func waitHandleStreamDone(t *testing.T, done <-chan error) error {
 	t.Helper()
 	select {
-	case <-done:
+	case err := <-done:
+		return err
 	case <-time.After(5 * time.Second):
 		t.Fatal("HandleStream did not return after the stream was closed")
+		return nil
 	}
 }
 
@@ -582,7 +651,7 @@ func TestHandleStream_ReadOnlyAllowsGridSearchLoad_IsForwarded(t *testing.T) {
 	stream, cap := newHandleStreamTestStream()
 	done := runHandleStream(proxy, stream)
 
-	pushRawRequest(stream, "POST", "/firewall/filter/searchRule")
+	pushRawRequest(stream, "POST", "/api/firewall/filter/searchRule")
 
 	resp := waitForHandleStreamResponse(t, cap)
 	if resp.StatusCode != http.StatusOK {

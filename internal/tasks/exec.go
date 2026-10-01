@@ -13,11 +13,15 @@ package tasks
 // to binaries under /usr/local/{sbin,bin} must use this.
 //
 // The implementation lives in internal/util to avoid an import cycle with
-// internal/pathfinder. This file re-exports it under the tasks package so
-// existing callers (firmware_upgrade.go, plugin_install.go, etc.) need no
-// change.
+// internal/pathfinder; this file re-exports it for the handlers in this
+// package.
 
-import "github.com/netdefense-io/ndagent/internal/util"
+import (
+	"os/exec"
+	"syscall"
+
+	"github.com/netdefense-io/ndagent/internal/util"
+)
 
 // devicePATH is the PATH that a root interactive shell has on FreeBSD/OPNsense.
 // Re-exported from util for any tasks package code that references it directly.
@@ -28,4 +32,19 @@ const devicePATH = util.DevicePATH
 // full documentation.
 func DeviceExecEnv() []string {
 	return util.DeviceExecEnv()
+}
+
+// newDetachedHelperCmd builds the command for a helper script the agent forks
+// and then outlives. The helper drives pkg(8), whose hook scripts and the
+// OPNsense PHP behind them call tools in /usr/local by bare name, so it gets
+// the device PATH instead of the stripped one the agent inherits from rc.d.
+func newDetachedHelperCmd(path string, args ...string) *exec.Cmd {
+	cmd := exec.Command(path, args...)
+	cmd.Env = DeviceExecEnv()
+	// Detach: own session, own process group, no controlling terminal —
+	// pkg's `rc.d ndagent stop` sends SIGTERM to the agent's PID/PGID, not
+	// to ours. Without Setsid the helper rides the same pgrp and dies too.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	return cmd
 }

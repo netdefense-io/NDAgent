@@ -56,3 +56,10 @@ func SetAddURLFunc(f func(context.Context, string, bool) MutateOutcome) func(con
 	addURLFunc = f
 	return prev
 }
+
+// SetInstalledVersionsFunc — same pattern for InstalledVersions.
+func SetInstalledVersionsFunc(f func(context.Context) (map[string]string, error)) func(context.Context) (map[string]string, error) {
+	prev := installedVersionsFunc
+	installedVersionsFunc = f
+	return prev
+}

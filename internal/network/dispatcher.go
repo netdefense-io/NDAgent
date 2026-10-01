@@ -24,7 +24,7 @@ import (
 var errDispatchReplay = errors.New("dispatch replay rejected")
 
 // LifecycleResolver maps a task_type string to its taskstore Lifecycle
-// category. The dispatcher uses it at Begin time so the boot-time drain
+// category. The dispatcher uses it at Begin time so the connect-time drain
 // knows how to react to rows left IN_PROGRESS. Implemented in
 // internal/tasks/register.go (LifecycleFor); passed in via constructor
 // to avoid an import cycle (tasks → network → tasks).
@@ -60,6 +60,11 @@ const syncQueueCapacity = 64
 type CommandDispatcher struct {
 	handlers    map[string]TaskHandler
 	activeTasks sync.Map // map[string]context.CancelFunc
+	// queuedTasks holds the ids of SYNCs sitting in syncQueue that no handler
+	// has started yet. Together with activeTasks it answers IsTaskLive: a
+	// queued SYNC already has an IN_PROGRESS row (beginTaskState at enqueue)
+	// but is not in activeTasks until the worker dequeues it.
+	queuedTasks sync.Map // map[string]struct{}
 	mu          sync.Mutex
 	taskCount   int
 
@@ -163,6 +168,8 @@ func (d *CommandDispatcher) RegisterHandler(taskType string, handler TaskHandler
 //     inside the signed payload (NDManager seals it at task creation).
 func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketClient) error {
 	log := logging.Named("dispatcher")
+
+	d.resumeQueuedSyncs(ctx, ws)
 
 	for {
 		// Check for cancellation
@@ -276,8 +283,9 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 		// not the unsigned outer frame field. pathfinder_session for CONNECT
 		// lives inside the signed payload; pulled out below if present.
 		cmd := Command{
-			TaskID:   fmt.Sprintf("%d", decoded.TaskID),
-			TaskType: decoded.Type,
+			TaskID:    fmt.Sprintf("%d", decoded.TaskID),
+			TaskType:  decoded.Type,
+			ExpiresAt: decoded.Exp,
 		}
 		if len(decoded.Payload) > 0 {
 			if err := json.Unmarshal(decoded.Payload, &cmd.Payload); err != nil {
@@ -308,7 +316,7 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 			// syncQueueCapacity-1 others; without this, a crash while
 			// this one is still queued (never yet reached
 			// dispatchCommand's own Begin call) leaves no row at all for
-			// the boot-time drain to find, so it can never send a
+			// the connect-time drain to find, so it can never send a
 			// terminal response for a task_id the broker is still
 			// waiting on. dispatchCommand's own Begin call right before
 			// the handler runs is idempotent against an already
@@ -335,15 +343,53 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 // trySyncEnqueue attempts a non-blocking enqueue onto the SYNC FIFO.
 // Returns false when the queue is full (capacity syncQueueCapacity) — the
 // caller is responsible for reporting SYNC_QUEUE_FULL; this method touches
-// nothing but the channel, so it is testable without a WebSocketClient.
+// nothing but the channel and the queued-id set, so it is testable without a
+// WebSocketClient.
 func (d *CommandDispatcher) trySyncEnqueue(cmd Command) bool {
+	d.queuedTasks.Store(cmd.TaskID, struct{}{})
 	select {
 	case d.syncQueue <- cmd:
 		return true
 	default:
+		d.queuedTasks.Delete(cmd.TaskID)
 		return false
 	}
 }
+
+// resumeQueuedSyncs restarts the SYNC worker for a connection that begins with
+// SYNCs still queued. The queue outlives a connection but its worker does not,
+// and ensureSyncWorker otherwise runs only when a new SYNC arrives, so a SYNC
+// queued when the connection dropped would wait for an unrelated one. That was
+// hidden while the connect-time drain failed such a row as "agent restarted
+// mid-task"; now that a queued task is left alone (IsTaskLive) it has to run.
+func (d *CommandDispatcher) resumeQueuedSyncs(ctx context.Context, ws *WebSocketClient) {
+	if len(d.syncQueue) > 0 {
+		d.ensureSyncWorker(ctx, ws)
+	}
+}
+
+// IsTaskLive reports whether this process still owns taskID: its handler is
+// running, or it is a SYNC queued behind another. A row that is IN_PROGRESS for
+// a task that is not live lost its handler (the agent restarted, or the handler
+// was cancelled and returned without a terminal response); a live one must be
+// left to its handler.
+//
+// queuedTasks is read before activeTasks on purpose. dispatchCommand adds a
+// task to activeTasks and only then removes it from queuedTasks, so reading in
+// that order can never see it in neither; the opposite order could.
+func (d *CommandDispatcher) IsTaskLive(taskID string) bool {
+	_, queued := d.queuedTasks.Load(taskID)
+	if livenessReadPause != nil {
+		livenessReadPause()
+	}
+	_, active := d.activeTasks.Load(taskID)
+	return queued || active
+}
+
+// livenessReadPause runs between IsTaskLive's two reads. It is a seam for the
+// test that pins their order: the window is a few instructions wide, and a
+// stress test almost never lands in it. Always nil in production.
+var livenessReadPause func()
 
 // ensureSyncWorker starts the single SYNC-draining goroutine bound to ctx,
 // unless a worker already started under a still-live ctx is running. It is
@@ -511,8 +557,9 @@ func (d *CommandDispatcher) dispatchCommand(ctx context.Context, ws *WebSocketCl
 	taskCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Track the task
+	// Track the task. Active first, queued second: see IsTaskLive.
 	d.activeTasks.Store(cmd.TaskID, cancel)
+	d.queuedTasks.Delete(cmd.TaskID)
 	d.mu.Lock()
 	d.taskCount++
 	d.mu.Unlock()
@@ -546,7 +593,7 @@ func (d *CommandDispatcher) dispatchCommand(ctx context.Context, ws *WebSocketCl
 	// Record the task as IN_PROGRESS in the local registry before the
 	// handler runs (idempotent — beginTaskState may already have done
 	// this at enqueue time for a SYNC command). The lifecycle category
-	// drives boot-time drain behavior if the agent dies before the
+	// drives connect-time drain behavior if the agent dies before the
 	// handler can send a final task_response (see internal/taskstore).
 	d.beginTaskState(cmd)
 

@@ -36,11 +36,14 @@ log_level=INFO
 test_mode=false
 
 # Device-local defense-in-depth: reject individual USER/GROUP/ZABBIX_*
-# SYNC_API snippet elements carrying a dangerous field (broad priv,
-# scope=system, interactive shell, authorizedkeys, Zabbix remote
-# commands, sudo_root) instead of applying them. Default false — the
-# primary control is NDManager's producer-side org:su gate.
-reject_dangerous_snippets=false
+# SYNC_API snippet elements carrying a dangerous field (administrator-
+# equivalent priv, membership in admins, scope=system, interactive shell,
+# authorizedkeys, Zabbix remote commands, sudo_root) instead of applying
+# them. Default true. The primary control is NDManager's producer-side
+# org:su gate, and a USER/GROUP element that would give an account
+# administrator rights without Superuser clearance is refused whatever this
+# says.
+reject_dangerous_snippets=true
 
 # Pathfinder settings (for remote access via CONNECT task)
 # pathfinder_host=https://pathfinder.netdefense.io

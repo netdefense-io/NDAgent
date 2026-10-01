@@ -10,27 +10,29 @@ const NDAgentTemplateTagPrefix = "[nd-template:"
 // netdefense-agent and netdefense-readonly are provisioned by the plugin
 // itself (API credentials and the forged-session read-only identity,
 // respectively) and must never be reachable through SYNC_API create/modify
-// or orphan-delete.
-var ProtectedUsernames = map[string]bool{
-	"root":                true,
-	"netdefense-agent":    true,
-	"netdefense-readonly": true,
-}
+// or orphan-delete. The names come from the shared admin-equivalence catalog.
+var ProtectedUsernames = nameSet(adminCatalog.protectedUsers)
 
 // ProtectedGroupNames lists group names that cannot be modified via SYNC.
 // netdefense-readonly is provisioned alongside the same-named user above;
 // both the user and the group must be protected or the co-named group's
-// priv set (the read-only ACL allowlist) would remain SYNC-writable.
-var ProtectedGroupNames = map[string]bool{
-	"admins":              true,
-	"netdefense-readonly": true,
+// priv set (the read-only ACL allowlist) would remain SYNC-writable. The
+// names come from the shared admin-equivalence catalog.
+var ProtectedGroupNames = nameSet(adminCatalog.protectedGroups)
+
+func nameSet(names []string) map[string]bool {
+	set := make(map[string]bool, len(names))
+	for _, n := range names {
+		set[n] = true
+	}
+	return set
 }
 
 // User represents an OPNsense user for API operations.
 // Fields match the OPNsense auth/user API structure.
 type User struct {
 	Name             string `json:"name"`
-	Password         string `json:"password,omitempty"`
+	Password         string `json:"password,omitempty"` // Plaintext: OPNsense hashes whatever it is sent
 	Disabled         string `json:"disabled"`
 	Scope            string `json:"scope"`
 	Descr            string `json:"descr"`
@@ -79,7 +81,7 @@ type GroupWrapper struct {
 // Uses names instead of IDs for cross-firewall portability.
 type APIUserPayload struct {
 	Name           string   `json:"name"`
-	Password       string   `json:"password,omitempty"` // Bcrypt hash
+	Password       string   `json:"password,omitempty"` // Plaintext, never a hash: OPNsense hashes it
 	Disabled       bool     `json:"disabled"`
 	Scope          string   `json:"scope"`
 	Descr          string   `json:"descr"`
@@ -93,6 +95,12 @@ type APIUserPayload struct {
 	Language       string   `json:"language,omitempty"`
 	LandingPage    string   `json:"landing_page,omitempty"`
 	Templates      []string `json:"templates,omitempty"` // Template metadata
+
+	// SuperuserCleared, SnippetName and SnippetIndex are agent-internal
+	// provenance, never serialised: see the same fields on APIGroupPayload.
+	SuperuserCleared bool   `json:"-"`
+	SnippetName      string `json:"-"`
+	SnippetIndex     int    `json:"-"`
 }
 
 // APIGroupPayload is the portable format for groups in templates/snippets.
@@ -112,6 +120,19 @@ type APIGroupPayload struct {
 	// sends the `member` field for one regardless of what Members holds,
 	// see ConvertAPIToGroup and executeSyncUsersGroups's member phases.
 	ExternalMembers bool `json:"external_members,omitempty"`
+
+	// SuperuserCleared is the control plane's attestation that a Superuser
+	// authored this element as it was delivered: its snippet carried
+	// content_clearance "org:su" in the signed SYNC payload. Anything else, the
+	// key absent included, leaves it false, and a false element may not do what
+	// only a Superuser may (see executeSyncUsersGroups).
+	//
+	// SnippetName and SnippetIndex record where in the SYNC payload the element
+	// came from, so a refusal can name the snippet to fix. Agent-internal
+	// provenance, never serialised: the wire contract is unchanged.
+	SuperuserCleared bool   `json:"-"`
+	SnippetName      string `json:"-"`
+	SnippetIndex     int    `json:"-"`
 }
 
 // SetUserResponse is the response from user add/set endpoints.

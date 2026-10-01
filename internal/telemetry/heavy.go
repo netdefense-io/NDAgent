@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/firmware"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"go.uber.org/zap"
@@ -56,6 +57,9 @@ const heavyRefreshInterval = 15 * time.Minute
 // reading `firmware/status` for the result. 30 s matches what
 // OPNsense's own web UI does internally.
 const firmwareCheckSettleSeconds = 30
+
+// firmwareCheckSettle is the wait itself; a variable so tests do not sit through it.
+var firmwareCheckSettle = firmwareCheckSettleSeconds * time.Second
 
 // HeavyCollector owns the cache. Lifetime is the agent process — start
 // it once from `lifecycle.go` after the OPNsense API client is
@@ -132,8 +136,17 @@ func (h *HeavyCollector) refresh(ctx context.Context) {
 	// Pending updates — POST /firmware/check is async; wait then read.
 	// We fire the check first, then go do the cert probe while it's
 	// settling, then come back to read the status. Cheap parallelism.
+	//
+	// Not while a firmware update is in progress: the check takes the same lock
+	// the update runs under and truncates the progress log the update is being
+	// judged by. The previous reading is kept rather than shown as unavailable.
 	checkOK := false
-	if err := h.client.TriggerFirmwareCheck(ctx); err != nil {
+	if firmware.Busy() {
+		h.log.Debugw("heavy-telemetry: firmware update in progress; skipping the firmware check")
+		if prev := h.Snapshot(); prev != nil {
+			snap.Updates = prev.Updates
+		}
+	} else if err := h.client.TriggerFirmwareCheck(ctx); err != nil {
 		h.log.Warnw("heavy-telemetry: firmware check trigger failed", "error", err)
 	} else {
 		checkOK = true
@@ -151,7 +164,7 @@ func (h *HeavyCollector) refresh(ctx context.Context) {
 	// We don't block forever — ctx cancellation short-circuits.
 	if checkOK {
 		elapsed := time.Since(start)
-		remaining := firmwareCheckSettleSeconds*time.Second - elapsed
+		remaining := firmwareCheckSettle - elapsed
 		if remaining > 0 {
 			select {
 			case <-ctx.Done():

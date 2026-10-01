@@ -205,8 +205,11 @@ type SyncAPIItemResult struct {
 	// gate) reported; for "auth_facility" it is the facility's own code;
 	// for "auth_local_server"/"auth_warning" it mirrors the code already
 	// embedded in Error; for the "group_member"/"user" deferral items it
-	// is authCodeUserDeferredExclusionStale. Never populated outside the
-	// AUTH family today.
+	// is authCodeUserDeferredExclusionStale; for a "user"/"group" element
+	// refused for missing Superuser clearance it is
+	// codeAdminEquivalentRequiresSuperuser. A refusal by the owner's own
+	// reject_dangerous_snippets policy carries none. Never populated
+	// outside these families today.
 	Code string `json:"code,omitempty"`
 	// Before/After are the auth_facility item's kept/written order, names
 	// only. Available is the resolution set an unresolved
@@ -256,11 +259,13 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
-	// Visibility only — never blocks the sync. Below the 26.1 floor a VPN
-	// teardown silently strands its auto firewall rules, and shipping a
-	// known silent failure with only documentation to protect users is not
-	// acceptable. At most one log line per category per agent process, and
-	// no API call at all once the release is known to be supported.
+	// Visibility only — never blocks the sync. Below the 26.1 series a VPN
+	// teardown silently strands its auto firewall rules, and below 26.1.11
+	// some privileges treated as ordinary can lead to administrator rights;
+	// shipping a known silent failure with only documentation to protect
+	// users is not acceptable. At most one log line per category per agent
+	// process, and no API call at all once the release is known to be
+	// supported.
 	warnIfOPNsenseBelowFloor(ctx, apiClient)
 
 	// Parse payload
@@ -1672,6 +1677,9 @@ func parseAPIUsers(payload map[string]interface{}) ([]opnapi.APIUserPayload, err
 		if err != nil {
 			return nil, fmt.Errorf("%s: %v", snippetLabel("user", snippetMap, idx), err)
 		}
+		user.SuperuserCleared = snippetSuperuserCleared(snippetMap)
+		user.SnippetName, _ = snippetMap["snippet_name"].(string)
+		user.SnippetIndex = idx
 
 		users = append(users, user)
 	}
@@ -1782,6 +1790,9 @@ func parseAPIGroups(payload map[string]interface{}) ([]opnapi.APIGroupPayload, e
 		if err != nil {
 			return nil, fmt.Errorf("%s: %v", snippetLabel("group", snippetMap, idx), err)
 		}
+		group.SuperuserCleared = snippetSuperuserCleared(snippetMap)
+		group.SnippetName, _ = snippetMap["snippet_name"].(string)
+		group.SnippetIndex = idx
 
 		groups = append(groups, group)
 	}
@@ -1902,14 +1913,15 @@ func updateExternalGroup(ctx context.Context, client *opnapi.Client, log *zap.Su
 // executeSyncUsersGroups performs sync for users and groups.
 // Groups are synced first (users may reference groups).
 //
-// rejectDangerous is the device-local opt-in gate (config: reject_dangerous_
-// snippets, default false). When true, any USER/GROUP element carrying a
-// dangerous field (see opnapi.DangerousUserFields/DangerousGroupFields) is
-// rejected instead of created/updated: it's dropped from the create/update
-// pass and recorded as a "rejected" result, but left OUT of the orphan-
-// delete decision below — the gate refuses new dangerous mutations, it does
-// not delete pre-existing device state that happens to match the same
-// criteria. When false, behavior is unchanged from before this gate existed.
+// Every element first passes the accountGate (sync_account_gate.go): an
+// element that would give an account administrator rights, or take one over,
+// without the control plane's Superuser clearance is refused whatever the
+// device-local config says, and rejectDangerous (config: reject_dangerous_
+// snippets, default true) is the owner's own opt-in policy on top of it. A
+// refused element is dropped from the create/update pass and recorded as a
+// "rejected" result, but left OUT of the orphan-delete decision below — the
+// gate refuses new mutations, it does not delete pre-existing device state
+// that happens to match the same criteria.
 //
 // auth carries the AUTH_SERVER/AUTH_ORDER family's stale-exclusion deferral
 // state (see sync_authserver.go). The
@@ -1917,61 +1929,38 @@ func updateExternalGroup(ctx context.Context, client *opnapi.Client, log *zap.Su
 // behavior, so every call site that has nothing to do with AUTH passes it
 // unchanged.
 func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload, rejectDangerous bool, auth authDeferralInfo) SyncAPIResult {
+	return executeSyncUsersGroupsWithPolicy(ctx, client, users, groups, rejectDangerous, auth, adminPrivPolicy(ctx, client))
+}
+
+func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client, users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload, rejectDangerous bool, auth authDeferralInfo, policy opnapi.PrivPolicy) SyncAPIResult {
 	log := logging.Named("SYNC_API")
 
 	var results []SyncAPIItemResult
 	var errors []string
 
-	// Dangerous-field gate. applyUsers/applyGroups (the accepted subset)
-	// drive the create/update phases below; the full, unfiltered users/
-	// groups slices still drive the desired-name sets used for orphan
-	// deletion further down, so a rejected element is neither applied nor
-	// deleted — it's simply left alone.
-	applyUsers := users
-	applyGroups := groups
-	if rejectDangerous {
-		applyUsers = make([]opnapi.APIUserPayload, 0, len(users))
-		for _, u := range users {
-			if fields := opnapi.DangerousUserFields(u); len(fields) > 0 {
-				log.Warnw("SYNC_API: rejected USER snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
-					"name", u.Name,
-					"fields", fields,
-				)
-				msg := dangerousSnippetRejectionMessage("user", u.Name, fields)
-				results = append(results, SyncAPIItemResult{
-					Type:   "user",
-					Name:   u.Name,
-					Action: "rejected",
-					Status: "blocked",
-					Error:  msg,
-				})
-				errors = append(errors, msg)
-				continue
-			}
-			applyUsers = append(applyUsers, u)
-		}
-
-		applyGroups = make([]opnapi.APIGroupPayload, 0, len(groups))
-		for _, g := range groups {
-			if fields := opnapi.DangerousGroupFields(g); len(fields) > 0 {
-				log.Warnw("SYNC_API: rejected GROUP snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
-					"name", g.Name,
-					"fields", fields,
-				)
-				msg := dangerousSnippetRejectionMessage("group", g.Name, fields)
-				results = append(results, SyncAPIItemResult{
-					Type:   "group",
-					Name:   g.Name,
-					Action: "rejected",
-					Status: "blocked",
-					Error:  msg,
-				})
-				errors = append(errors, msg)
-				continue
-			}
-			applyGroups = append(applyGroups, g)
-		}
+	gate := newAccountGate(policy, rejectDangerous, log)
+	gate.noteCleared(users, groups)
+	record := func(kind, name string, r refusal) {
+		results = append(results, SyncAPIItemResult{
+			Type:   kind,
+			Name:   name,
+			Action: "rejected",
+			Status: "blocked",
+			Code:   r.code,
+			Error:  r.message,
+		})
+		errors = append(errors, r.message)
 	}
+
+	// applyUsers/applyGroups (the accepted subset) drive the create/update
+	// phases below; the full, unfiltered users/groups slices still drive the
+	// desired-name sets used for orphan deletion further down, so a refused
+	// element is neither applied nor deleted — it's simply left alone.
+	//
+	// First pass: what needs no live rows. It runs before discovery so a
+	// discovery failure, which returns early, still reports these refusals.
+	applyUsers := gate.filterUsers(users, record)
+	applyGroups := gate.filterGroups(groups, record)
 
 	// Phase 1: Get all users and groups for lookups.
 	//
@@ -1980,8 +1969,7 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	// what already exists), not a per-element validation, so failing
 	// fast here is the correct exception rather than a violation of the
 	// "never fail fast" rule the per-element checks below follow. It
-	// must still preserve any dangerous-snippet rejections already
-	// recorded above.
+	// must still preserve any refusals already recorded above.
 	allUsers, err := client.ListAllUsers(ctx)
 	if err != nil {
 		msg := fmt.Sprintf("Failed to list users: %v", err)
@@ -2026,6 +2014,17 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 		"total_groups", len(allGroups),
 		"managed_groups", len(managedGroups),
 	)
+
+	// Second pass: what the live rows decide. A GROUP is judged first, and the
+	// groups that will be administrator-equivalent once applied are recorded, so
+	// a USER of this sync that names one is judged against what it is about to be.
+	// The device's own privilege catalog, read once for this sync: what a live
+	// group holds that the device does not define grants nothing there.
+	devicePrivs := livePrivCatalog(ctx, client)
+	gate.useLiveRows(allUsers, allGroups, devicePrivs)
+	applyGroups = gate.filterGroups(applyGroups, record)
+	gate.planGroups(applyGroups)
+	applyUsers = gate.filterUsers(applyUsers, record)
 
 	// Build lookup maps
 	userUUIDLookup := opnapi.BuildUserUUIDLookup(allUsers)
@@ -2281,9 +2280,9 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 	}
 
 	// Phase 5: Delete orphan users (managed but not in desired)
+	var orphanUsers []map[string]interface{}
 	for _, managedUser := range managedUsers {
 		name, _ := managedUser["name"].(string)
-		uuid, _ := managedUser["uuid"].(string)
 
 		if _, desired := desiredUserNames[name]; desired {
 			continue
@@ -2292,6 +2291,42 @@ func executeSyncUsersGroups(ctx context.Context, client *opnapi.Client, users []
 		// Skip protected users
 		if opnapi.IsProtectedUser(name) {
 			continue
+		}
+
+		orphanUsers = append(orphanUsers, managedUser)
+	}
+
+	var memberships *orphanMemberships
+	if len(orphanUsers) > 0 {
+		memberships = newOrphanMemberships(allUsers, allGroups, policy, devicePrivs)
+	}
+
+	for _, managedUser := range orphanUsers {
+		name, _ := managedUser["name"].(string)
+		uuid, _ := managedUser["uuid"].(string)
+
+		// Deleting a user leaves its uid in every group's member list (see
+		// sync_user_prune.go). Take it out first; a failure never blocks the
+		// delete, but it is reported.
+		if member, elevated := memberships.of(managedUser); member {
+			uid, _ := managedUser["uid"].(string)
+			left, pruneErr := pruneMemberships(ctx, client, uuid, name, uid)
+			if pruneErr == nil && len(left) > 0 {
+				elevated = memberships.anyElevated(left)
+				pruneErr = stillListedError(left)
+			}
+			if pruneErr != nil {
+				log.Warnw("SYNC_API: could not remove a managed user from its groups before deleting it",
+					"name", name,
+					"administrator_equivalent_group", elevated,
+					"error", pruneErr,
+				)
+				item, msg := pruneMembershipsFailure(name, uuid, elevated, pruneErr)
+				results = append(results, item)
+				if msg != "" {
+					errors = append(errors, msg)
+				}
+			}
 		}
 
 		err := client.DeleteUser(ctx, uuid)

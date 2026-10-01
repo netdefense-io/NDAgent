@@ -56,10 +56,16 @@ class AuthServerAlgo
      */
     const RESERVED_SERVER_NAMES = [self::LOCAL_DATABASE, self::LOCAL_API];
 
-    /** Protected local group names, compared case-insensitively. */
+    /**
+     * Protected local group names, compared case-insensitively. These are the
+     * shared catalog's `protected_groups`; `AdminEquivalenceTest.php` holds the two equal.
+     */
     const PROTECTED_GROUP_NAMES = ['admins', 'netdefense-readonly'];
 
-    /** The static half of the reserved-name exclusion set. */
+    /**
+     * The static half of the reserved-name exclusion set: the shared catalog's
+     * `protected_users`, held equal to it by the same test.
+     */
     const RESERVED_STATIC_USER_NAMES = ['root', 'netdefense-agent', 'netdefense-readonly'];
 
     /** Unicode code points (mirrors NDDataModels' Python len()), not bytes. */
@@ -1701,35 +1707,20 @@ class AuthServerAlgo
     }
 
     /**
-     * Mirrors NDManager's/`internal/opnapi/dangerous_fields.go`'s
-     * canonical blanket-access rule: a comma-split, lowercased/trimmed
-     * token is dangerous if it equals `page-all`, ends with `-all`, or
-     * contains both `system` and `admin` substrings. Kept in sync
-     * manually — there is no shared library between the Go agent and
-     * this PHP helper.
+     * Whether a priv CSV makes an account administrator-equivalent, by the
+     * catalog the agent and NDDataModels share (`AdminEquivalence`): a
+     * catalog admin-equivalent ID, an ID the catalog does not know, or the
+     * structural floor (page-all, *-all, system+admin).
      */
-    public static function privGrantsBlanketAccess(string $privCsv): bool
+    public static function privIsAdminEquivalent(string $privCsv): bool
     {
-        if ($privCsv === '') {
-            return false;
-        }
-        foreach (explode(',', $privCsv) as $token) {
-            $token = strtolower(trim($token));
-            if (
-                $token === 'page-all'
-                || (strlen($token) > 4 && substr($token, -4) === '-all')
-                || (strpos($token, 'system') !== false && strpos($token, 'admin') !== false)
-            ) {
-                return true;
-            }
-        }
-        return false;
+        return AdminEquivalence::privEntryIsElevated($privCsv);
     }
 
     /**
      * PRIVILEGED_LOCAL_USERS_SHADOWABLE — every local user who
-     * would gain blanket privilege either directly (their own `priv`) or
-     * through membership in a group that grants it. An ACL gotcha:
+     * would gain administrator-equivalent privilege either directly (their own
+     * `priv`) or through membership in a group that grants it. An ACL gotcha:
      * OPNsense group `<member>` stores the user's NUMERIC uid, not a
      * config-tree UUID — a user with no direct priv at all is exactly as
      * shadowable through a privileged group, since NetDefense's own
@@ -1761,12 +1752,12 @@ class AuthServerAlgo
             if (isset($u['uid'])) {
                 $uidToName[(string)$u['uid']] = $name;
             }
-            if (self::privGrantsBlanketAccess((string)($u['priv'] ?? ''))) {
+            if (self::privIsAdminEquivalent((string)($u['priv'] ?? ''))) {
                 $privileged[$name] = true;
             }
         }
         foreach ($groups as $g) {
-            if (!self::privGrantsBlanketAccess((string)($g['priv'] ?? ''))) {
+            if (!self::privIsAdminEquivalent((string)($g['priv'] ?? ''))) {
                 continue;
             }
             foreach ((array)($g['member_uids'] ?? []) as $uid) {

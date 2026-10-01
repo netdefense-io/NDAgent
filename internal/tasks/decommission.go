@@ -7,7 +7,6 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
@@ -434,10 +433,15 @@ func runPluginConfigure(ctx context.Context, mode string) error {
 
 const phpInterpreter = "/usr/local/bin/php"
 
+// decommissionHelperCmd builds the uninstall helper invocation.
+func decommissionHelperCmd(packageName string) *exec.Cmd {
+	return newDetachedHelperCmd(decommissionHelperPath, packageName)
+}
+
 // forkDecommissionHelper starts the detached uninstall helper.
 //
-// Exactly the HandlePluginInstall pattern: own session (Setsid), no
-// inherited descriptors, Process.Release because nobody will be alive to
+// Exactly the HandlePluginInstall pattern: a detached helper from
+// newDetachedHelperCmd, and Process.Release because nobody will be alive to
 // reap it. The helper has to survive both the agent's own exit and pkg's
 // pre-deinstall stopping the service it is about to remove.
 var forkDecommissionHelper = func(packageName string) error {
@@ -445,12 +449,7 @@ var forkDecommissionHelper = func(packageName string) error {
 		return fmt.Errorf("helper missing at %s: %w", decommissionHelperPath, err)
 	}
 
-	cmdExec := exec.Command(decommissionHelperPath, packageName)
-	cmdExec.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmdExec.Stdout = nil
-	cmdExec.Stderr = nil
-	cmdExec.Stdin = nil
-
+	cmdExec := decommissionHelperCmd(packageName)
 	if err := cmdExec.Start(); err != nil {
 		return err
 	}

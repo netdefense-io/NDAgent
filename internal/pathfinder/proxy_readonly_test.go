@@ -95,10 +95,10 @@ func TestReadOnlyServiceSetIsWebadminOnly(t *testing.T) {
 
 // TestNewTCPProxyWithConfigThreadsReadOnlyIntoHTTPProxy guards the wiring
 // between ProxyConfig.ReadOnly and the HTTPProxy's own readOnly flag, which
-// gates the mutating-runtime-action denylist inside the webadmin stream
-// (isMutatingRuntimeAction in httpproxy.go). Without this wiring, a
-// read-only session's single permitted service (webadmin) would still allow
-// POST /api/*/service/restart/... through.
+// gates the denylist inside the webadmin stream (readOnlyRefusal in
+// readonly_routes.go). Without this wiring, a read-only session's single
+// permitted service (webadmin) would still allow POST
+// /api/*/service/restart/... through.
 func TestNewTCPProxyWithConfigThreadsReadOnlyIntoHTTPProxy(t *testing.T) {
 	roProxy := NewTCPProxyWithConfig(ProxyConfig{ReadOnly: true})
 	if !roProxy.httpProxy.readOnly {

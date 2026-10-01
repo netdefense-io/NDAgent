@@ -291,3 +291,261 @@ func mustCountRows(t *testing.T, s *Store, query string) int {
 	}
 	return n
 }
+
+// rowState reads a row's status and message straight from the table.
+func rowState(t *testing.T, s *Store, id string) (status, message string) {
+	t.Helper()
+	if err := s.db.QueryRow("SELECT status, message FROM task_states WHERE task_id = ?", id).Scan(&status, &message); err != nil {
+		t.Fatalf("read row %s: %v", id, err)
+	}
+	return status, message
+}
+
+// FIRMWARE_UPGRADE's outcome is decided from the device's state, so the
+// blanket rule must leave it alone while it still resolves every other type
+// exactly as before.
+func TestResolveStuck_DeferredTypeIsLeftInProgress(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	for _, r := range []struct {
+		id, typ string
+		lc      Lifecycle
+	}{
+		{"fw", "FIRMWARE_UPGRADE", LifecycleRestartCompletes},
+		{"reboot", "REBOOT", LifecycleRestartCompletes},
+		{"sync", "SYNC", LifecycleSynchronous},
+		{"plugin", "PLUGIN_INSTALL", LifecycleHelperResolves},
+	} {
+		if err := s.Begin(r.id, r.typ, r.lc); err != nil {
+			t.Fatalf("Begin %s: %v", r.id, err)
+		}
+	}
+
+	n, err := s.ResolveStuck(WithDeferredTypes("FIRMWARE_UPGRADE"))
+	if err != nil {
+		t.Fatalf("ResolveStuck: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("resolved %d rows, want 3 (every row but the firmware one)", n)
+	}
+
+	want := map[string][2]string{
+		"fw":     {StatusInProgress, ""},
+		"reboot": {StatusCompleted, "Device returned after restart"},
+		"sync":   {StatusFailed, "agent restarted mid-task"},
+		"plugin": {StatusFailed, "helper did not produce result file"},
+	}
+	for id, w := range want {
+		status, message := rowState(t, s, id)
+		if status != w[0] || message != w[1] {
+			t.Errorf("%s: got (%s, %q), want (%s, %q)", id, status, message, w[0], w[1])
+		}
+	}
+}
+
+// A row written by an agent that predates the option carries whatever
+// lifecycle that agent chose; the deferral must not depend on it.
+func TestResolveStuck_DeferredTypeIgnoresTheStoredLifecycle(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	for id, lc := range map[string]Lifecycle{
+		"fw-restart":     LifecycleRestartCompletes,
+		"fw-synchronous": LifecycleSynchronous,
+		"fw-helper":      LifecycleHelperResolves,
+	} {
+		if err := s.Begin(id, "FIRMWARE_UPGRADE", lc); err != nil {
+			t.Fatalf("Begin %s: %v", id, err)
+		}
+	}
+
+	n, err := s.ResolveStuck(WithDeferredTypes("FIRMWARE_UPGRADE"))
+	if err != nil {
+		t.Fatalf("ResolveStuck: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("resolved %d firmware rows, want 0", n)
+	}
+	for _, id := range []string{"fw-restart", "fw-synchronous", "fw-helper"} {
+		if status, _ := rowState(t, s, id); status != StatusInProgress {
+			t.Errorf("%s: status %s, want IN_PROGRESS", id, status)
+		}
+	}
+}
+
+// A SYNC that is queued behind another already has an IN_PROGRESS row. A plain
+// reconnect drain used to fail it as "agent restarted mid-task" although the
+// process never restarted and the SYNC was still going to run.
+func TestResolveStuck_LiveRowIsLeftAlone(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	for _, id := range []string{"queued-sync", "orphan-sync"} {
+		if err := s.Begin(id, "SYNC", LifecycleSynchronous); err != nil {
+			t.Fatalf("Begin %s: %v", id, err)
+		}
+	}
+	live := func(id string) bool { return id == "queued-sync" }
+
+	n, err := s.ResolveStuck(WithLiveness(live))
+	if err != nil {
+		t.Fatalf("ResolveStuck: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("resolved %d rows, want 1 (only the orphan)", n)
+	}
+	if status, _ := rowState(t, s, "queued-sync"); status != StatusInProgress {
+		t.Errorf("queued-sync: status %s, want IN_PROGRESS", status)
+	}
+	if status, message := rowState(t, s, "orphan-sync"); status != StatusFailed || message != "agent restarted mid-task" {
+		t.Errorf("orphan-sync: got (%s, %q), want the mid-task failure", status, message)
+	}
+}
+
+// The scan and the write are separate statements: a handler that finishes in
+// between must keep the outcome it recorded.
+func TestResolveStuck_KeepsAnOutcomeRecordedAfterTheScan(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	if err := s.Begin("racing", "SYNC", LifecycleSynchronous); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	finishesMeanwhile := func(id string) bool {
+		if err := s.Complete(id, StatusCompleted, "handler result", nil); err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		return false
+	}
+
+	n, err := s.ResolveStuck(WithLiveness(finishesMeanwhile))
+	if err != nil {
+		t.Fatalf("ResolveStuck: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("resolved %d rows, want 0", n)
+	}
+	if status, message := rowState(t, s, "racing"); status != StatusCompleted || message != "handler result" {
+		t.Fatalf("handler outcome was overwritten: got (%s, %q)", status, message)
+	}
+}
+
+func TestCompleteIfInProgress_WinsOnceAndNeverOverwrites(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	if err := s.Begin("t", "FIRMWARE_UPGRADE", LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+
+	won, err := s.CompleteIfInProgress("t", StatusCompleted, "first", []byte(`{"a":1}`))
+	if err != nil || !won {
+		t.Fatalf("first call: won=%v err=%v, want true,nil", won, err)
+	}
+	won, err = s.CompleteIfInProgress("t", StatusFailed, "second", nil)
+	if err != nil || won {
+		t.Fatalf("second call: won=%v err=%v, want false,nil", won, err)
+	}
+	if status, message := rowState(t, s, "t"); status != StatusCompleted || message != "first" {
+		t.Fatalf("row was overwritten: (%s, %q)", status, message)
+	}
+
+	rows, err := s.Undelivered()
+	if err != nil || len(rows) != 1 || string(rows[0].ResultData) != `{"a":1}` {
+		t.Fatalf("the winning write must be replayable with its data: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestCompleteIfInProgress_UnknownRowAndBadStatus(t *testing.T) {
+	s := newTestStore(t)
+
+	won, err := s.CompleteIfInProgress("ghost", StatusCompleted, "x", nil)
+	if err != nil || won {
+		t.Fatalf("unknown row: won=%v err=%v, want false,nil (it must not create one)", won, err)
+	}
+	if n := mustCountRows(t, s, "SELECT COUNT(*) FROM task_states"); n != 0 {
+		t.Fatalf("CompleteIfInProgress created %d row(s)", n)
+	}
+	if _, err := s.CompleteIfInProgress("ghost", StatusInProgress, "x", nil); err == nil {
+		t.Fatal("IN_PROGRESS is not a terminal status and must be rejected")
+	}
+}
+
+func TestGetTaskMeta_RoundTripAndAbsent(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	type meta struct {
+		Mode string `json:"mode"`
+		N    int    `json:"n"`
+	}
+	if err := s.Begin("with", "FIRMWARE_UPGRADE", LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := s.Begin("without", "FIRMWARE_UPGRADE", LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := s.SetTaskMeta("with", meta{Mode: "minor", N: 7}); err != nil {
+		t.Fatalf("SetTaskMeta: %v", err)
+	}
+
+	var got meta
+	found, err := s.GetTaskMeta("with", &got)
+	if err != nil || !found || got != (meta{Mode: "minor", N: 7}) {
+		t.Fatalf("round trip: found=%v err=%v got=%+v", found, err, got)
+	}
+
+	for _, id := range []string{"without", "no-such-task"} {
+		var m meta
+		found, err := s.GetTaskMeta(id, &m)
+		if err != nil || found {
+			t.Errorf("%s: found=%v err=%v, want false,nil", id, found, err)
+		}
+	}
+}
+
+func TestGetTaskMeta_MalformedBlobCountsAsAbsent(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	if err := s.Begin("t", "FIRMWARE_UPGRADE", LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if _, err := s.db.Exec("UPDATE task_states SET task_meta = ? WHERE task_id = ?", "{not json", "t"); err != nil {
+		t.Fatalf("seed blob: %v", err)
+	}
+
+	var m struct{ Mode string }
+	found, err := s.GetTaskMeta("t", &m)
+	if err != nil || found {
+		t.Fatalf("found=%v err=%v, want false,nil", found, err)
+	}
+}
+
+func TestGet_ReportsTheRowWhereverItStands(t *testing.T) {
+	s := newTestStore(t)
+	withClock(t, time.Unix(1_700_000_000, 0))
+
+	if _, found, err := s.Get("nope"); err != nil || found {
+		t.Fatalf("Get of a missing task: found=%v err=%v, want false,nil", found, err)
+	}
+
+	_ = s.Begin("t", "FIRMWARE_UPGRADE", LifecycleRestartCompletes)
+	rec, found, err := s.Get("t")
+	if err != nil || !found || rec.Status != StatusInProgress || rec.Delivered || rec.TaskType != "FIRMWARE_UPGRADE" ||
+		rec.Lifecycle != LifecycleRestartCompletes || !rec.StartedAt.Equal(time.Unix(1_700_000_000, 0)) {
+		t.Fatalf("in progress: %+v found=%v err=%v", rec, found, err)
+	}
+
+	_ = s.Complete("t", StatusCompleted, "done", []byte(`{"a":1}`))
+	rec, _, _ = s.Get("t")
+	if rec.Status != StatusCompleted || rec.Message != "done" || string(rec.ResultData) != `{"a":1}` || rec.Delivered || rec.EndedAt.IsZero() {
+		t.Fatalf("terminal: %+v", rec)
+	}
+
+	_ = s.MarkDelivered("t")
+	if rec, _, _ = s.Get("t"); !rec.Delivered {
+		t.Fatalf("delivered: %+v", rec)
+	}
+}

@@ -321,3 +321,76 @@ func TestDrain_PluginInstall_OtherTypesUnaffected(t *testing.T) {
 		t.Fatal("pkg checker was called for a non-PLUGIN_INSTALL task type — violates scope constraint")
 	}
 }
+
+// The connect-time drain leaves a deferred type IN_PROGRESS and sends nothing
+// for it, while every other row is resolved and replayed as before.
+func TestDrain_DeferredTypeIsNeitherResolvedNorSent(t *testing.T) {
+	store := newTestStore(t)
+	withClock(t, time.Unix(1_716_336_000, 0))
+
+	_ = store.Begin("fw-1", "FIRMWARE_UPGRADE", LifecycleRestartCompletes)
+	_ = store.Begin("reboot-1", "REBOOT", LifecycleRestartCompletes)
+
+	resp := &stubResponder{}
+	sent, err := DrainUndelivered(context.Background(), store, t.TempDir(), resp, nil, nil,
+		WithDeferredTypes("FIRMWARE_UPGRADE"))
+	if err != nil {
+		t.Fatalf("DrainUndelivered: %v", err)
+	}
+	if sent != 1 || len(resp.sent) != 1 || resp.sent[0].taskID != "reboot-1" {
+		t.Fatalf("sent = %+v, want only reboot-1", resp.sent)
+	}
+	if status, _ := rowState(t, store, "fw-1"); status != StatusInProgress {
+		t.Fatalf("firmware row status %s, want IN_PROGRESS", status)
+	}
+
+	// A reconnect runs the drain again: nothing changes and nothing is re-sent.
+	sent, err = DrainUndelivered(context.Background(), store, t.TempDir(), resp, nil, nil,
+		WithDeferredTypes("FIRMWARE_UPGRADE"))
+	if err != nil || sent != 0 || len(resp.sent) != 1 {
+		t.Fatalf("second drain: sent=%d err=%v total responses=%d, want 0,nil,1", sent, err, len(resp.sent))
+	}
+	if status, _ := rowState(t, store, "fw-1"); status != StatusInProgress {
+		t.Fatalf("firmware row status %s after the second drain, want IN_PROGRESS", status)
+	}
+}
+
+// A row whose handler is alive in this process is not the drain's to close.
+func TestDrain_LiveRowIsNeitherResolvedNorSent(t *testing.T) {
+	store := newTestStore(t)
+	withClock(t, time.Unix(1_716_336_000, 0))
+
+	_ = store.Begin("queued-sync", "SYNC", LifecycleSynchronous)
+	_ = store.Begin("dead-sync", "SYNC", LifecycleSynchronous)
+
+	resp := &stubResponder{}
+	sent, err := DrainUndelivered(context.Background(), store, t.TempDir(), resp, nil, nil,
+		WithLiveness(func(id string) bool { return id == "queued-sync" }))
+	if err != nil {
+		t.Fatalf("DrainUndelivered: %v", err)
+	}
+	if sent != 1 || len(resp.sent) != 1 || resp.sent[0].taskID != "dead-sync" {
+		t.Fatalf("sent = %+v, want only dead-sync", resp.sent)
+	}
+	if status, _ := rowState(t, store, "queued-sync"); status != StatusInProgress {
+		t.Fatalf("queued row status %s, want IN_PROGRESS", status)
+	}
+}
+
+// Deferring a type only stops the drain from resolving its IN_PROGRESS rows. An
+// outcome that is already recorded, and not yet delivered, still goes out.
+func TestDrain_DeferredTypeStillReplaysARecordedOutcome(t *testing.T) {
+	store := newTestStore(t)
+	withClock(t, time.Unix(1_716_336_000, 0))
+
+	_ = store.Begin("fw-done", "FIRMWARE_UPGRADE", LifecycleRestartCompletes)
+	_ = store.Complete("fw-done", StatusFailed, "cancelled", nil)
+
+	resp := &stubResponder{}
+	sent, err := DrainUndelivered(context.Background(), store, t.TempDir(), resp, nil, nil,
+		WithDeferredTypes("FIRMWARE_UPGRADE"))
+	if err != nil || sent != 1 || len(resp.sent) != 1 ||
+		resp.sent[0].taskID != "fw-done" || resp.sent[0].status != StatusFailed || resp.sent[0].message != "cancelled" {
+		t.Fatalf("sent=%d err=%v responses=%+v, want the recorded FAILED replayed", sent, err, resp.sent)
+	}
+}

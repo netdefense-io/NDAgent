@@ -143,6 +143,55 @@ func (c *Client) SetUser(ctx context.Context, uuid string, user User) error {
 	return nil
 }
 
+// userMembershipsWrapper mirrors UserWrapper but carries only the account's name
+// and a group_memberships with no `omitempty`. User.GroupMemberships needs the
+// tag for every ordinary update (an absent key leaves the memberships alone),
+// and it would silently drop the one value this call exists to send: empty.
+type userMembershipsWrapper struct {
+	User struct {
+		Name             string `json:"name"`
+		GroupMemberships string `json:"group_memberships"`
+	} `json:"user"`
+}
+
+// ClearUserGroupMemberships removes a user from every group it belongs to.
+//
+// OPNsense reconciles group membership from the group_memberships an
+// auth/user/set posts, through the same code the GUI uses, so an explicit empty
+// value takes the user's uid out of every group's member list. Deleting a user
+// does not: auth/user/del never touches other groups, which leaves the uid behind
+// (in the admins group, for an administrator), where it fails every later update
+// of that group and is handed to the next local account that takes the freed uid.
+// No password is sent, so the stored one is untouched.
+func (c *Client) ClearUserGroupMemberships(ctx context.Context, uuid, name string) error {
+	path := fmt.Sprintf("/auth/user/set/%s", uuid)
+	var wrapper userMembershipsWrapper
+	wrapper.User.Name = name
+	wrapper.User.GroupMemberships = ""
+
+	respBody, err := c.doRequest(ctx, "POST", path, wrapper)
+	if err != nil {
+		return err
+	}
+
+	var result SetUserResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	if result.Result != "saved" {
+		if result.ValidationErrors.HasErrors() {
+			c.log.Debugw("Validation errors", "errors", result.ValidationErrors.String())
+			return fmt.Errorf("validation failed: %s", result.ValidationErrors.String())
+		}
+		return fmt.Errorf("unexpected result: %s (response: %s)", result.Result, string(respBody))
+	}
+
+	c.log.Debugw("ClearUserGroupMemberships completed", "uuid", uuid, "name", name)
+
+	return nil
+}
+
 // DeleteUser deletes a user by UUID.
 func (c *Client) DeleteUser(ctx context.Context, uuid string) error {
 	path := fmt.Sprintf("/auth/user/del/%s", uuid)
@@ -192,7 +241,10 @@ func BuildUserUUIDLookup(users []map[string]interface{}) map[string]string {
 	return lookup
 }
 
-// ConvertUserToAPI converts a raw user map to the portable API format.
+// ConvertUserToAPI converts a raw user map to the portable API format. The
+// portable format never carries the password: a search row holds the stored
+// hash, which OPNsense would hash again if it were sent back, so it is neither
+// a password nor usable as one.
 func ConvertUserToAPI(rawUser map[string]interface{}, groups []map[string]interface{}) APIUserPayload {
 	name, _ := rawUser["name"].(string)
 	disabled, _ := rawUser["disabled"].(string)
@@ -207,14 +259,12 @@ func ConvertUserToAPI(rawUser map[string]interface{}, groups []map[string]interf
 	comment, _ := rawUser["comment"].(string)
 	language, _ := rawUser["language"].(string)
 	landingPage, _ := rawUser["landing_page"].(string)
-	password, _ := rawUser["password"].(string)
 
 	// Resolve group GIDs to names
 	groupNames := ResolveGIDsToGroupNames(groupMemberships, groups)
 
 	return APIUserPayload{
 		Name:           name,
-		Password:       password, // Bcrypt hash
 		Disabled:       OPNsenseToBool(disabled),
 		Scope:          scope,
 		Descr:          StripTemplateTags(descr),

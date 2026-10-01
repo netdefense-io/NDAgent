@@ -68,16 +68,49 @@ func NewClient(baseURL, apiKey, apiSecret string, skipTLSVerify bool) *Client {
 }
 
 // doRequest performs an authenticated API request and returns the response body.
+//
+// A read whose response arrives corrupt (see read_retry.go) is repeated up to
+// maxReadRetries times. Every other request is sent exactly once.
 func (c *Client) doRequest(ctx context.Context, method, path string, body interface{}) ([]byte, error) {
-	url := c.baseURL + path
-
-	var bodyReader io.Reader
+	var payload []byte
 	if body != nil {
-		jsonBody, err := json.Marshal(body)
+		var err error
+		payload, err = json.Marshal(body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal request body: %w", err)
 		}
-		bodyReader = bytes.NewReader(jsonBody)
+	}
+
+	if !isIdempotentRead(method, path) {
+		return c.send(ctx, method, path, payload)
+	}
+
+	for attempt := 0; ; attempt++ {
+		respBody, err := c.send(ctx, method, path, payload)
+		if attempt == maxReadRetries || !isCorruptResponse(respBody, err) {
+			return respBody, err
+		}
+
+		c.log.Debugw("Retrying read after a corrupt response",
+			"method", method,
+			"path", path,
+			"retry", attempt+1,
+			"max_retries", maxReadRetries,
+			"error", err,
+		)
+		if sleepErr := retrySleep(ctx, time.Duration(attempt+1)*readRetryBackoff); sleepErr != nil {
+			return nil, fmt.Errorf("request failed: %w", sleepErr)
+		}
+	}
+}
+
+// send performs one authenticated request attempt.
+func (c *Client) send(ctx context.Context, method, path string, payload []byte) ([]byte, error) {
+	url := c.baseURL + path
+
+	var bodyReader io.Reader
+	if payload != nil {
+		bodyReader = bytes.NewReader(payload)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
@@ -87,7 +120,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 
 	req.SetBasicAuth(c.apiKey, c.apiSecret)
 	// Only set Content-Type for requests with a body
-	if body != nil {
+	if payload != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
 

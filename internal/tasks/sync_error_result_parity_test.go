@@ -317,7 +317,7 @@ func TestExecuteSyncUsersGroups_ListUsersFailure_HasMatchingResultItem(t *testin
 	defer server.Close()
 	client := opnapi.NewClient(server.URL, "key", "secret", true)
 
-	dangerousUser := opnapi.APIUserPayload{Name: "svc-mon", Priv: []string{"page-all"}}
+	dangerousUser := opnapi.APIUserPayload{Name: "svc-mon", Priv: []string{"page-all"}, SuperuserCleared: true}
 	result := executeSyncUsersGroups(context.Background(), client, []opnapi.APIUserPayload{dangerousUser}, nil, true, authDeferralInfo{})
 
 	assertErrorHasMatchingResultItem(t, "List users", result.Errors, result.Results)

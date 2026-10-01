@@ -19,6 +19,7 @@ namespace OPNsense\NetDefense;
 
 use OPNsense\Auth\Group;
 use OPNsense\Auth\User;
+use OPNsense\Core\ACL;
 
 /**
  * Provisions the shared read-only OPNsense user used for read-only
@@ -60,15 +61,17 @@ class ReadOnlyUserProvisioner
      * (almost) the whole priv catalog and SUBTRACTS only what the backstop
      * cannot guard.
      *
-     * Why this works (validated on lab OPNsense 26.1.9): every config write
-     * funnels through one of two guarded chokepoints, both of which check
-     * `user-config-readonly` for non-root users:
+     * Why this works: config writes funnel through two chokepoints, both of
+     * which check `user-config-readonly` for non-root users:
      *   - legacy `write_config()` (config.inc) — all `.php` page saves;
      *   - MVC `ApiMutableModelControllerBase::save()` — every model-backed
      *     API add/set/del/toggle (firewall rules, NAT, services, ...).
      * So edit pages render (GET) but Save/Apply is denied. Granting the
      * `*-edit` privs is therefore safe and is what makes "list all firewall
-     * rules" (and open a rule to inspect it) work.
+     * rules" (and open a rule to inspect it) work. This is an argument from
+     * the two chokepoints, not an audit of every page: a handler that saves
+     * the config or acts on the system without going through them is not
+     * covered.
      *
      * EXCLUDED — these BYPASS the backstop (they are not config writes) or
      * are pure destructive box-level actions, so they are deliberately NOT
@@ -99,6 +102,29 @@ class ReadOnlyUserProvisioner
      *                                        instead — explicit non-wildcard patterns
      *                                        covering only the status/log routes an RO
      *                                        operator needs.)
+     *   - page-system-trust-settings        (its reconfigure action runs
+     *                                        `system trust configure` and
+     *                                        `cron restart`: a runtime action,
+     *                                        not a config write, so the
+     *                                        backstop does not stop it)
+     *   - page-diagnostics-logs-dhcrelay    (26.7.4 only: upstream folds its
+     *                                        patterns back into
+     *                                        page-services-dhcprelay, which is
+     *                                        granted)
+     *   - page-diagnostics-crash-reporter   (crash_reporter.php prints the PHP
+     *                                        error log, dmesg and /var/crash as
+     *                                        they are: free text no rule can
+     *                                        clean, and the PHP log holds the
+     *                                        call arguments of a stack trace,
+     *                                        because php.ini logs errors and
+     *                                        leaves zend.exception_ignore_args
+     *                                        off)
+     *   - page-diagnostics-packetcapture    (views and downloads the traffic an
+     *                                        administrator captured, whatever
+     *                                        credentials it carried; a
+     *                                        read-only session cannot start a
+     *                                        capture, so it would only ever read
+     *                                        those)
      *
      * INCLUDED (narrow substitute): page-services-netdefense-status grants only
      * the status/log routes of this plugin (API status check, agent version /
@@ -120,13 +146,41 @@ class ReadOnlyUserProvisioner
      * the underlying data/mutation regardless of which page privs the caller
      * holds. See ACL.xml for the exact pattern list.
      *
-     * RESIDUAL (accepted): OPNsense bundles a few RUNTIME actions into the
-     * same page priv as the read view, and these bypass the backstop because
-     * they change no persistent config: service start/stop/reconfigure
-     * (page-status-services) and firewall state kill/flush
-     * (page-diagnostics-showstates). A read-only operator can therefore
-     * restart a service or drop states — runtime-only and recoverable. These
-     * cannot be separated from the view without losing the view.
+     * RESIDUAL: OPNsense bundles RUNTIME actions into the same page priv as
+     * the read view, and these bypass the backstop because they are not
+     * config writes or do not ask for it: service start/stop/reconfigure
+     * (page-status-services), firewall state kill/flush
+     * (page-diagnostics-showstates), interface and firewall apply, log clear,
+     * legacy page POSTs, and more. The ACL cannot separate them from the
+     * view, so the agent's webadmin proxy refuses them (readOnlyRefusal in
+     * internal/pathfinder/readonly_routes.go), the read-only account's own
+     * dashboard and menu-favorite saves included, which OPNsense permits on
+     * purpose. Accepted: the Rescan link of the wireless status page, and the
+     * two residuals about stored secrets under SECRETS below.
+     *
+     * SECRETS: the ACL grants the views that load stored secrets (certificate
+     * and CA keys, WireGuard and IPsec keys, OpenVPN static keys, user password
+     * hashes and OTP seeds, ...) together with the rest of the page, and
+     * user-config-readonly limits writes, not reads. The webadmin proxy
+     * therefore refuses the routes that hand out key material and blanks the
+     * named secret fields out of the responses of the others (scrubRules in
+     * internal/pathfinder/readonly_scrub.go). No privilege is dropped from this
+     * list for them: the read-only operator sees the pages and what they list,
+     * not the secrets. Two pages are dropped because what they print is free
+     * text that no rule can clean (see EXCLUDED above): the crash reporter and
+     * the packet capture.
+     *
+     * RESIDUAL (secrets), accepted by the operator:
+     *   - A grid's search is forwarded. The grid matches the search phrase
+     *     against the stored fields of a row, secret included, before the proxy
+     *     blanks anything, so a patient read-only user can infer a hidden
+     *     stored value (a password hash, a private key, a pre-shared key) by
+     *     guessing through the list search. The response itself never carries
+     *     the secret.
+     *   - Logs and free-text settings (an alias URL, a cron command, a custom
+     *     option and the like) stay readable and are not cleaned: they hold
+     *     what a component wrote into them, or what an operator typed. The
+     *     crash reporter stays excluded.
      *
      * EXCLUDED (AUTH_SERVER / AUTH_ORDER, unconditional): three more
      * pages the earlier inverted-allowlist reasoning above does not cover,
@@ -170,15 +224,20 @@ class ReadOnlyUserProvisioner
      *
      * Maintenance: OPNsense ACL is allow-only (the sole "deny" is the
      * `user-config-readonly` flag), so a new page priv added by a future
-     * OPNsense release must be added here for RO users to reach it. Re-run
-     * the catalog dump (`(new OPNsense\\Core\\ACL())->getPrivList()`),
-     * diff against this list, and add any new non-destructive page.
+     * OPNsense release must be added here for RO users to reach it, or to
+     * READONLY_EXCLUDED_PRIVS when it must stay out. A test against the
+     * catalogs of the supported releases fails on an id that is in neither.
      *
-     * provision() performs full desired-state reconciliation against this
-     * list on every call (not just create-if-missing). ensure_readonly.php
-     * calls provision() from the +MANIFEST post-install hook, so editing
-     * this constant and shipping a new package propagates the change to
-     * every managed device at next upgrade — no migration, no manual repair.
+     * This list is a superset. An id the running OPNsense does not know (a
+     * plugin that is not installed, a page another release renamed or
+     * removed) is never written to the group: OPNsense's model validation
+     * rejects it ("Option [..] not in list") and the ACL ignores it anyway.
+     * provision() performs full desired-state reconciliation against
+     * effectivePrivs(), this list narrowed to the running catalog, on every
+     * call (not just create-if-missing). ensure_readonly.php calls it from
+     * the +MANIFEST post-install hook, at boot and after a core update, so
+     * editing this constant and shipping a new package propagates the change
+     * to every managed device at next upgrade — no migration, no manual repair.
      */
     const READONLY_PRIVS = [
         // --- Backstop ---
@@ -286,9 +345,10 @@ class ReadOnlyUserProvisioner
         // --- Diagnostics & Logs ---
         // page-diagnostics-authentication and page-diagnostics-
         // configurationhistory are deliberately absent — see the
-        // AUTH_SERVER/AUTH_ORDER doc-comment note above the const.
+        // AUTH_SERVER/AUTH_ORDER doc-comment note above the const —
+        // and so are page-diagnostics-crash-reporter and
+        // page-diagnostics-packetcapture (free text that cannot be cleaned).
         'page-diagnostics-arptable',  // Diagnostics: ARP Table
-        'page-diagnostics-crash-reporter',  // System: Crash Reporter
         'page-diagnostics-dns_diagnostics',  // Interfaces: Diagnostics: DNS Lookup
         'page-diagnostics-health',  // Diagnostics: System Health
         'page-diagnostics-limiter-info',  // Diagnostics: Shaper status
@@ -308,13 +368,13 @@ class ReadOnlyUserProvisioner
         'page-diagnostics-netflow',  // Diagnostics: Netflow configuration
         'page-diagnostics-netstat',  // Diagnostics: Netstat
         'page-diagnostics-networkinsight',  // Diagnostics: Network Insight
-        'page-diagnostics-packetcapture',  // Diagnostics: Packet Capture
         'page-diagnostics-pf-info',  // Diagnostics: Firewall statistics
         'page-diagnostics-ping',  // Diagnostics: Ping
         'page-diagnostics-routingtables',  // Diagnostics: Routing tables
         'page-diagnostics-showstates',  // Diagnostics: Show States
         'page-diagnostics-system-activity',  // Diagnostics: System Activity
         'page-diagnostics-system-pftop',  // Diagnostics: Firewall sessions
+        'page-diagnostics-system-statistics',  // System: Diagnostics: Statistics
         'page-diagnostics-tables',  // Diagnostics: PF Table IP addresses
         'page-diagnostics-testport',  // Diagnostics: Test Port
         'page-diagnostics-traceroute',  // Diagnostics: Traceroute
@@ -346,6 +406,97 @@ class ReadOnlyUserProvisioner
         'page-system-usermanager-addprivs',  // System: Access: Privileges
         'page-system-usermanager-passwordmg',  // Lobby: Password
     ];
+
+    /**
+     * Privileges an OPNsense release ships that are deliberately NOT granted
+     * (the reasons are in the READONLY_PRIVS doc comment). A privilege a
+     * release carries is in READONLY_PRIVS or here, so a page nobody has
+     * decided about is a test failure, not a silent gap.
+     */
+    const READONLY_EXCLUDED_PRIVS = [
+        'page-all',
+        'page-diagnostics-rebootsystem',
+        'page-diagnostics-haltsystem',
+        'page-system-firmware-manualupdate',
+        'page-diagnostics-factorydefaults',
+        'page-snapshots',
+        'page-diagnostics-backup-restore',
+        'page-xmlrpclibrary',
+        'page-wizard-system',
+        'page-services-netdefense',
+        'page-system-authservers',
+        'page-diagnostics-configurationhistory',
+        'page-diagnostics-authentication',
+        'page-system-trust-settings',
+        'page-diagnostics-logs-dhcrelay',
+        'page-diagnostics-crash-reporter',
+        'page-diagnostics-packetcapture',
+    ];
+
+    /** Denies config writes; it is a deny, so it is granted whatever the catalog says. */
+    const READONLY_BACKSTOP_PRIV = 'user-config-readonly';
+
+    /** Core alone carries well over this many privileges on every supported release. */
+    const CATALOG_MIN_ENTRIES = 100;
+
+    /** Every release's catalog has these; one without them is not the real catalog. */
+    const CATALOG_ANCHORS = ['page-all', self::READONLY_BACKSTOP_PRIV];
+
+    /**
+     * The privilege ids the running OPNsense knows (core and installed
+     * plugins), or null when they cannot be read reliably.
+     *
+     * ACL::getPrivList() answers from a cache that is rebuilt hourly and
+     * flushed only by rc.configure_plugins and rc.configure_firmware. The pkg
+     * post-install hook runs ensure_readonly.php BEFORE rc.configure_plugins:
+     * read as it stands, the cache can lack this plugin's own ACL.xml. The
+     * cache is dropped first, and a second instance rebuilds it, because an
+     * instance keeps the tags it loaded.
+     *
+     * Never throws: the caller runs from pkg and boot hooks that must not fail.
+     *
+     * @return string[]|null
+     */
+    public static function knownPrivs(): ?array
+    {
+        try {
+            (new ACL())->invalidateCache();
+            $list = (new ACL())->getPrivList();
+        } catch (\Throwable $e) {
+            return null;
+        }
+        if (!is_array($list) || count($list) < self::CATALOG_MIN_ENTRIES) {
+            return null;
+        }
+        foreach (self::CATALOG_ANCHORS as $anchor) {
+            if (!array_key_exists($anchor, $list)) {
+                return null;
+            }
+        }
+        return array_keys($list);
+    }
+
+    /**
+     * The privileges the group is to hold: READONLY_PRIVS, in its order, with
+     * every id the catalog does not know left out. OPNsense's model
+     * validation rejects such an id ("Option [..] not in list") and the ACL
+     * ignores it, so leaving it out changes no access.
+     *
+     * Without a catalog ($known null) nothing can be vouched for: the group
+     * keeps the READONLY_PRIVS ids it already holds and gains none, and
+     * anything else in it is dropped. The write backstop is always kept.
+     *
+     * @param string[]|null $known knownPrivs()
+     * @param string[] $current the ids the group holds now
+     * @return string[]
+     */
+    public static function effectivePrivs(?array $known, array $current = []): array
+    {
+        $grantable = array_flip($known ?? $current);
+        return array_values(array_filter(self::READONLY_PRIVS, function ($priv) use ($grantable) {
+            return $priv === self::READONLY_BACKSTOP_PRIV || isset($grantable[$priv]);
+        }));
+    }
 
     /**
      * Report current state of the read-only user + group.
@@ -402,8 +553,9 @@ class ReadOnlyUserProvisioner
      * save(), and Backend triggers. This method only mutates the in-memory
      * Config tree via the User/Group models.
      *
-     * Idempotency: if the group exists with the curated priv set, the user
-     * exists with a password, and the user is already a member, returns
+     * Idempotency: if the group exists with the curated priv set (the
+     * effectivePrivs() of the running catalog), the user exists with a
+     * password, and the user is already a member, returns
      * ['result'=>'skipped',...] without churn. Otherwise it creates/repairs
      * whichever pieces are missing (group, user, user password, membership,
      * priv set) and returns ['result'=>'ok',...]. An existing password is
@@ -417,7 +569,12 @@ class ReadOnlyUserProvisioner
      * be created without a password returns result 'failed' for it, before
      * anything is written.
      *
-     * @return array{result:string,message:string,password:string}
+     * 'privs' (absent on 'failed') says what the group was left with:
+     * 'granted' is the count, 'left_out' the READONLY_PRIVS ids not granted
+     * and 'catalog_trusted' whether the running catalog could be read. When it
+     * could not, the group gains nothing (effectivePrivs()).
+     *
+     * @return array{result:string,message:string,password:string,privs?:array{granted:int,left_out:string[],catalog_trusted:bool}}
      */
     public static function provision(): array
     {
@@ -496,8 +653,6 @@ class ReadOnlyUserProvisioner
 
         // --- Group: ensure it exists, carries the curated privs, and the
         //     user is a member. ---
-        $desiredPrivs = implode(',', self::READONLY_PRIVS);
-
         $groupMdl = new Group();
         $group = null;
         foreach ($groupMdl->group->iterateItems() as $g) {
@@ -519,17 +674,24 @@ class ReadOnlyUserProvisioner
             $groupDirty = true;
         }
 
-        // Reconcile the priv set (sorted comparison so order/whitespace
-        // differences don't trigger spurious rewrites).
+        // Reconcile the priv set against what this OPNsense can hold (sorted
+        // comparison so order/whitespace differences don't trigger spurious
+        // rewrites).
         $current = array_filter(explode(',', (string)$group->priv));
-        $desired = self::READONLY_PRIVS;
+        $catalog = self::knownPrivs();
+        $desired = self::effectivePrivs($catalog, $current);
         sort($current);
         $desiredSorted = $desired;
         sort($desiredSorted);
         if ($current !== $desiredSorted) {
-            $group->priv = $desiredPrivs;
+            $group->priv = implode(',', $desired);
             $groupDirty = true;
         }
+        $privs = [
+            'granted' => count($desired),
+            'left_out' => array_values(array_diff(self::READONLY_PRIVS, $desired)),
+            'catalog_trusted' => $catalog !== null,
+        ];
 
         // Reconcile membership: add the read-only user's NUMERIC uid if
         // absent (see the uid-vs-UUID note above — the ACL matches
@@ -551,6 +713,7 @@ class ReadOnlyUserProvisioner
                 'result' => 'skipped',
                 'message' => 'Read-only webadmin user already provisioned; no change.',
                 'password' => $password,
+                'privs' => $privs,
             ];
         }
 
@@ -558,6 +721,7 @@ class ReadOnlyUserProvisioner
             'result' => 'ok',
             'message' => 'Read-only webadmin user provisioned successfully',
             'password' => $password,
+            'privs' => $privs,
         ];
     }
 

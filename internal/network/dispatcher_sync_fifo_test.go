@@ -252,7 +252,7 @@ func TestSyncFIFO_WorkerRestartsAfterConnectionContextCancelled(t *testing.T) {
 // still-running SYNC must already have an IN_PROGRESS task_states row —
 // not just once the worker eventually dequeues and dispatchCommand's own
 // Begin call runs. Before this fix, a crash while a SYNC was still queued
-// left the boot-time drain with no row at all for that task_id, so it
+// left the connect-time drain with no row at all for that task_id, so it
 // could never send a terminal response for a task_id the broker was still
 // waiting on.
 func TestSyncFIFO_EnqueueRecordsTaskStateBeforeWorkerDequeues(t *testing.T) {

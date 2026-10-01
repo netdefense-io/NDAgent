@@ -45,7 +45,7 @@ var pluginInstallDropPollInterval = 500 * time.Millisecond
 var pluginInstallDropWait = 5 * time.Second
 
 // resolveStuckPluginInstall handles PLUGIN_INSTALL rows that are still
-// IN_PROGRESS at boot time when no drop file is present, implementing a
+// IN_PROGRESS at connect time when no drop file is present, implementing a
 // two-step race tolerance:
 //
 //  1. Poll for the drop file for up to pluginInstallDropWait. If it arrives
@@ -207,11 +207,16 @@ func resolveOnePluginInstall(
 		"Plugin installed successfully (version "+installedVersion+")", nil)
 }
 
-// DrainUndelivered is the boot-time replay step: reconcile any helper
+// DrainUndelivered is the connect-time replay step: reconcile any helper
 // drop files into the registry, resolve any rows still IN_PROGRESS per
 // their lifecycle category, then send a real task_response for each
 // row whose delivered_at is still null. Each successful send is
 // followed by MarkDelivered (which also runs retention).
+//
+// It runs on every WebSocket connect, not only at agent start, and a
+// reconnect does not mean the agent restarted: the handlers of the previous
+// connection may still be winding down. opts (WithLiveness, WithDeferredTypes)
+// tell the resolve step which rows it must not touch; see ResolveStuck.
 //
 // Caller order: open store, run DrainUndelivered AFTER WS auth has
 // succeeded (so the responder can actually transmit) and BEFORE the
@@ -226,7 +231,7 @@ func resolveOnePluginInstall(
 // send is logged but does not abort the drain — subsequent rows are
 // still attempted. The first hard error is returned to the caller
 // after the loop finishes.
-func DrainUndelivered(ctx context.Context, store *Store, pendingResultsDir string, responder Responder, logf func(format string, args ...interface{}), checker PluginInstallChecker) (int, error) {
+func DrainUndelivered(ctx context.Context, store *Store, pendingResultsDir string, responder Responder, logf func(format string, args ...interface{}), checker PluginInstallChecker, opts ...ResolveOption) (int, error) {
 	if logf == nil {
 		logf = func(format string, args ...interface{}) {}
 	}
@@ -251,7 +256,7 @@ func DrainUndelivered(ctx context.Context, store *Store, pendingResultsDir strin
 	// could handle have already been moved to a terminal state, so
 	// ResolveStuck's LifecycleHelperResolves → FAILED fallback only fires
 	// for genuinely unresolvable rows (helper absent with no pkg evidence).
-	if resolved, err := store.ResolveStuck(); err != nil {
+	if resolved, err := store.ResolveStuck(opts...); err != nil {
 		logf("drain: resolve stuck rows failed: %v", err)
 	} else if resolved > 0 {
 		logf("drain: resolved %d stuck row(s)", resolved)

@@ -117,3 +117,24 @@ func contains(s, substr string) bool {
 	}
 	return false
 }
+
+func TestNewPluginInstallHelperCmd(t *testing.T) {
+	t.Setenv("PATH", rcdPATH)
+
+	cases := []struct {
+		name          string
+		targetVersion string
+		wantArgs      []string
+	}{
+		// The task id is $3, so an empty target version stays an empty $2.
+		{"latest", "", []string{"os-netdefense-dev", "", "task-1"}},
+		{"pinned", "1.4.5", []string{"os-netdefense-dev", "1.4.5", "task-1"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := newPluginInstallHelperCmd("os-netdefense-dev", tc.targetVersion, "task-1")
+
+			assertDetachedHelperCmd(t, cmd, "/usr/local/sbin/ndagent-plugin-install.sh", tc.wantArgs)
+		})
+	}
+}

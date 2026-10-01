@@ -70,8 +70,49 @@ ndagent_prestart()
         warn "Token not configured in ${ndagent_config}"
         return 1
     fi
-    
+
+    ndagent_wait_gone ""
+}
+
+# daemon(8) locks the pidfile before it starts the agent and releases it only
+# on its way out, after it has reaped the agent; until then a new daemon(8)
+# will not start. rc.subr's stop does not wait for that. Its wait_for_pids
+# returns as soon as pwait(1) sees the agent begin to exit (on FreeBSD 15 it
+# asks pwait once and does not check again), while ps(1) still lists the
+# exiting agent under its own name, so the start of a restart that follows at
+# once can find it "already running" and leave nothing running. Wait for the
+# pid to be gone, then for the pidfile to be released. Only a lock still held
+# fails the wait: a lockf that cannot run says nothing about the lock, and
+# daemon(8) refuses a second instance by itself, so the agent still starts.
+ndagent_wait_gone()
+{
+    local _pid _n _rc
+    _pid=$1
+    _n=0
+    while [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; do
+        [ "${_n}" -ge 300 ] && break
+        sleep 0.1
+        _n=$((_n + 1))
+    done
+
+    lockf -k -n -s -t 30 "${pidfile}" true
+    _rc=$?
+    case ${_rc} in
+    0|69)   # released, or no pidfile left (EX_UNAVAILABLE)
+        return 0
+        ;;
+    75)     # EX_TEMPFAIL: still locked after 30 s
+        warn "the previous ${name} instance still holds ${pidfile}"
+        return 1
+        ;;
+    esac
+    warn "could not wait for ${pidfile} to be released (lockf exited ${_rc}); going on"
     return 0
+}
+
+ndagent_poststop()
+{
+    ndagent_wait_gone "${rc_pid}"
 }
 
 ndagent_status()
@@ -97,6 +138,7 @@ ndagent_reload()
 }
 
 start_precmd=ndagent_prestart
+stop_postcmd=ndagent_poststop
 status_cmd=ndagent_status
 
 run_rc_command "$1"

@@ -222,6 +222,31 @@ func TestIntegration_GetInterfaceList(t *testing.T) {
 	}
 }
 
+// TestIntegration_InstalledRelease checks that the release read from the
+// device and the one in the API's status product block name the same series.
+// Run from a workstation only the API answers; run on the device the local
+// sources do, so the two are compared.
+func TestIntegration_InstalledRelease(t *testing.T) {
+	client := getTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	viaAPI, err := client.readReleaseStatus(ctx)
+	if err != nil {
+		t.Fatalf("readReleaseStatus() error = %v", err)
+	}
+
+	got, err := client.InstalledRelease(ctx)
+	if err != nil {
+		t.Fatalf("InstalledRelease() error = %v", err)
+	}
+	if got.Major != viaAPI.Major || got.Minor != viaAPI.Minor {
+		t.Errorf("InstalledRelease() = %s but the status product block says %s", got, viaAPI)
+	}
+
+	t.Logf("installed release %s (status product block: %s)", got, viaAPI)
+}
+
 func TestIntegration_GetAliasByName(t *testing.T) {
 	client := getTestClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

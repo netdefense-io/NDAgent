@@ -61,7 +61,7 @@ type ProxyConfig struct {
 	// of which stream/service the (possibly modified) client requests, so
 	// an RO caller can never obtain a terminal/shell. It is also threaded
 	// into the HTTPProxy itself (see HTTPProxy.SetReadOnly) so mutating
-	// runtime-action requests within the webadmin stream are denylisted.
+	// requests within the webadmin stream are denylisted.
 	ReadOnly bool
 
 	// Policy is the device-local remote-access ceiling. HandleConnect
@@ -71,7 +71,8 @@ type ProxyConfig struct {
 	// chokepoint so the guarantee does not depend on a single caller
 	// remembering to apply it, and so a future code path that constructs a
 	// proxy without going through HandleConnect cannot silently serve
-	// streams the device's owner disabled.
+	// streams the device's owner disabled. A "readonly" ceiling also turns on
+	// the request denylist and the secret scrubber of the webadmin stream.
 	//
 	// The zero value ("") is not a valid policy and is treated as
 	// unrestricted for backward compatibility with callers that predate
@@ -93,7 +94,10 @@ func NewTCPProxyWithConfig(cfg ProxyConfig) *TCPProxy {
 	}
 	sessionMgr := NewSessionManager(cfg.WebadminUser, cfg.WebadminSessionDir)
 	httpProxy := NewHTTPProxy("127.0.0.1", port, sessionMgr)
-	httpProxy.SetReadOnly(cfg.ReadOnly)
+	// The request denylist and the secret scrubber follow the same rule as the
+	// per-stream gate below, so a ceiling of "readonly" holds inside the webadmin
+	// stream whether or not the caller clamped ReadOnly.
+	httpProxy.SetReadOnly(cfg.ReadOnly || cfg.Policy == ndconfig.RemoteAccessReadOnly)
 
 	return &TCPProxy{
 		ctx:          context.Background(),

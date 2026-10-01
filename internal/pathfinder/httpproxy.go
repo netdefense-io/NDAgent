@@ -6,8 +6,10 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
-	"regexp"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,11 +33,48 @@ type HTTPProxy struct {
 	session   *Session
 	sessionMu sync.Mutex
 
-	// readOnly gates mutating runtime-action requests (service
-	// start/stop/restart/reload/reconfigure) within the webadmin HTTP
-	// stream. See isMutatingRuntimeAction.
+	// readOnly gates requests (see readOnlyRefusal) within the webadmin HTTP
+	// stream.
 	readOnly bool
+
+	// replyLinger bounds how long endAfterReply waits for the client to close
+	// a stream before closing it itself.
+	replyLinger time.Duration
 }
+
+// defaultReplyLinger is how long a stream whose last response said
+// Connection: close stays open for the client to close it. Clients that close
+// on Connection: close (browsers, curl, NDWeb's WebAdmin bridge) end it at
+// once; the limit is for one that waits for the stream to end instead.
+const defaultReplyLinger = 5 * time.Second
+
+// transportBody is the body of a forwarded request as the transport gets it.
+// The transport may go on reading it, from the stream's reader, after it has
+// returned the response (an upstream can answer before it reads the body), and
+// closes it once it is done with it, after reading the rest; released is
+// closed then.
+type transportBody struct {
+	io.ReadCloser
+	once     sync.Once
+	released chan struct{}
+}
+
+func newTransportBody(body io.ReadCloser) *transportBody {
+	return &transportBody{ReadCloser: body, released: make(chan struct{})}
+}
+
+func (b *transportBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.once.Do(func() { close(b.released) })
+	return err
+}
+
+// nothingHeld is the release of a request body no transport holds.
+var nothingHeld = func() <-chan struct{} {
+	c := make(chan struct{})
+	close(c)
+	return c
+}()
 
 // NewHTTPProxy creates a new HTTP proxy for webadmin access.
 // host and port specify the local OPNsense web interface (typically 127.0.0.1:443).
@@ -73,13 +112,14 @@ func NewHTTPProxy(host string, port int, sessionMgr *SessionManager) *HTTPProxy 
 		sessionManager: sessionMgr,
 		httpClient:     client,
 		log:            logging.Named("pathfinder.httpproxy"),
+		replyLinger:    defaultReplyLinger,
 	}
 }
 
-// SetReadOnly configures whether this proxy blocks mutating runtime-action
-// requests (see isMutatingRuntimeAction). Left false by default so existing
-// callers of NewHTTPProxy are unaffected; NewTCPProxyWithConfig calls this
-// after construction when ProxyConfig.ReadOnly is set.
+// SetReadOnly configures whether this proxy refuses the requests a read-only
+// session must not make (see readOnlyRefusal). Left false by default so
+// existing callers of NewHTTPProxy are unaffected; NewTCPProxyWithConfig calls
+// this after construction when ProxyConfig.ReadOnly is set.
 func (p *HTTPProxy) SetReadOnly(readOnly bool) {
 	p.readOnly = readOnly
 }
@@ -181,22 +221,37 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			"path", req.URL.Path,
 		)
 
-		// Read-only enforcement: block the residual mutating runtime-action
-		// routes (service start/stop/restart/reload/reconfigure; firewall
-		// state kill/flush/delete) that ACL allows through even for the
-		// forged read-only identity. This is a narrow denylist, NOT a
-		// method allowlist — OPNsense's grid/list views (firewall rules,
-		// aliases, NAT, WireGuard peers, users, certs, DNS) load via POST
-		// to search*/searchItem/search_* endpoints, so a GET/HEAD/OPTIONS-
-		// only allowlist would 405 every list page in the read-only WebUI.
-		if p.readOnly && isMutatingRuntimeAction(req.Method, req.URL.Path) {
-			p.log.Warnw("Refusing mutating runtime-action request in read-only session",
-				"stream_id", stream.ID(),
-				"method", req.Method,
-				"path", req.URL.Path,
-			)
-			p.sendErrorResponse(stream, http.StatusMethodNotAllowed, "Method Not Allowed (read-only session)")
-			continue
+		// Read-only enforcement, before anything is forwarded.
+		var scrub *scrubRule
+		if p.readOnly {
+			if status := readOnlyRefusal(req.Method, req.RequestURI, requestHasBody(req)); status != 0 {
+				p.log.Warnw("Refusing request in read-only session",
+					"stream_id", stream.ID(),
+					"method", req.Method,
+					"target", req.RequestURI,
+					"status", status,
+				)
+				p.sendErrorResponse(stream, status, http.StatusText(status)+" (read-only session)")
+				p.endAfterReply(stream, reader, nothingHeld)
+				break
+			}
+			if scrub = scrubRuleFor(req.Method, req.RequestURI); scrub != nil {
+				// The body is rewritten whole, so it must arrive whole and in the
+				// clear: no compression the transport would leave on it, no range.
+				req.Header.Del("Accept-Encoding")
+				req.Header.Del("Range")
+				req.Header.Del("If-Range")
+			}
+		}
+
+		// An answer that is withheld can come before the transport has read the
+		// request body; until the transport closes the body, it is the only
+		// reader of the stream.
+		bodyReleased := nothingHeld
+		if scrub != nil && req.Body != nil && req.Body != http.NoBody {
+			body := newTransportBody(req.Body)
+			req.Body = body
+			bodyReleased = body.released
 		}
 
 		// Forward request to local OPNsense
@@ -214,6 +269,29 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			// Send error response back to client
 			p.sendErrorResponse(stream, http.StatusBadGateway, "Bad Gateway")
 			continue
+		}
+
+		// Secrets are blanked out of the response before its first byte is
+		// written. One that cannot be read is withheld, never forwarded.
+		if scrub != nil {
+			blanked, err := scrubResponse(resp, scrub)
+			if err != nil {
+				p.log.Warnw("Withholding response in read-only session",
+					"stream_id", stream.ID(),
+					"method", req.Method,
+					"target", req.RequestURI,
+					"status", resp.StatusCode,
+					"error", err,
+				)
+				p.sendErrorResponse(stream, http.StatusBadGateway, "Bad Gateway (read-only session: response withheld)", withheldCause(err))
+				p.endAfterReply(stream, reader, bodyReleased)
+				break
+			}
+			p.log.Debugw("Cleaned response in read-only session",
+				"stream_id", stream.ID(),
+				"target", req.RequestURI,
+				"blanked", blanked,
+			)
 		}
 
 		// Write response back to stream
@@ -241,14 +319,70 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 	return nil
 }
 
+// endAfterReply ends a stream after a response that said Connection: close.
+// Nothing more is read as a request: whatever the client still sends, the body
+// of a refused request included, is discarded, but only once released is
+// closed, because until then the transport may still be reading a request body
+// from the same reader. The stream stays open until the client closes it, and
+// the proxy closes it itself only after replyLinger.
+//
+// A CLOSE frame ends a stream in both directions, and a client may drop reply
+// bytes it has not handed on yet when one arrives (ndcli's tunnel does), so the
+// proxy never sends one right behind a reply. Frames that arrive while nothing
+// reads the stream wait in its queue, or are dropped when it is full; the
+// session's frame loop never waits for them.
+func (p *HTTPProxy) endAfterReply(stream *Stream, pending io.Reader, released <-chan struct{}) {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		<-released
+		_, _ = io.Copy(io.Discard, pending)
+	}()
+
+	linger := time.NewTimer(p.replyLinger)
+	defer linger.Stop()
+	select {
+	case <-drained:
+		p.log.Debugw("Client closed the stream after the reply", "stream_id", stream.ID())
+		stream.Close()
+		return
+	case <-linger.C:
+		p.log.Debugw("Closing a stream the client left open after the reply",
+			"stream_id", stream.ID(),
+			"linger", p.replyLinger,
+		)
+	}
+	stream.Close()
+
+	// Every read of a closed stream ends, the transport's too, so the reader
+	// above ends once the transport has let go of the body. Do not wait
+	// forever for a transport that never does.
+	wait := time.NewTimer(p.replyLinger)
+	defer wait.Stop()
+	select {
+	case <-drained:
+	case <-wait.C:
+		p.log.Warnw("The transport still holds a request body of a closed stream", "stream_id", stream.ID())
+	}
+}
+
 // forwardRequest sends the HTTP request to the local OPNsense instance.
 // The context is used to cancel the request when the stream closes.
 func (p *HTTPProxy) forwardRequest(ctx context.Context, req *http.Request, session *Session) (*http.Response, error) {
-	// Build target URL
-	targetURL := fmt.Sprintf("https://%s:%d%s", p.localHost, p.localPort, req.URL.RequestURI())
+	// The scheme, host and port come from the local configuration; only the
+	// path and query come from the request. A request-target such as
+	// "http:@host:port/x" carries a host of its own and must not choose one.
+	target := url.URL{
+		Scheme:     "https",
+		Host:       net.JoinHostPort(p.localHost, strconv.Itoa(p.localPort)),
+		Path:       req.URL.Path,
+		RawPath:    req.URL.RawPath,
+		RawQuery:   req.URL.RawQuery,
+		ForceQuery: req.URL.ForceQuery,
+	}
 
 	// Create new request with context (can't reuse the original request directly)
-	proxyReq, err := http.NewRequestWithContext(ctx, req.Method, targetURL, req.Body)
+	proxyReq, err := http.NewRequestWithContext(ctx, req.Method, target.String(), req.Body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy request: %w", err)
 	}
@@ -320,42 +454,16 @@ func splitCookies(cookies string) []string {
 	return strings.Split(cookies, ";")
 }
 
-// serviceActionPattern matches the OPNsense MVC service-control route family
-// (e.g. /api/core/service/restart/openvpn, /api/openvpn/service/reconfigure)
-// on any plugin namespace. This is the one runtime-action family confirmed
-// against the opnapi client / OPNsense MVC controller convention:
-// /api/<module>/service/<start|stop|restart|reload|reconfigure>[/<id>].
-var serviceActionPattern = regexp.MustCompile(`^/api/[^/]+/service/(start|stop|restart|reload|reconfigure)(/|$)`)
-
-// firewallStateActionPattern matches the diagnostics firewall-state mutators
-// exposed by OPNsense\Diagnostics\Api\FirewallController: killStates (kill by
-// filter/ruleid), flushStates (reset all states), and delState/<id>/<creator>
-// (delete a single row). These are runtime actions, not config writes, so
-// they bypass the user-config-readonly backstop the same way the
-// service-action family does. The grid itself loads via a separate
-// search-named endpoint (e.g. searchState), which this pattern's exact
-// action-name anchoring never matches.
-var firewallStateActionPattern = regexp.MustCompile(`^/api/diagnostics/firewall/(killStates|flushStates|delState)(/|$)`)
-
-// isMutatingRuntimeAction reports whether the given method+path is a
-// mutating request to a runtime-action route that OPNsense's ACL model
-// permits even for a read-only operator: service
-// start/stop/restart/reload/reconfigure, and firewall state kill/flush,
-// bypass the user-config-readonly backstop because they are not config
-// writes. GET/HEAD/OPTIONS are never mutating and must pass through
-// untouched — in particular, every OPNsense grid/list view loads via
-// POST to search*/searchItem/search_* endpoints, which this function does
-// not match.
-func isMutatingRuntimeAction(method, path string) bool {
-	switch method {
-	case http.MethodGet, http.MethodHead, http.MethodOptions:
-		return false
-	}
-	return serviceActionPattern.MatchString(path) || firewallStateActionPattern.MatchString(path)
+// requestHasBody reports whether the request declares a body, whatever its
+// method. A chunked body has no declared length, which ContentLength reports
+// as -1.
+func requestHasBody(req *http.Request) bool {
+	return req.ContentLength != 0
 }
 
-// sendErrorResponse sends an HTTP error response to the stream.
-func (p *HTTPProxy) sendErrorResponse(stream *Stream, statusCode int, message string) {
+// sendErrorResponse sends an HTTP error response to the stream. A detail, when
+// there is one, is its plain-text body.
+func (p *HTTPProxy) sendErrorResponse(stream *Stream, statusCode int, message string, detail ...string) {
 	resp := &http.Response{
 		StatusCode: statusCode,
 		Status:     fmt.Sprintf("%d %s", statusCode, message),
@@ -364,6 +472,11 @@ func (p *HTTPProxy) sendErrorResponse(stream *Stream, statusCode int, message st
 		ProtoMinor: 1,
 		Header:     make(http.Header),
 		Body:       http.NoBody,
+	}
+	if body := strings.Join(detail, ""); body != "" {
+		body += "\n"
+		resp.Body = io.NopCloser(strings.NewReader(body))
+		resp.ContentLength = int64(len(body))
 	}
 	resp.Header.Set("Content-Type", "text/plain")
 	resp.Header.Set("Connection", "close")

@@ -4,8 +4,10 @@ import (
 	"context"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/firmware"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
+	"github.com/netdefense-io/ndagent/internal/taskstore"
 )
 
 // pkgmgrQueryForTest returns the current pkgmgr query indirection so a
@@ -49,27 +51,27 @@ func SetUpgradeStatusPollIntervalForTest(d time.Duration) (restore func()) {
 	return func() { upgradeStatusPollInterval = old }
 }
 
-// SetFirmwareNoRebootSendResponseForTest replaces the terminal-response sender
+// SetFirmwareSendResponseForTest replaces the terminal-response sender
 // used by handleMinorNoReboot (and sendMinorNoRebootResult) with f and returns
 // a restore function. Tests use this to capture SendTaskResponse calls without
 // a real WebSocket connection — verifying that every exit path emits a
 // terminal response (Blocker B coverage).
-func SetFirmwareNoRebootSendResponseForTest(
+func SetFirmwareSendResponseForTest(
 	f func(ws *network.WebSocketClient, taskID string, result TaskResult) error,
 ) (restore func()) {
-	old := firmwareNoRebootSendResponse
-	firmwareNoRebootSendResponse = f
-	return func() { firmwareNoRebootSendResponse = old }
+	old := firmwareSendResponse
+	firmwareSendResponse = f
+	return func() { firmwareSendResponse = old }
 }
 
-// SetFirmwareNoRebootSendInProgressForTest replaces the IN_PROGRESS sender
+// SetFirmwareSendInProgressForTest replaces the IN_PROGRESS sender
 // used by handleMinorNoReboot with a no-op for tests.
-func SetFirmwareNoRebootSendInProgressForTest(
+func SetFirmwareSendInProgressForTest(
 	f func(ws *network.WebSocketClient, taskID, message string) error,
 ) (restore func()) {
-	old := firmwareNoRebootSendInProgress
-	firmwareNoRebootSendInProgress = f
-	return func() { firmwareNoRebootSendInProgress = old }
+	old := firmwareSendInProgress
+	firmwareSendInProgress = f
+	return func() { firmwareSendInProgress = old }
 }
 
 // SetFirmwareGetSuffixFuncForTest replaces the suffix getter used by
@@ -100,4 +102,70 @@ func SetConnectSendResponseForTest(
 	old := connectSendResponse
 	connectSendResponse = f
 	return func() { connectSendResponse = old }
+}
+
+// SetFirmwareTaskStoreForTest makes the FIRMWARE_UPGRADE paths persist their
+// run metadata to store instead of the client's. Returns a restore function.
+func SetFirmwareTaskStoreForTest(store *taskstore.Store) (restore func()) {
+	old := firmwareTaskStore
+	firmwareTaskStore = func(*network.WebSocketClient) *taskstore.Store { return store }
+	return func() { firmwareTaskStore = old }
+}
+
+// SetFirmwareBootTimeForTest and SetFirmwareNowForTest replace the boot time
+// and the clock the run metadata is stamped with.
+func SetFirmwareBootTimeForTest(f func() (int64, error)) (restore func()) {
+	old := firmwareBootTime
+	firmwareBootTime = f
+	return func() { firmwareBootTime = old }
+}
+
+func SetFirmwareNowForTest(f func() time.Time) (restore func()) {
+	old := firmwareNow
+	firmwareNow = f
+	return func() { firmwareNow = old }
+}
+
+// SetFirmwareUptimeForTest replaces how long the process is taken to have run.
+func SetFirmwareUptimeForTest(f func() time.Duration) (restore func()) {
+	old := firmwareUptime
+	firmwareUptime = f
+	return func() { firmwareUptime = old }
+}
+
+// SetOPNAPIClientForFirmwareForTest injects the client HandleFirmwareUpgrade
+// uses.
+func SetOPNAPIClientForFirmwareForTest(c firmwareOPNAPIClient) (restore func()) {
+	old := opnAPIClientForFirmware
+	opnAPIClientForFirmware = c
+	return func() { opnAPIClientForFirmware = old }
+}
+
+// SetFirmwareWaitsForTest shortens every wait and poll the REST runs make and
+// returns a restore function.
+func SetFirmwareWaitsForTest(preTriggerWait, preTriggerPoll, startWindow, startPoll, settle time.Duration) (restore func()) {
+	oldWait, oldPoll, oldWindow, oldStartPoll, oldSettle :=
+		firmwarePreTriggerWaitVar, firmwarePreTriggerPollVar, firmwareStartWindowVar, firmwareStartPollVar, firmwareSettleIntervalVar
+	firmwarePreTriggerWaitVar, firmwarePreTriggerPollVar = preTriggerWait, preTriggerPoll
+	firmwareStartWindowVar, firmwareStartPollVar = startWindow, startPoll
+	firmwareSettleIntervalVar = settle
+	return func() {
+		firmwarePreTriggerWaitVar, firmwarePreTriggerPollVar = oldWait, oldPoll
+		firmwareStartWindowVar, firmwareStartPollVar = oldWindow, oldStartPoll
+		firmwareSettleIntervalVar = oldSettle
+	}
+}
+
+// SetFirmwareDeadlineForTest replaces how long a REST run watches.
+func SetFirmwareDeadlineForTest(f func(expires time.Time) time.Time) (restore func()) {
+	old := firmwareDeadline
+	firmwareDeadline = f
+	return func() { firmwareDeadline = old }
+}
+
+// SetFirmwareProbesForTest replaces what a REST run reads the device with.
+func SetFirmwareProbesForTest(f func(client firmwareOPNAPIClient) firmware.Probes) (restore func()) {
+	old := newFirmwareProbes
+	newFirmwareProbes = f
+	return func() { newFirmwareProbes = old }
 }

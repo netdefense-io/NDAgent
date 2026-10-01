@@ -40,6 +40,11 @@
 
 set -u
 
+# Same reason as ndagent-plugin-install.sh: pkg's hooks inherit this PATH, and the
+# agent that forked us has rc.d's, which lacks /usr/local.
+PATH=/sbin:/bin:/usr/sbin:/usr/bin:/usr/local/sbin:/usr/local/bin
+export PATH
+
 LOG=/var/log/ndagent-decommission.log
 PKG_NAME="${1:?missing pkg name}"
 

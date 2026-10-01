@@ -79,10 +79,14 @@ type Config struct {
 
 	// RejectDangerousSnippets is a device-local defense-in-depth gate
 	// against dangerous USER/GROUP/ZABBIX_* SYNC_API snippet content
-	// (privileged priv, scope=system, non-nologin shell, authorizedkeys,
-	// Zabbix remote commands, sudo_root). It mirrors NDManager's producer-
-	// side dangerous-field validators (the primary control, gated by
-	// org:su) — this is a second, local line of defense.
+	// (administrator-equivalent priv, membership in a protected or
+	// administrator-equivalent group, scope=system, non-nologin shell,
+	// authorizedkeys, Zabbix remote commands, sudo_root). It mirrors
+	// NDManager's producer-side dangerous-field validators (the primary
+	// control, gated by org:su) — this is a second, local line of defense.
+	// It only adds refusals: a USER/GROUP element that would give an
+	// account administrator rights without the control plane's Superuser
+	// clearance is refused whatever this says.
 	//
 	// Default true (secure-by-default) as of the flip in this field's
 	// history: an omitted config line now means "reject". Fleets that were

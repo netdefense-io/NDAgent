@@ -10,7 +10,7 @@ import (
 )
 
 // DefaultPendingResultsDir is the drop-file directory written by helper
-// scripts (today: ndagent-plugin-install.sh) and read by the boot-time
+// scripts (today: ndagent-plugin-install.sh) and read by the connect-time
 // drain. Sibling of /var/db/ndagent/tasks.db so a single chmod 0700 on
 // /var/db/ndagent covers both.
 const DefaultPendingResultsDir = "/var/db/ndagent/pending-results"
