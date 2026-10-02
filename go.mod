@@ -12,6 +12,7 @@ require (
 	github.com/veraison/go-cose v1.3.0
 	go.uber.org/zap v1.27.1
 	golang.org/x/crypto v0.47.0
+	golang.org/x/crypto/x509roots/fallback v0.0.0-20260209214922-2f26647a795e
 	modernc.org/sqlite v1.45.0
 )
 

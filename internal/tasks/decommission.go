@@ -28,10 +28,11 @@ import (
 // whole design:
 //
 //  1. Everything NetDefense put on the box that an operator could
-//     otherwise put back by hand — firewall objects, VPN, DNS, Zabbix,
-//     synced identities, synced package repositories — is reconciled to
-//     empty first, with bounded retries, while the agent still holds its
-//     OPNsense credentials.
+//     otherwise put back by hand — synced certificates and CAs, firewall
+//     objects, VPN, DNS, Zabbix, synced identities, synced package
+//     repositories — is reconciled to empty first, with bounded retries,
+//     while the agent still holds its OPNsense credentials. A certificate
+//     or CA a service still uses stays on the device.
 //  2. The two NetDefense-owned OPNsense identities go next, the agent's
 //     own API user LAST of all API calls, because deleting it is what
 //     ends the agent's ability to talk to OPNsense at all. That API
@@ -110,8 +111,16 @@ type Decommissioner struct {
 	DeprovisionAccounts func(ctx context.Context) error
 
 	ResetPluginSettings func(ctx context.Context) error
-	ForkHelper          func(ctx context.Context) error
-	Shutdown            func()
+
+	// StartWebGUIRestart starts the detached web GUI restart a renewal of the
+	// web GUI's certificate is owed (WebGUIRestartOwed, set by the trust
+	// family). It runs after the last API call, since the restart takes the
+	// local API down, and before the uninstall helper removes the record of it.
+	StartWebGUIRestart func() error
+	WebGUIRestartOwed  bool
+
+	ForkHelper func(ctx context.Context) error
+	Shutdown   func()
 
 	Backoffs []time.Duration
 	Sleep    func(ctx context.Context, d time.Duration) error
@@ -140,6 +149,13 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID 
 		// every one of them — that behaviour is load-bearing for ordinary
 		// template detachment and is reused here rather than duplicated.
 		d.Families = []DecommissionFamily{
+			{Name: "trust", Reconcile: func(ctx context.Context) error {
+				out := executeSyncTrust(ctx, apiClient, trustParseOutcome{}, false, configXMLPath)
+				if out.RestartWebGUI {
+					d.WebGUIRestartOwed = true
+				}
+				return trustDecommissionError(out.Result)
+			}},
 			{Name: "vpn", Reconcile: func(ctx context.Context) error {
 				return syncResultError(executeSyncVPN(ctx, apiClient, nil))
 			}},
@@ -190,6 +206,10 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID 
 	d.DeprovisionAccounts = deprovisionLocalAccounts
 	d.ResetPluginSettings = resetPluginIdentity
 	d.ForkHelper = func(ctx context.Context) error { return forkDecommissionHelper(packageName) }
+	d.StartWebGUIRestart = func() error {
+		_, err := startWebGUIRestartHelper()
+		return err
+	}
 	return d
 }
 
@@ -223,6 +243,14 @@ func (d *Decommissioner) Run(ctx context.Context, deletedAt, kid string) error {
 	// this box starts from nothing instead of hitting configure.php's
 	// existing-deviceId guard.
 	d.step(ctx, "reset plugin settings", d.ResetPluginSettings)
+
+	if d.WebGUIRestartOwed && d.StartWebGUIRestart != nil {
+		if err := d.StartWebGUIRestart(); err != nil {
+			d.logf("FAILED: start the web GUI restart its renewed certificate needs: %v", err)
+		} else {
+			d.logf("OK: started the web GUI restart its renewed certificate needs")
+		}
+	}
 
 	// Irreversible half.
 	if d.ForkHelper != nil {
@@ -336,6 +364,28 @@ func syncResultError(result SyncAPIResult) error {
 		return fmt.Errorf("reconcile reported failure with no error detail")
 	}
 	return fmt.Errorf("%s", strings.Join(result.Errors, "; "))
+}
+
+// trustDecommissionError is syncResultError for the trust family, which keeps a
+// CA or certificate a service still uses: those survive the decommission by
+// design, so retrying them changes nothing and they are not a failure.
+func trustDecommissionError(result SyncAPIResult) error {
+	var problems []string
+	for _, item := range result.Results {
+		if isSyncSuccessStatus(item.Status) || item.Status == "warning" {
+			continue
+		}
+		if item.Code == trustCodeInUse {
+			logging.Named("decommission").Warnw("Certificate or CA kept: a service still uses it",
+				"type", item.Type, "uuid", item.UUID, "name", item.Name)
+			continue
+		}
+		problems = append(problems, item.Error)
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("%s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // removeReadonlyIdentity deletes the netdefense-readonly user and its

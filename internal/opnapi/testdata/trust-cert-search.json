@@ -1,0 +1,82 @@
+{
+  "rows": [
+    {
+      "uuid": "6f1c2a7e-4c3b-4f60-9d4e-0a8b1c2d3e4f",
+      "refid": "66f0c1a2b3c4d",
+      "descr": "Web GUI TLS certificate",
+      "caref": "",
+      "crt": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t",
+      "csr": "",
+      "rfc3280_purpose": "Server Authentication",
+      "name": "OPNsense.localdomain",
+      "valid_from": "1767225600",
+      "valid_to": "1798761600",
+      "commonname": "OPNsense.localdomain",
+      "in_use": "1",
+      "is_user": "0"
+    },
+    {
+      "uuid": "0b7d1e44-9a51-4c3e-8f2a-6d5c4b3a2918",
+      "refid": "66f0c1a2b3c5e",
+      "descr": "fw-wildcard",
+      "caref": "66f0c1a2b3c11",
+      "crt": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t",
+      "csr": "",
+      "rfc3280_purpose": "Server Authentication",
+      "name": "*.example.net",
+      "valid_from": "1790640000",
+      "valid_to": "1793232000",
+      "commonname": "*.example.net",
+      "in_use": "0",
+      "is_user": "0"
+    },
+    {
+      "uuid": "3a9e5f10-2b7c-4d8e-9f01-a2b3c4d5e6f7",
+      "refid": "66f0c1a2b3c6f",
+      "descr": "Old VPN server",
+      "caref": "66f0c1a2b3c11",
+      "crt": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURS0tLS0t",
+      "csr": "",
+      "rfc3280_purpose": "Server Authentication",
+      "name": "vpn.example.net",
+      "valid_from": "1704067200",
+      "valid_to": "1735689600",
+      "commonname": "vpn.example.net",
+      "in_use": "1",
+      "is_user": "0"
+    },
+    {
+      "uuid": "5d4c3b2a-1f0e-4d9c-8b7a-6f5e4d3c2b1a",
+      "refid": "66f0c1a2b3c81",
+      "descr": "Unreadable certificate",
+      "caref": "",
+      "crt": "Tk9UIEEgQ0VSVElGSUNBVEU=",
+      "csr": "",
+      "rfc3280_purpose": "",
+      "name": "",
+      "valid_from": "",
+      "valid_to": "",
+      "commonname": "",
+      "in_use": "0",
+      "is_user": "0"
+    },
+    {
+      "uuid": "9c8b7a65-4321-4fed-8cba-0987654321fe",
+      "refid": "66f0c1a2b3c70",
+      "descr": "Pending request",
+      "caref": "",
+      "crt": "",
+      "csr": "LS0tLS1CRUdJTiBDRVJUSUZJQ0FURSBSRVFVRVNULS0tLS0=",
+      "rfc3280_purpose": "",
+      "name": "",
+      "valid_from": "",
+      "valid_to": "",
+      "commonname": "",
+      "in_use": "0",
+      "is_user": "0"
+    }
+  ],
+  "rowCount": 5,
+  "total": 5,
+  "current": 1
+}

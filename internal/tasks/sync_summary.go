@@ -12,6 +12,8 @@ var syncSectionLabels = []struct {
 	Type  string
 	Label string
 }{
+	{"trust_ca", "Trust CAs"},
+	{"trust_cert", "Trust certificates"},
 	{"alias", "Aliases"},
 	{"rule", "Rules"},
 	{"auth_server", "Auth servers"},

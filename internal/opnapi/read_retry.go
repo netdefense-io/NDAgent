@@ -43,6 +43,7 @@ var readOnlyPOSTs = map[string]bool{
 	"/unbound/settings/searchAcl":          true,
 	"/wireguard/server/search_server":      true,
 	"/wireguard/client/search_client":      true,
+	"/trust/ca/search":                     true,
 	"/trust/cert/search":                   true,
 }
 

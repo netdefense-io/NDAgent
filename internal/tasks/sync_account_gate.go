@@ -463,7 +463,7 @@ func clearanceRefusalMessage(kind, name, snippetName string, snippetIndex int, c
 		what += fmt.Sprintf(" and %d more", more)
 	}
 	return fmt.Sprintf(
-		"rejected (Superuser clearance required): %s for %s %q %s. It carries no Superuser clearance, so a Superuser must save the snippet (and any variable it uses) again; reject_dangerous_snippets=false does not lift this",
+		"rejected (Superuser clearance required): %s for %s %q %s. It carries no Superuser clearance, so a Superuser must save the snippet (and any variable it uses) again; turning on \"Allow All Snippet Content\" (reject_dangerous_snippets=false) does not lift this",
 		snippetLabelFrom(kind, snippetName, snippetIndex), kind, name, what,
 	)
 }

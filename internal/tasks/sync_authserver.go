@@ -1032,7 +1032,7 @@ func authServerBlockedMessage(s authHelperServerResult, release string, rejectDa
 	msg := fmt.Sprintf("auth server %q: %s", s.Name, s.Code)
 	switch {
 	case s.Code == "AUTH_REJECTED_DANGEROUS":
-		msg += "; rejected by local policy reject_dangerous_snippets: set reject_dangerous_snippets=false in the agent's local configuration to allow"
+		msg += "; rejected by local policy reject_dangerous_snippets: " + dangerousSnippetOptOut
 	case s.Code == "AUTH_VERSION_UNSUPPORTED":
 		msg += fmt.Sprintf("; this device reports OPNsense release %q, below the 26.1.6 floor AUTH_SERVER mutations require", release)
 	case s.Code == "CONSUMER_REFERENCED":
@@ -1127,7 +1127,7 @@ func authFacilityBlockedMessage(fname string, f authHelperFacilityResult, releas
 	case "AUTH_VERSION_UNSUPPORTED":
 		msg += fmt.Sprintf("; this device reports OPNsense release %q, below the 26.1.6 floor AUTH_SERVER mutations require", release)
 	case "AUTH_REJECTED_DANGEROUS":
-		msg += "; rejected by local policy reject_dangerous_snippets: set reject_dangerous_snippets=false in the agent's local configuration to allow"
+		msg += "; rejected by local policy reject_dangerous_snippets: " + dangerousSnippetOptOut
 	default:
 		if detail, ok := authFacilityInvalidDetail[f.Code]; ok {
 			msg += "; " + detail

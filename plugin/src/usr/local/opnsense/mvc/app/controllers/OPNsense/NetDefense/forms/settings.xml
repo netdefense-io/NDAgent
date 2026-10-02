@@ -41,6 +41,13 @@
         <advanced>true</advanced>
     </field>
     <field>
+        <id>settings.extraCaFile</id>
+        <label>Extra CA File</label>
+        <type>text</type>
+        <help>Optional path to a PEM file of CA certificates trusted for the connections to NetDefense besides the built-in roots. Set it only when this firewall reaches the internet through a TLS-inspection proxy. See https://netdefense.io/docs/ndagent/configuration/#extra-ca-file</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
         <id>settings.logLevel</id>
         <label>Log Level</label>
         <type>dropdown</type>

@@ -276,6 +276,7 @@ func (r *RegistrationClient) CheckRegistration(ctx context.Context) (*CheckRegis
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
+		r.cfg.ReportUntrustedCertificate(log, r.cfg.ServerURICheck, err)
 		return nil, fmt.Errorf("connection error during registration check: %w", err)
 	}
 	defer resp.Body.Close()
@@ -346,6 +347,7 @@ func (r *RegistrationClient) StartRegistration(ctx context.Context) error {
 
 	resp, err := r.httpClient.Do(req)
 	if err != nil {
+		r.cfg.ReportUntrustedCertificate(log, r.cfg.ServerURIStart, err)
 		return fmt.Errorf("connection error during registration start: %w", err)
 	}
 	defer resp.Body.Close()

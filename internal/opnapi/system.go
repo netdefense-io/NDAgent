@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -55,9 +56,10 @@ type FirmwareStatus struct {
 }
 
 // CertEntry is one row from `/api/trust/cert/search`, trimmed to what the
-// dashboard renders. `ValidTo` is the agent-parseable timestamp string;
-// the broker / NDManager treat it opaquely and the agent computes
-// `DaysLeft` so we don't ship the cert payload itself.
+// dashboard renders. `ValidTo` is the expiry as an RFC 3339 UTC timestamp
+// (the value as OPNsense sent it when it cannot be read); the broker /
+// NDManager treat it opaquely and the agent computes `DaysLeft` so we don't
+// ship the cert payload itself.
 type CertEntry struct {
 	Description string `json:"description"`
 	DaysLeft    int    `json:"days_left"`
@@ -160,55 +162,107 @@ func (c *Client) GetFirmwareStatus(ctx context.Context) (*FirmwareStatus, error)
 // a days-until-expiry integer. The dashboard cares about *which* certs
 // are about to expire, not the cert content itself, so the crt/csr/prv
 // payload blobs are intentionally dropped here.
-//
-// OPNsense returns `valid_to` as a textual date like
-// `"Jun 26 18:33:46 2025 GMT"`. Whatever parse fails leaves DaysLeft at
-// 0 so the dashboard surfaces it as "expired" — that's the conservative
-// read; missing data should not be silently dropped.
 func (c *Client) ListCerts(ctx context.Context) ([]CertEntry, error) {
 	body, err := c.doRequest(ctx, "POST", "/trust/cert/search", nil)
 	if err != nil {
 		return nil, fmt.Errorf("cert search: %w", err)
 	}
+	return certEntries(body, time.Now())
+}
+
+// certEntries decodes a `/trust/cert/search` response, counting the days left
+// from now.
+//
+// OPNsense sends `valid_to` as Unix seconds in a string ("1782000000"): the
+// trust model copies openssl_x509_parse's validTo_time_t into a text field. A
+// value that cannot be read leaves DaysLeft at 0, which the dashboard counts
+// as expired: missing data should not be silently dropped. A row with no
+// certificate at all, a signing request waiting for one, has no expiry and is
+// left out.
+func certEntries(body []byte, now time.Time) ([]CertEntry, error) {
 	var resp struct {
 		Rows []struct {
-			Descr   string `json:"descr"`
-			ValidTo string `json:"valid_to"`
-			InUse   string `json:"in_use"`
+			Descr      string          `json:"descr"`
+			ValidTo    json.RawMessage `json:"valid_to"`
+			InUse      string          `json:"in_use"`
+			Crt        json.RawMessage `json:"crt"`
+			CrtPayload json.RawMessage `json:"crt_payload"`
 		} `json:"rows"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("cert search decode: %w", err)
 	}
-	now := time.Now()
 	out := make([]CertEntry, 0, len(resp.Rows))
 	for _, r := range resp.Rows {
-		out = append(out, CertEntry{
-			Description: r.Descr,
-			DaysLeft:    daysUntilCertExpiry(r.ValidTo, now),
-			ValidTo:     r.ValidTo,
-			InUse:       r.InUse == "1",
-		})
+		if blankJSON(r.Crt) && blankJSON(r.CrtPayload) && blankJSON(r.ValidTo) {
+			continue
+		}
+		entry := CertEntry{Description: r.Descr, InUse: r.InUse == "1"}
+		if expiry, ok := certExpiry(r.ValidTo); ok {
+			entry.ValidTo = expiry.UTC().Format(time.RFC3339)
+			entry.DaysLeft = daysLeft(expiry, now)
+		} else {
+			entry.ValidTo = certValidToText(r.ValidTo)
+		}
+		out = append(out, entry)
 	}
 	return out, nil
 }
 
-// daysUntilCertExpiry parses OPNsense's `valid_to` text into days from
-// `now`. Negative for already-expired. Returns 0 on parse failure (which
-// renders as "expired" in the dashboard — the right conservative call).
-func daysUntilCertExpiry(validTo string, now time.Time) int {
-	// OPNsense uses the OpenSSL `Mon DD HH:MM:SS YYYY ZONE` format.
-	layouts := []string{
-		"Jan _2 15:04:05 2006 MST",
-		"Jan 02 15:04:05 2006 MST",
-		time.RFC3339,
+// blankJSON reports whether a field is absent, null or "".
+func blankJSON(raw json.RawMessage) bool {
+	switch strings.TrimSpace(string(raw)) {
+	case "", "null", `""`:
+		return true
 	}
-	for _, layout := range layouts {
-		if t, err := time.Parse(layout, validTo); err == nil {
-			return int(t.Sub(now).Hours() / 24)
+	return false
+}
+
+// certTextLayouts are the textual forms a valid_to has been seen in besides
+// Unix seconds: OpenSSL's `Mon DD HH:MM:SS YYYY ZONE` and RFC 3339.
+var certTextLayouts = []string{
+	"Jan _2 15:04:05 2006 MST",
+	"Jan 02 15:04:05 2006 MST",
+	time.RFC3339,
+}
+
+// certExpiry reads a valid_to value: Unix seconds as a JSON string or number,
+// or one of certTextLayouts.
+func certExpiry(raw json.RawMessage) (time.Time, bool) {
+	text := certValidToText(raw)
+	if text == "" {
+		return time.Time{}, false
+	}
+	if seconds, err := strconv.ParseInt(text, 10, 64); err == nil {
+		return time.Unix(seconds, 0), true
+	}
+	for _, layout := range certTextLayouts {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t, true
 		}
 	}
-	return 0
+	return time.Time{}, false
+}
+
+// certValidToText returns a valid_to string, or the digits of a number, and ""
+// for anything else.
+func certValidToText(raw json.RawMessage) string {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strings.TrimSpace(text)
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err == nil {
+		return number.String()
+	}
+	return ""
+}
+
+// daysLeft counts the days from now to expiry, rounded up: 1 while any part of
+// the last day remains, 0 or less once the certificate has expired. That is the
+// split the dashboard draws between expired (days_left <= 0) and expiring soon.
+func daysLeft(expiry, now time.Time) int {
+	return int(math.Ceil(expiry.Sub(now).Hours() / 24))
 }
 
 // ─── Firmware upgrade API (FIRMWARE_UPGRADE task) ────────────────────────────

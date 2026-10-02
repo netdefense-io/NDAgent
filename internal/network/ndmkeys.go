@@ -263,6 +263,7 @@ func fetchJWKSWithRetry(ctx context.Context, cfg *config.Config) (*jwksResponse,
 			return jwks, nil
 		}
 		lastErr = err
+		cfg.ReportUntrustedCertificate(logging.Named("ndmkeys"), url, err)
 		if attempt == ndmKeysFetchRetries {
 			break
 		}

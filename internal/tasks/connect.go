@@ -291,6 +291,7 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 
 	// Connect and register
 	if err := client.Connect(ctx); err != nil {
+		ws.ReportUntrustedCertificate(log, pathfinderURL, err)
 		return fmt.Errorf("connect failed: %w", err)
 	}
 	defer client.Close()

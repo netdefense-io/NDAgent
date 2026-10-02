@@ -3,6 +3,7 @@ package config
 
 import (
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"os"
 	"strings"
@@ -66,6 +67,21 @@ type Config struct {
 	// convenience, so a MITM can't plant a rogue key at the one moment
 	// nothing is pinned yet.
 	TOFUSSLVerify bool `mapstructure:"tofu_ssl_verify"`
+
+	// ExtraCAFile is a local PEM file of CAs the control-plane connections
+	// trust besides the built-in roots, for sites behind a TLS-inspection
+	// proxy (see roots.go). No sync writes it: it is set on the device, by
+	// root or through an administrator's session to it.
+	ExtraCAFile string `mapstructure:"extra_ca_file"`
+
+	// ExtraCAs and ExtraCAError report what Load made of ExtraCAFile. Config
+	// loading happens before logging is initialized, so main logs them.
+	ExtraCAs     []ExtraCA
+	ExtraCAError error
+
+	// controlPlaneRoots is the built-in roots plus ExtraCAFile's CAs, nil
+	// when there are none; see ControlPlaneRoots.
+	controlPlaneRoots *x509.CertPool
 
 	// File paths
 	ConfigXMLPath string `mapstructure:"config_xml_path"`
@@ -224,6 +240,8 @@ func Load(configPath string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
+	cfg.loadControlPlaneRoots()
 
 	// Detect webadmin port/protocol from OPNsense config.xml
 	wg := ReadWebGUIConfig(cfg.ConfigXMLPath)
@@ -385,12 +403,12 @@ func (c *Config) computeURIs() {
 	c.ServerURIStart = fmt.Sprintf("%s/v1/DeviceRegistrationStart", baseURL)
 }
 
-// GetTLSConfig returns a TLS configuration based on the ssl_verify setting.
+// GetTLSConfig returns the TLS configuration of registration and the broker
+// socket, based on the ssl_verify setting. Verification is against
+// ControlPlaneRoots, never the system bundle.
 func (c *Config) GetTLSConfig() *tls.Config {
 	if c.SSLVerify {
-		return &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
+		return c.controlPlaneTLSConfig()
 	}
 
 	// Warning: Insecure - skips certificate verification
@@ -404,12 +422,10 @@ func (c *Config) GetTLSConfig() *tls.Config {
 // JWKS fetch (TOFU key pinning). It honors TOFUSSLVerify independently of
 // SSLVerify — the global toggle is not permitted to weaken the one fetch
 // where nothing is pinned yet, so ssl_verify=false alone never disables
-// verification here.
+// verification here. Verification is against ControlPlaneRoots.
 func (c *Config) GetTOFUTLSConfig() *tls.Config {
 	if c.TOFUSSLVerify {
-		return &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
+		return c.controlPlaneTLSConfig()
 	}
 
 	// Warning: Insecure - skips certificate verification
@@ -419,12 +435,11 @@ func (c *Config) GetTOFUTLSConfig() *tls.Config {
 	}
 }
 
-// GetPathfinderTLSConfig returns a TLS configuration for Pathfinder connections.
+// GetPathfinderTLSConfig returns a TLS configuration for Pathfinder
+// connections. Verification is against ControlPlaneRoots.
 func (c *Config) GetPathfinderTLSConfig() *tls.Config {
 	if c.PathfinderTLSVerify {
-		return &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
+		return c.controlPlaneTLSConfig()
 	}
 
 	// Warning: Insecure - skips certificate verification

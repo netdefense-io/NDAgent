@@ -617,6 +617,16 @@
                             </div>
                         </td>
                     </tr>
+                    <tr>
+                        <td><strong>{{ lang._('Extra CA File') }}</strong></td>
+                        <td>
+                            <input type="text" class="form-control" id="settings.extraCaFile" name="settings.extraCaFile" placeholder="/usr/local/etc/ndagent-extra-ca.pem">
+                            <div class="help-block">
+                                {{ lang._('Optional. CA certificates of a TLS-inspection proxy, trusted for the connections to NetDefense besides the built-in roots. The file must be owned by root and writable by root alone, in a directory only root can write.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#extra-ca-file" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
+                        </td>
+                    </tr>
 
                     <tr>
                         <td colspan="2" class="netdefense-group-header">

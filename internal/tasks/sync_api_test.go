@@ -608,8 +608,8 @@ func TestExecuteSyncUsersGroups_DangerousFieldGate(t *testing.T) {
 					if len(result.Errors) != 1 || !strings.Contains(result.Errors[0], "rejected by local policy reject_dangerous_snippets") {
 						t.Errorf("errors = %v, want a policy-rejection message naming reject_dangerous_snippets", result.Errors)
 					}
-					if !strings.Contains(result.Errors[0], "reject_dangerous_snippets=false") {
-						t.Errorf("errors = %v, want the message to name the opt-out (reject_dangerous_snippets=false)", result.Errors)
+					if !strings.Contains(result.Errors[0], `turn on "Allow All Snippet Content" (reject_dangerous_snippets=false)`) {
+						t.Errorf("errors = %v, want the message to name the plugin setting and the key", result.Errors)
 					}
 				} else if len(rejectedNames) != 0 {
 					t.Errorf("gate off must never produce a rejected result, got %v", rejectedNames)
@@ -1208,5 +1208,21 @@ func TestExecuteSyncUsersGroups_ExternalGroupUpdate_SearchErrorFailsOpen(t *test
 	groupRaw, _ := setBodies[0]["group"].(map[string]interface{})
 	if _, present := groupRaw["member"]; present {
 		t.Errorf("body = %+v, want no \"member\" key when the repair's own read failed", setBodies[0])
+	}
+}
+
+// The opt-out names the plugin setting, where the owner changes it, and keeps
+// the key for the logs. It never sends them to edit ndagent.conf, which the
+// plugin generates and rewrites on every Apply and plugin upgrade.
+func TestDangerousSnippetOptOut_NamesThePluginSetting(t *testing.T) {
+	msg := dangerousSnippetRejectionMessage("user", "svc", []string{"priv"})
+	want := `rejected by local policy reject_dangerous_snippets: priv in user "svc"; to allow it, turn on "Allow All Snippet Content" (reject_dangerous_snippets=false) in Services > NetDefense > Settings, Advanced Settings, Configuration Sync, and apply`
+	if msg != want {
+		t.Errorf("message = %q\nwant      %q", msg, want)
+	}
+	for _, wrong := range []string{"local configuration", "ndagent.conf"} {
+		if strings.Contains(msg, wrong) {
+			t.Errorf("the message points at %q: %q", wrong, msg)
+		}
 	}
 }

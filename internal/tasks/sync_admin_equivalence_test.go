@@ -203,7 +203,7 @@ func TestAdminEquivalenceGate_PinsTheMessage(t *testing.T) {
 
 	want := `rejected (Superuser clearance required): user snippet "svc-snippet" (index 4) for user "svc" ` +
 		`would add membership in administrator-equivalent group "admins" and would grant 1 privilege ID(s) the catalog does not know, which count as administrator-equivalent. ` +
-		`It carries no Superuser clearance, so a Superuser must save the snippet (and any variable it uses) again; reject_dangerous_snippets=false does not lift this`
+		`It carries no Superuser clearance, so a Superuser must save the snippet (and any variable it uses) again; turning on "Allow All Snippet Content" (reject_dangerous_snippets=false) does not lift this`
 	if len(result.Errors) != 1 || result.Errors[0] != want {
 		t.Fatalf("errors = %q\nwant    %q", result.Errors, want)
 	}
@@ -650,7 +650,7 @@ func TestLocalPolicy_RefusesAdministratorEquivalentMembership(t *testing.T) {
 			if len(items) != 1 || items[0].Name != "svc" {
 				t.Fatalf("refused items = %+v, want svc refused", items)
 			}
-			wantText := localPrefix + ` "svc"; set reject_dangerous_snippets=false in the agent's local configuration to allow`
+			wantText := localPrefix + ` "svc"; to allow it, turn on "Allow All Snippet Content" (reject_dangerous_snippets=false) in Services > NetDefense > Settings, Advanced Settings, Configuration Sync, and apply`
 			if items[0].Error != wantText || items[0].Code != "" {
 				t.Errorf("item = %+v\nwant the owner's policy message %q with no code", items[0], wantText)
 			}

@@ -224,14 +224,21 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 		// Read-only enforcement, before anything is forwarded.
 		var scrub *scrubRule
 		if p.readOnly {
-			if status := readOnlyRefusal(req.Method, req.RequestURI, requestHasBody(req)); status != 0 {
+			status := readOnlyRefusal(req.Method, req.RequestURI, requestHasBody(req))
+			var detail []string
+			if status == 0 && phraseSearchRefused(req.RequestURI) {
+				if status = searchPhraseRefusal(req); status == http.StatusMethodNotAllowed {
+					detail = append(detail, searchRefusalDetail)
+				}
+			}
+			if status != 0 {
 				p.log.Warnw("Refusing request in read-only session",
 					"stream_id", stream.ID(),
 					"method", req.Method,
 					"target", req.RequestURI,
 					"status", status,
 				)
-				p.sendErrorResponse(stream, status, http.StatusText(status)+" (read-only session)")
+				p.sendErrorResponse(stream, status, http.StatusText(status)+" (read-only session)", detail...)
 				p.endAfterReply(stream, reader, nothingHeld)
 				break
 			}

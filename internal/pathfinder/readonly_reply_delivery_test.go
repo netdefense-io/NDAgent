@@ -369,7 +369,8 @@ func refusalReply(code int) string {
 	return fmt.Sprintf("%d %s (read-only session)", code, http.StatusText(code))
 }
 
-// refusalFamilies holds one request for each way readOnlyRefusal refuses.
+// refusalFamilies holds one request for each way readOnlyRefusal and
+// searchPhraseRefusal refuse.
 func refusalFamilies() []replyCase {
 	form := "application/x-www-form-urlencoded"
 	return []replyCase{
@@ -387,6 +388,8 @@ func refusalFamilies() []replyCase {
 		{name: "a named mutator", raw: rawRequest("POST", "/api/core/system/dismiss_status", "application/json", `{"subject":"crashreporter"}`), status: refusalReply(refused)},
 		{name: "the account's own dashboard save", raw: rawRequest("POST", "/api/core/dashboard/saveWidgets", "application/json", `{"widgets":[]}`), status: refusalReply(refused)},
 		{name: "a log clear", raw: rawRequest("POST", "/api/diagnostics/log/core/system/clear", "", ""), status: refusalReply(refused)},
+		{name: "a search of the certificates", raw: rawRequest("POST", "/api/trust/cert/search", form, "current=1&searchPhrase=MII"), status: refusalReply(refused), body: searchRefusalDetail + "\n"},
+		{name: "a search the proxy cannot read", raw: rawRequest("POST", "/api/trust/ca/search", "multipart/form-data; boundary=b", "--b--\r\n"), status: refusalReply(malformed)},
 	}
 }
 

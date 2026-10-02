@@ -35,6 +35,28 @@
             <Default>1</Default>
             <Required>Y</Required>
         </tofuSslVerify>
+        <extraCaFile type="TextField">
+            <!-- Optional path to a PEM file of CA certificates the agent
+                 trusts for its connections to NetDefense (registration and
+                 the broker socket, the trust-key fetch, the relay), besides
+                 the root set built into the agent. The agent never trusts
+                 the firewall's own certificate store for those connections,
+                 because NetDefense can sync CAs into it; a site whose traffic
+                 passes a TLS-inspection proxy puts the proxy's CA here.
+
+                 No NetDefense sync writes this field or the file it names;
+                 an administrator's session to the device can, like any
+                 setting. The agent takes only a file root left: a regular
+                 file root owns, with one link and no group or other write
+                 permission, named without a symbolic link, outside the
+                 system certificate store, in directories only root can
+                 write, holding nothing but CERTIFICATE blocks. Otherwise it
+                 trusts its built-in roots only. Empty (the default) adds
+                 nothing. -->
+            <mask>/^\/[A-Za-z0-9._+@,=\/-]{1,254}$/</mask>
+            <ValidationMessage>Extra CA File must be an absolute path (letters, digits and . _ + @ , = - /)</ValidationMessage>
+            <Required>N</Required>
+        </extraCaFile>
         <logLevel type="OptionField">
             <Default>INFO</Default>
             <Required>Y</Required>

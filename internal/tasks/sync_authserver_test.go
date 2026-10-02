@@ -740,7 +740,7 @@ func TestMapAuthResponseToResult_EnrichesBlockedMessages(t *testing.T) {
 
 	var authRejected, consumerRef, unresolved bool
 	for _, e := range result.Errors {
-		if strings.Contains(e, "Corp AD") && strings.Contains(e, "reject_dangerous_snippets=false") {
+		if strings.Contains(e, "Corp AD") && strings.Contains(e, dangerousSnippetOptOut) {
 			authRejected = true
 		}
 		if strings.Contains(e, "Legacy AD") && strings.Contains(e, "OpenVPN/instance1/authmode") {
@@ -872,8 +872,8 @@ func TestAuthFacilityBlockedMessage_OmittedAvailableIsSkipped(t *testing.T) {
 func TestAuthFacilityBlockedMessage_RejectedDangerousGetsOptOut(t *testing.T) {
 	f := authHelperFacilityResult{Action: "refused", Code: "AUTH_REJECTED_DANGEROUS"}
 	msg := authFacilityBlockedMessage("webadmin", f, "26.7")
-	if !strings.Contains(msg, "reject_dangerous_snippets=false") {
-		t.Errorf("message = %q, want the reject_dangerous_snippets opt-out named", msg)
+	if !strings.Contains(msg, `turn on "Allow All Snippet Content" (reject_dangerous_snippets=false)`) {
+		t.Errorf("message = %q, want the plugin setting named, with the key", msg)
 	}
 }
 

@@ -318,6 +318,7 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 	// Connect to WebSocket server
 	conn, resp, err := dialer.DialContext(ctx, w.cfg.ServerURIWS, nil)
 	if err != nil {
+		w.cfg.ReportUntrustedCertificate(log, w.cfg.ServerURIWS, err)
 		if resp != nil {
 			log.Errorw("WebSocket dial failed",
 				"status", resp.StatusCode,
@@ -1005,6 +1006,13 @@ func (w *WebSocketClient) GetPathfinderHost() string {
 // GetPathfinderTLSConfig returns the TLS configuration for Pathfinder connections.
 func (w *WebSocketClient) GetPathfinderTLSConfig() *tls.Config {
 	return w.cfg.GetPathfinderTLSConfig()
+}
+
+// ReportUntrustedCertificate logs the extra_ca_file hint when err is a
+// control-plane handshake that failed on an untrusted certificate; see
+// config.Config.ReportUntrustedCertificate.
+func (w *WebSocketClient) ReportUntrustedCertificate(log *zap.SugaredLogger, endpoint string, err error) bool {
+	return w.cfg.ReportUntrustedCertificate(log, endpoint, err)
 }
 
 // GetPathfinderShell returns the shell to use for Pathfinder sessions.

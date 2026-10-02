@@ -164,13 +164,16 @@ os-isc-dhcp, os-tailscale, os-qemu-guest-agent):
    matches the search phrase against every field it is given, secret included,
    and `searchBase(path)` with no columns gives it all of them, so which rows come
    back reads the secret. The proxy lets that search through (accepted, see "Left
-   open on purpose" below), so for each scrubbed route that is a grid read the
-   controller's `searchBase`/`searchRecordsetBase` call (columns named and free of
-   secrets, or every field) and list a grid of the second kind among the routes of
-   the residual in CLAUDE.md. Then read what else the request can be: whether the
-   route answers a HEAD with the length of a body it does not send (refused by
-   `readOnlyRefusal`), and whether any request variable other than the phrase
-   names a secret field (`sort` only orders the rows).
+   open on purpose" below), except on the certificate and CA lists, whose rows
+   hold private keys (`phraseSearchRefusedPattern`), so for each scrubbed route
+   that is a grid read the controller's `searchBase`/`searchRecordsetBase` call
+   (columns named and free of secrets, or every field) and list a grid of the
+   second kind among the routes of the residual in CLAUDE.md, or, when its rows
+   hold private keys, in `phraseSearchRefusedPattern`. Then read what else the
+   request can be: whether the route answers a HEAD with the length of a body it
+   does not send (refused by `readOnlyRefusal`), and whether any request
+   variable other than the phrase names a secret field (`sort` only orders the
+   rows).
 6. Pin the result: a response of the right shape for each route goes into
    `scrubCases` (JSON) or `htmlCases` (a page), with a marker in every secret
    and the values that must stay. The tests then run each case through
@@ -193,7 +196,9 @@ these again as findings:
   pre-shared key, a private key) by guessing through the list search: which rows
   come back says whether the phrase occurs in one, and a phrase grown one character
   at a time reads all of it. The response itself never carries the secret. The
-  routes are listed in CLAUDE.md;
+  routes are listed in CLAUDE.md; the certificate and CA lists are not among them,
+  their search with a phrase is refused
+  (`TestHandleStream_ReadOnlyRefusesASearchOfTheKeyLists`);
   `TestHandleStream_ReadOnlyForwardsASearchOfRowsThatHoldASecret` pins both halves,
   that the search reaches OPNsense untouched and selects the row by its blanked
   secret, and that the answer is still cleaned.

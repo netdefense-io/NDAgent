@@ -416,3 +416,52 @@ func TestDecommissionHelperCmd(t *testing.T) {
 
 	assertDetachedHelperCmd(t, cmd, "/usr/local/sbin/ndagent-decommission.sh", []string{"os-netdefense-qa"})
 }
+
+// A web GUI restart owed to a renewed certificate starts after the last API
+// call (it takes the local API down) and before the uninstall helper, which
+// removes the record of it. None starts when none is owed.
+func TestDecommission_StartsAnOwedWebGUIRestart(t *testing.T) {
+	for _, owed := range []bool{true, false} {
+		rec := &recorder{}
+		d := newTestDecommissioner(t, rec)
+		d.Families = []DecommissionFamily{{Name: "trust", Reconcile: func(context.Context) error {
+			rec.add("family_trust")
+			d.WebGUIRestartOwed = owed
+			return nil
+		}}}
+		d.StartWebGUIRestart = func() error {
+			rec.add("webgui_restart")
+			return nil
+		}
+		if err := d.Run(context.Background(), "2026-10-02T00:00:00Z", "abcd"); err != nil {
+			t.Fatalf("Run: %v", err)
+		}
+		want := []string{"family_trust", "remove_readonly", "remove_agent", "deprovision_accounts", "reset_settings", "fork_helper", "shutdown"}
+		if owed {
+			want = []string{"family_trust", "remove_readonly", "remove_agent", "deprovision_accounts", "reset_settings", "webgui_restart", "fork_helper", "shutdown"}
+		}
+		if strings.Join(rec.steps, ",") != strings.Join(want, ",") {
+			t.Errorf("owed=%v: sequence = %v, want %v", owed, rec.steps, want)
+		}
+	}
+}
+
+// The production trust family marks the restart owed when the family asks for
+// one: a restart a SYNC owed and never started.
+func TestNewDecommissioner_TrustFamilyCarriesAnOwedRestart(t *testing.T) {
+	f := newFakeTrust(t)
+	recordConfigctl(t)
+	if err := saveTrustPending(trustPending{WebGUI: true}); err != nil {
+		t.Fatal(err)
+	}
+	d := NewDecommissioner(f.client, "os-netdefense", "dev", f.configXML(t, ""), func() {})
+	if d.Families[0].Name != "trust" {
+		t.Fatalf("families start with %q", d.Families[0].Name)
+	}
+	if err := d.Families[0].Reconcile(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !d.WebGUIRestartOwed || d.StartWebGUIRestart == nil {
+		t.Fatalf("owed = %v, starter set = %v", d.WebGUIRestartOwed, d.StartWebGUIRestart != nil)
+	}
+}

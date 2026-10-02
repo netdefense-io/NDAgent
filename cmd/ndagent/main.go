@@ -10,6 +10,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -133,6 +134,24 @@ func run(cmd *cobra.Command, args []string) error {
 		)
 	}
 
+	// The roots the control-plane connections verify against: the built-in
+	// set, plus extra_ca_file's CAs. Logged here because config loading
+	// runs before logging is initialized.
+	if cfg.ExtraCAError != nil {
+		log.Errorw("extra_ca_file could not be used; the control-plane connections trust the built-in roots only",
+			"extra_ca_file", cfg.ExtraCAFile,
+			"error", cfg.ExtraCAError,
+		)
+	}
+	for _, ca := range cfg.ExtraCAs {
+		log.Infow("extra_ca_file adds a CA to the control-plane roots",
+			"extra_ca_file", cfg.ExtraCAFile,
+			"subject", ca.Subject,
+			"sha256", ca.SHA256,
+			"not_after", ca.NotAfter.UTC().Format(time.RFC3339),
+		)
+	}
+
 	// Check if agent is enabled
 	if !cfg.IsEnabled() {
 		log.Error("Agent is disabled in configuration")
@@ -157,7 +176,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// Warn when SSL verification is disabled
 	if !cfg.SSLVerify {
 		log.Warn("SSL certificate verification is DISABLED. This makes connections vulnerable to man-in-the-middle attacks.")
-		log.Warn("For production use, set ssl_verify=true in configuration file.")
+		log.Warn(`For production use, turn on "SSL Verification" (ssl_verify=true) in Services > NetDefense > Settings, Advanced Settings, Control Plane, and apply.`)
 	}
 
 	// Log test mode status

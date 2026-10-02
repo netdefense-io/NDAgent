@@ -19,7 +19,9 @@ import (
 // search as it came and blanks the secret out of the rows that come back, so which
 // rows come back can still say whether a phrase occurs in a blanked secret: the
 // accepted residual recorded in CLAUDE.md. These tests pin both halves, that a
-// search reaches OPNsense untouched and that the answer is still cleaned.
+// search reaches OPNsense untouched and that the answer is still cleaned. The
+// certificate and CA lists, whose rows hold private keys, are the exception: a
+// search of them with a phrase is refused (readonly_search.go).
 
 const (
 	formMedia = "application/x-www-form-urlencoded; charset=UTF-8"
@@ -85,12 +87,34 @@ func searchPhraseOf(r *http.Request, body []byte) string {
 	return form.Get("searchPhrase")
 }
 
-// searchedGrids are the grids of the audit whose rows carry a secret: the scrubCases
+// secretGrids are the grids of the audit whose rows carry a secret: the scrubCases
 // that POST to a search action and plant one.
-func searchedGrids() []scrubCase {
+func secretGrids() []scrubCase {
 	var grids []scrubCase
 	for _, tt := range scrubCases {
 		if tt.method == "POST" && len(tt.secrets) > 0 && strings.HasPrefix(path.Base(tt.target), "search") {
+			grids = append(grids, tt)
+		}
+	}
+	return grids
+}
+
+// searchedGrids are the secretGrids a read-only session may search.
+func searchedGrids() []scrubCase {
+	var grids []scrubCase
+	for _, tt := range secretGrids() {
+		if !phraseSearchRefused(tt.target) {
+			grids = append(grids, tt)
+		}
+	}
+	return grids
+}
+
+// keyGrids are the secretGrids a read-only session may list but not search.
+func keyGrids() []scrubCase {
+	var grids []scrubCase
+	for _, tt := range secretGrids() {
+		if phraseSearchRefused(tt.target) {
 			grids = append(grids, tt)
 		}
 	}
@@ -239,5 +263,164 @@ func TestHandleStream_ReadOnlyForwardsASearchWhateverItsSpelling(t *testing.T) {
 			t.Errorf("%s: the grid saw %s %.80q with a body of %d bytes, want %s %.80q with %d", s.name, got.method, got.uri, len(got.body), s.method, s.uri, len(s.body))
 		}
 		assertCleaned(t, s.name, aliasGrid, ex)
+	}
+}
+
+// searchSpelling is one way a client can send a search of a grid.
+type searchSpelling struct {
+	name, raw string
+}
+
+// keySearchesWithAPhrase spells a search with a phrase every way OPNsense reads one:
+// the query string of any method, a form or JSON body whatever it is declared as,
+// PHP's array form, a repeated or escaped JSON key, a cookie, a chunked body.
+func keySearchesWithAPhrase(target, phrase string) []searchSpelling {
+	quoted, _ := json.Marshal(phrase)
+	form := "current=1&rowCount=-1&searchPhrase=" + url.QueryEscape(phrase)
+	chunked := "searchPhrase=" + url.QueryEscape(phrase)
+	return []searchSpelling{
+		{"a form", rawRequest("POST", target, formMedia, form)},
+		{"JSON", rawRequest("POST", target, jsonMedia, `{"current":1,"rowCount":-1,"sort":{},"searchPhrase":`+string(quoted)+`}`)},
+		{"the query of a POST", rawRequest("POST", target+"?searchPhrase="+url.QueryEscape(phrase), "", "")},
+		{"the query of a GET", rawRequest("GET", target+"?current=1&searchPhrase="+url.QueryEscape(phrase), "", "")},
+		{"the query of a PUT", rawRequest("PUT", target+"?searchPhrase="+url.QueryEscape(phrase), "", "")},
+		{"an array", rawRequest("POST", target, formMedia, "searchPhrase[]="+url.QueryEscape(phrase))},
+		{"an empty array", rawRequest("POST", target, formMedia, "searchPhrase[]=")},
+		{"a name in capitals and percent-encoding", rawRequest("POST", target, formMedia, "%53EARCHPHRASE="+url.QueryEscape(phrase))},
+		{"a name after white space", rawRequest("POST", target, formMedia, "current=1&+searchPhrase="+url.QueryEscape(phrase))},
+		{"a pair after a semicolon", rawRequest("POST", target, formMedia, "current=1;searchPhrase="+url.QueryEscape(phrase))},
+		{"a form declared as JSON", rawRequest("POST", target, jsonMedia, form)},
+		{"JSON declared as a form", rawRequest("POST", target, formMedia, `{"searchPhrase":`+string(quoted)+`}`)},
+		{"JSON without a content type", rawRequest("POST", target, "", ` {"searchPhrase":`+string(quoted)+`}`)},
+		{"a repeated JSON key", rawRequest("POST", target, jsonMedia, `{"searchPhrase":"","searchPhrase":`+string(quoted)+`}`)},
+		{"an escaped JSON key", rawRequest("POST", target, jsonMedia, `{"search\u0050hrase":`+string(quoted)+`}`)},
+		{"an escaped JSON key after a plain one", rawRequest("POST", target, jsonMedia, `{"searchPhrase":"","\u0073earch\u0050hrase":`+string(quoted)+`}`)},
+		{"a JSON number", rawRequest("POST", target, jsonMedia, `{"searchPhrase":0}`)},
+		{"a JSON array", rawRequest("POST", target, jsonMedia, `{"searchPhrase":[`+string(quoted)+`]}`)},
+		{"a cookie", "POST " + target + " HTTP/1.1\r\nHost: x\r\nCookie: lang=en; searchPhrase=" + url.QueryEscape(phrase) + "\r\nContent-Length: 0\r\n\r\n"},
+		{"a white space phrase", rawRequest("POST", target, formMedia, "searchPhrase=+")},
+		{
+			"a chunked body",
+			"POST " + target + " HTTP/1.1\r\nHost: x\r\nContent-Type: " + formMedia + "\r\nTransfer-Encoding: chunked\r\n\r\n" +
+				fmt.Sprintf("%x\r\n%s\r\n0\r\n\r\n", len(chunked), chunked),
+		},
+	}
+}
+
+// keySearchesWithoutAPhrase are the requests the list itself makes, which must reach
+// OPNsense.
+func keySearchesWithoutAPhrase(target string) []searchSpelling {
+	return []searchSpelling{
+		{"a form with an empty phrase", rawRequest("POST", target, formMedia, "current=1&rowCount=-1&searchPhrase=")},
+		{"JSON with an empty phrase", rawRequest("POST", target, jsonMedia, `{"current":1,"rowCount":7,"sort":{},"searchPhrase":""}`)},
+		{"JSON with a null phrase", rawRequest("POST", target, jsonMedia, `{"current":1,"rowCount":7,"searchPhrase":null}`)},
+		{"JSON with a filter", rawRequest("POST", target, jsonMedia, `{"current":1,"rowCount":7,"searchPhrase":"","carefs":["5f1e1a2b3c4d6"]}`)},
+		{"a form without a phrase", rawRequest("POST", target, formMedia, "current=1&rowCount=7")},
+		{"a query with an empty phrase", rawRequest("POST", target+"?searchPhrase=", "", "")},
+		{"a GET", rawRequest("GET", target, "", "")},
+	}
+}
+
+// A read-only session may list the certificates and the CAs but not search them:
+// a request with a phrase, however it is spelled, is answered 405 with a reason
+// and never reaches OPNsense, while the list's own requests are forwarded and
+// cleaned. A read-write session searches them as before.
+func TestHandleStream_ReadOnlyRefusesASearchOfTheKeyLists(t *testing.T) {
+	grids := keyGrids()
+	if len(grids) != 2 {
+		t.Fatalf("keyGrids() = %d grids, want the certificate and CA lists", len(grids))
+	}
+	for _, tt := range grids {
+		t.Run(tt.target, func(t *testing.T) {
+			grid := &storedGrid{row: tt.body}
+			ts := httptest.NewTLSServer(grid)
+			defer ts.Close()
+			readOnly := newHandleStreamTestProxy(t, ts, true)
+
+			phrase := "-----BEGIN PRIVATE KEY-----"
+			for _, s := range keySearchesWithAPhrase(tt.target, phrase) {
+				ex := exchangeOn(t, readOnly, s.raw)
+				if ex.resp.StatusCode != http.StatusMethodNotAllowed || ex.body != searchRefusalDetail+"\n" {
+					t.Errorf("%s: got %d %q, want 405 %q", s.name, ex.resp.StatusCode, ex.body, searchRefusalDetail)
+				}
+				if got := grid.last(); got.uri != "" {
+					t.Fatalf("%s: the grid was searched: %+v", s.name, got)
+				}
+			}
+
+			for _, s := range keySearchesWithoutAPhrase(tt.target) {
+				ex := exchangeOn(t, readOnly, s.raw)
+				assertCleaned(t, s.name, tt, ex)
+				if got := grid.last(); got.phrase != "" {
+					t.Errorf("%s: the grid saw the phrase %q", s.name, got.phrase)
+				}
+			}
+			if seen := len(grid.seen); seen != len(keySearchesWithoutAPhrase(tt.target)) {
+				t.Errorf("the grid was reached %d times, want once per request without a phrase", seen)
+			}
+
+			readWrite := newHandleStreamTestProxy(t, ts, false)
+			ex := exchangeOn(t, readWrite, rawRequest("POST", tt.target, formMedia, "current=1&searchPhrase="+url.QueryEscape(tt.secrets[0])))
+			if ex.resp.StatusCode != http.StatusOK || grid.last().phrase != tt.secrets[0] {
+				t.Errorf("a read-write session's search: got %d, the grid saw %+v", ex.resp.StatusCode, grid.last())
+			}
+		})
+	}
+}
+
+// What the proxy cannot read is not forwarded either: a multipart body, JSON that
+// does not parse, a body larger than a search ever is.
+func TestHandleStream_ReadOnlyRefusesASearchItCannotRead(t *testing.T) {
+	const target = "/api/trust/cert/search"
+	multipart := "--b\r\nContent-Disposition: form-data; name=\"searchPhrase\"\r\n\r\nx\r\n--b--\r\n"
+	cases := []searchSpelling{
+		{"multipart", rawRequest("POST", target, "multipart/form-data; boundary=b", multipart)},
+		{"JSON that is not valid", rawRequest("POST", target, jsonMedia, `{"searchPhrase":"x"`)},
+		{"JSON with trailing data", rawRequest("POST", target, jsonMedia, `{"searchPhrase":""} {"searchPhrase":"x"}`)},
+		{"a body over the limit", rawRequest("POST", target, formMedia, "x="+strings.Repeat("a", searchBodyLimit))},
+	}
+
+	grid := &storedGrid{row: noRows}
+	ts := httptest.NewTLSServer(grid)
+	defer ts.Close()
+	proxy := newHandleStreamTestProxy(t, ts, true)
+	for _, c := range cases {
+		ex := exchangeOn(t, proxy, c.raw)
+		if ex.resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("%s: status = %d (%s), want 400", c.name, ex.resp.StatusCode, ex.body)
+		}
+	}
+	if len(grid.seen) != 0 {
+		t.Errorf("the grid was reached %d times", len(grid.seen))
+	}
+}
+
+func TestPhraseSearchRefusedRoutes(t *testing.T) {
+	for _, target := range []string{
+		"/api/trust/cert/search",
+		"/api/trust/ca/search",
+		"/api/trust/cert/search/",
+		"/api/trust/cert/search?current=1",
+		"/api/trust/cert/search/x/y",
+		"/api/trust/CERT/Search",
+		"/api/trust/cert/sea_rch",
+		"//api/trust//ca/search",
+		"/api/trust/ca/%73earch",
+	} {
+		if !phraseSearchRefused(target) {
+			t.Errorf("phraseSearchRefused(%q) = false, want true", target)
+		}
+	}
+	for _, target := range []string{
+		"/api/trust/crl/search",
+		"/api/trust/cert/searchx",
+		"/api/trust/cert/get/c1",
+		"/api/trust/cert/ca_list",
+		"/api/auth/user/search",
+		"/ui/trust/cert",
+	} {
+		if phraseSearchRefused(target) {
+			t.Errorf("phraseSearchRefused(%q) = true, want false", target)
+		}
 	}
 }
