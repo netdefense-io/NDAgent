@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -173,10 +174,20 @@ func Open(path string) (*Store, error) {
 	return &Store{db: db}, nil
 }
 
-// OpenInMemory returns a store backed by an anonymous in-memory SQLite.
-// For tests only.
+// memoryStores names the databases OpenInMemory creates, one per store.
+var memoryStores atomic.Uint64
+
+// OpenInMemory returns a store backed by an in-memory SQLite database of its
+// own. For tests only.
+//
+// The name is unique because file::memory:?cache=shared is a single database
+// for the whole process, alive while any connection to it is open, and
+// sql.DB.Close leaves a connection that is still in use open. A store opened
+// right after another was closed could get the rows of the closed one.
 func OpenInMemory() (*Store, error) {
-	db, err := sql.Open("sqlite", "file::memory:?cache=shared&_pragma=journal_mode(MEMORY)&_pragma=foreign_keys(ON)")
+	dsn := fmt.Sprintf("file:taskstore-%d?mode=memory&cache=shared&_pragma=journal_mode(MEMORY)&_pragma=foreign_keys(ON)",
+		memoryStores.Add(1))
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}

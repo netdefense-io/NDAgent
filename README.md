@@ -99,6 +99,8 @@ plugin/               OPNsense plugin (MVC sources + package manifest)
 
 ## Building
 
+Building needs at least the Go release named on the `toolchain` line of `go.mod`, or on its `go` line when there is no `toolchain` line: under the default `GOTOOLCHAIN=auto`, an older `go` command (Go 1.21 or later) downloads it on first use. The published packages are built with exactly that release; set `GOTOOLCHAIN` to it to do the same.
+
 ```bash
 # Build for the current OS/arch
 make build

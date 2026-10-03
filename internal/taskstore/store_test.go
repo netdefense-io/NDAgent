@@ -18,6 +18,29 @@ func newTestStore(t *testing.T) *Store {
 	return s
 }
 
+// A store closed while one of its queries still runs keeps that connection open
+// until the query ends. A store opened in that window must still start empty.
+func TestOpenInMemory_EachStoreHasItsOwnDatabase(t *testing.T) {
+	first, err := OpenInMemory()
+	if err != nil {
+		t.Fatalf("OpenInMemory: %v", err)
+	}
+	if err := first.Begin("101", "FIRMWARE_UPGRADE", LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	rows, err := first.db.Query("SELECT task_id FROM task_states")
+	if err != nil {
+		t.Fatalf("Query: %v", err)
+	}
+	defer rows.Close()
+	_ = first.Close()
+
+	second := newTestStore(t)
+	if _, found, err := second.Get("101"); err != nil || found {
+		t.Fatalf("a new store sees the rows of a closed one: found=%v, err=%v", found, err)
+	}
+}
+
 // withClock overrides nowFn for a test. Restores on cleanup.
 func withClock(t *testing.T, start time.Time) func(delta time.Duration) {
 	t.Helper()

@@ -122,16 +122,18 @@ func TestPhase_AnAnswerIsSentOnlyOnceTheUpdateHasEnded(t *testing.T) {
 
 // When the device is already idle at connect, the hook resolves the row and the
 // drain that follows must not send it again. The ticker is set an hour out, so
-// only the hook can have decided.
+// only the hook can have decided. The first heartbeat comes after the hook and
+// the drain on the same connection, so whatever they sent has arrived by then.
 func TestPhase_ARowResolvedAtConnectIsNotSentTwice(t *testing.T) {
 	b := testbroker.New(t)
 	store := openStore(t)
 	dev := &fakeDevice{state: firmware.RunReady, release: "26.7.4_1"}
-	_ = store.Begin("101", "FIRMWARE_UPGRADE", taskstore.LifecycleRestartCompletes)
+	if err := store.Begin("101", "FIRMWARE_UPGRADE", taskstore.LifecycleRestartCompletes); err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
 
 	startPhaseEvery(t, b, store, dev, time.Hour)
 	b.WaitForHeartbeats(1, 5*time.Second)
-	time.Sleep(100 * time.Millisecond)
 
 	got := b.TaskResponses()
 	if len(got) != 1 || got[0].TaskID != 101 || got[0].Status != "COMPLETED" {
