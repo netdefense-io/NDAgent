@@ -44,7 +44,8 @@ type Broker struct {
 	mu          sync.Mutex
 	conn        *websocket.Conn
 	connections int
-	heartbeats  int
+	auths       []json.RawMessage
+	heartbeats  []json.RawMessage
 	responses   []TaskResponse
 }
 
@@ -78,7 +79,8 @@ func (b *Broker) URL() string {
 
 func (b *Broker) serve(conn *websocket.Conn) {
 	defer conn.Close()
-	if _, _, err := conn.ReadMessage(); err != nil { // the authentication frame
+	_, auth, err := conn.ReadMessage() // the authentication frame
+	if err != nil {
 		return
 	}
 	if err := conn.WriteJSON(map[string]string{"status": "authenticated"}); err != nil {
@@ -87,6 +89,7 @@ func (b *Broker) serve(conn *websocket.Conn) {
 	b.mu.Lock()
 	b.conn = conn
 	b.connections++
+	b.auths = append(b.auths, auth)
 	b.mu.Unlock()
 
 	for {
@@ -105,7 +108,7 @@ func (b *Broker) serve(conn *websocket.Conn) {
 		b.mu.Lock()
 		switch frame.Type {
 		case "heartbeat":
-			b.heartbeats++
+			b.heartbeats = append(b.heartbeats, raw)
 		case "task_response":
 			b.responses = append(b.responses, b.open(frame.TaskID, frame.Envelope))
 		}
@@ -160,7 +163,23 @@ func (b *Broker) Connections() int {
 func (b *Broker) Heartbeats() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.heartbeats
+	return len(b.heartbeats)
+}
+
+// AuthFrames returns the authentication frame of every connection, as sent,
+// in arrival order.
+func (b *Broker) AuthFrames() []json.RawMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]json.RawMessage(nil), b.auths...)
+}
+
+// HeartbeatFrames returns every heartbeat frame received, as sent, in arrival
+// order.
+func (b *Broker) HeartbeatFrames() []json.RawMessage {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return append([]json.RawMessage(nil), b.heartbeats...)
 }
 
 // TaskResponses returns every task_response received, in arrival order.

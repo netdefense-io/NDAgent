@@ -1,0 +1,75 @@
+{
+  "api_version": "2",
+  "connection": "ok",
+  "last_check": "Sun Oct  4 03:02:47 UTC 2026",
+  "needs_reboot": "1",
+  "product_abi": "26.7",
+  "product_id": "opnsense",
+  "product_target": "opnsense",
+  "product_version": "26.7",
+  "repository": "ok",
+  "status": "update",
+  "status_msg": "There are 87 updates available, total download size is 291.8MiB. This update requires a reboot.",
+  "upgrade_major_message": "",
+  "upgrade_major_version": "",
+  "upgrade_needs_reboot": "0",
+  "os_version": "FreeBSD 15.1-RELEASE-p1",
+  "download_size": "167MiB",
+  "upgrade_packages": [
+    {
+      "name": "curl",
+      "repository": "OPNsense",
+      "current_version": "8.21.0",
+      "new_version": "8.22.0"
+    },
+    {
+      "name": "opnsense",
+      "repository": "OPNsense",
+      "current_version": "26.7",
+      "new_version": "26.7.5"
+    },
+    {
+      "name": "opnsense-update",
+      "repository": "OPNsense",
+      "current_version": "26.7",
+      "new_version": "26.7.4_1"
+    },
+    {
+      "name": "base",
+      "size": "97915616",
+      "repository": "OPNsense",
+      "current_version": "26.7",
+      "new_version": "26.7.4"
+    },
+    {
+      "name": "kernel",
+      "size": "32899100",
+      "repository": "OPNsense",
+      "current_version": "26.7",
+      "new_version": "26.7.4"
+    }
+  ],
+  "new_packages": [
+    {
+      "name": "py313-typing-extensions",
+      "repository": "OPNsense",
+      "version": "4.16.0"
+    }
+  ],
+  "reinstall_packages": [],
+  "remove_packages": [],
+  "downgrade_packages": [],
+  "upgrade_sets": [],
+  "product": {
+    "CORE_NAME": "opnsense",
+    "CORE_NEXT": "27.1",
+    "CORE_SERIES": "26.7",
+    "product_abi": "26.7",
+    "product_id": "opnsense",
+    "product_latest": "26.7.2",
+    "product_mirror": "https://pkg.opnsense.org/FreeBSD:15:amd64/26.7",
+    "product_name": "OPNsense",
+    "product_series": "26.7",
+    "product_version": "26.7"
+  }
+}

@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/opnapi"
+
 	// Embed the IANA database so the timezone assertions hold on build
 	// hosts without /usr/share/zoneinfo. The agent itself relies on
 	// FreeBSD's system tzdata and does not embed this.
@@ -64,14 +66,18 @@ func writeFixture(t *testing.T, body string) string {
 	return path
 }
 
+var errNoVersionFile = errors.New("no version file")
+
 // testCollector returns a collector with every host-dependent probe
-// stubbed, so the assertions hold on any build machine.
+// stubbed, so the assertions hold on any build machine. The version file
+// cannot be read, so the version comes from the provider.
 func testCollector(t *testing.T, body string, at time.Time) *Collector {
 	t.Helper()
 	c := New(writeFixture(t, body))
 	c.now = func() time.Time { return at }
 	c.hostInfo = func() (string, string, error) { return "freebsd", "15.0-RELEASE", nil }
 	c.hostname = func() (string, error) { return "fw01", nil }
+	c.release = func() (string, error) { return "", errNoVersionFile }
 	c.SetOPNsenseVersionProvider(func() string { return "26.1.9" })
 	return c
 }
@@ -166,6 +172,7 @@ func TestCollectSurvivesAnUnreadableConfigXML(t *testing.T) {
 	c := New(filepath.Join(t.TempDir(), "absent.xml"))
 	c.hostInfo = func() (string, string, error) { return "freebsd", "15.0-RELEASE", nil }
 	c.hostname = func() (string, error) { return "fw01", nil }
+	c.release = func() (string, error) { return "", errNoVersionFile }
 
 	f, err := c.Collect()
 	if err != nil {
@@ -200,9 +207,9 @@ func TestCollectOmitsSubObjectsOnProbeFailure(t *testing.T) {
 	}
 }
 
-// Before the heavy-telemetry collector's first refresh the provider
-// returns an empty version, and the sub-object stays out.
-func TestCollectOmitsOPNsenseBeforeTheFirstHeavyRefresh(t *testing.T) {
+// Without the version file and without a fallback version the sub-object
+// stays out.
+func TestCollectOmitsOPNsenseWhenNoVersionIsKnown(t *testing.T) {
 	c := testCollector(t, fixtureConfigXML, time.Now())
 	c.SetOPNsenseVersionProvider(func() string { return "" })
 	f, err := c.Collect()
@@ -211,6 +218,48 @@ func TestCollectOmitsOPNsenseBeforeTheFirstHeavyRefresh(t *testing.T) {
 	}
 	if f.OPNsense != nil {
 		t.Fatalf("opnsense should be omitted, got %+v", f.OPNsense)
+	}
+}
+
+// The version comes from OPNsense's local version file: no API and no heavy
+// telemetry, so the facts of the first connect after a start carry it, and
+// it wins over the fallback, which lags an update.
+func TestCollectReadsTheOPNsenseVersionFromTheVersionFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "core")
+	if err := os.WriteFile(path, []byte(`{"product_series":"25.7","product_version":"25.7.11_9"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(opnapi.SetVersionFileForTest(path))
+
+	c := testCollector(t, fixtureConfigXML, time.Now())
+	c.release = nil // the real reader
+	c.SetOPNsenseVersionProvider(func() string { return "25.7.10" })
+	f, err := c.Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if f.OPNsense == nil || f.OPNsense.Version != "25.7.11_9" || f.OPNsense.Series != "25.7" {
+		t.Fatalf("opnsense = %+v, want the version file's 25.7.11_9", f.OPNsense)
+	}
+
+	c.SetOPNsenseVersionProvider(nil)
+	if f, err := c.Collect(); err != nil || f.OPNsense == nil || f.OPNsense.Version != "25.7.11_9" {
+		t.Fatalf("opnsense = %+v (%v) without a provider, want the version file's", f, err)
+	}
+}
+
+// When the file cannot be read the fallback answers.
+func TestCollectFallsBackWhenTheVersionFileCannotBeRead(t *testing.T) {
+	t.Cleanup(opnapi.SetVersionFileForTest(filepath.Join(t.TempDir(), "absent")))
+
+	c := testCollector(t, fixtureConfigXML, time.Now())
+	c.release = nil // the real reader
+	f, err := c.Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if f.OPNsense == nil || f.OPNsense.Version != "26.1.9" {
+		t.Fatalf("opnsense = %+v, want the provider's 26.1.9", f.OPNsense)
 	}
 }
 

@@ -232,3 +232,92 @@ func TestAcquire_ManyRunsNeverOverlap(t *testing.T) {
 		t.Fatalf("%d runs held the slot at once, want 1", maxInside.Load())
 	}
 }
+
+func drainOutcomes() int {
+	n := 0
+	for {
+		select {
+		case <-Outcomes():
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// Several tasks ending before anyone listens make one signal, and noting one
+// never waits for a listener.
+func TestNoteOutcome_CoalescesAndNeverBlocks(t *testing.T) {
+	drain := drainOutcomes
+	drain()
+
+	done := make(chan struct{})
+	go func() {
+		NoteOutcome()
+		NoteOutcome()
+		NoteOutcome()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("NoteOutcome blocked without a listener")
+	}
+	if n := drain(); n != 1 {
+		t.Fatalf("got %d signals for three outcomes, want 1", n)
+	}
+
+	NoteOutcome()
+	if n := drain(); n != 1 {
+		t.Fatalf("got %d signals for an outcome after the first was taken, want 1", n)
+	}
+}
+
+// Giving the slot back notes an outcome only for a run that asked OPNsense to
+// apply something, and only once the slot is free.
+func TestRelease_NotesAnOutcomeOnlyForARunThatTriggered(t *testing.T) {
+	t.Cleanup(func() { Watch(0) })
+	drainOutcomes()
+
+	release, err := Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release() // a dry run, a no-op, a failure before the trigger
+	if n := drainOutcomes(); n != 0 {
+		t.Fatalf("%d outcomes noted for a run that triggered nothing", n)
+	}
+
+	release, err = Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	NoteTriggered()
+	if n := drainOutcomes(); n != 0 {
+		t.Fatal("an outcome was noted while the run still held the slot")
+	}
+	release()
+	release()
+	if n := drainOutcomes(); n != 1 {
+		t.Fatalf("%d outcomes noted for a run that triggered, want 1", n)
+	}
+
+	release, err = Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release()
+	if n := drainOutcomes(); n != 0 {
+		t.Fatal("the previous run's trigger was carried into the next run")
+	}
+
+	NoteTriggered() // no run holds the slot
+	release, err = Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+	release()
+	if n := drainOutcomes(); n != 0 {
+		t.Fatal("a trigger noted without a run holding the slot was kept for the next run")
+	}
+}

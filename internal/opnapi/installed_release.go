@@ -83,6 +83,13 @@ func (c *Client) InstalledRelease(ctx context.Context) (ProductRelease, error) {
 	return ProductRelease{}, fmt.Errorf("could not read the installed release (%s)", strings.Join(failures, "; "))
 }
 
+// InstalledReleaseFromFile reads the installed release from the version file
+// alone: no command and no API call, so it can sit on a path that must not
+// wait, such as the WebSocket connect.
+func InstalledReleaseFromFile() (ProductRelease, error) {
+	return readReleaseFile(context.Background())
+}
+
 func readReleaseFile(context.Context) (ProductRelease, error) {
 	data, err := os.ReadFile(versionFilePath)
 	if err != nil {

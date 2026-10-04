@@ -9,14 +9,14 @@ import (
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
+	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
 
 // OPNsenseVersionProvider returns the installed OPNsense version, or the
-// empty string when it isn't known yet. The heavy-telemetry collector
-// already fetches this every 15 min, so the agent reuses its cache rather
-// than making a REST call of its own; before that collector's first
-// refresh (or on agents without OPNsense API credentials) the opnsense
-// sub-object is simply omitted.
+// empty string when it isn't known. The collector reads the version from
+// OPNsense's local version file itself; the provider is the fallback for
+// when that file cannot be read (the agent wires the heavy-telemetry
+// cache's version).
 type OPNsenseVersionProvider func() string
 
 // Collector builds the facts payload. It is safe for concurrent use: the
@@ -30,6 +30,7 @@ type Collector struct {
 	loadLocation func(string) (*time.Location, error)
 	hostInfo     func() (platform string, version string, err error)
 	hostname     func() (string, error)
+	release      func() (string, error)
 }
 
 // DefaultConfigXMLPath matches config.Load's `config_xml_path` default.
@@ -44,14 +45,14 @@ func New(configXMLPath string) *Collector {
 }
 
 // Collect builds a facts payload from the default config.xml path with no
-// OPNsense version provider wired. The agent uses the Collector form so
-// the version cache and config path come from its own configuration.
+// fallback OPNsense version provider wired. The agent uses the Collector
+// form so the fallback and config path come from its own configuration.
 func Collect() (*Facts, error) {
 	return New(DefaultConfigXMLPath).Collect()
 }
 
-// SetOPNsenseVersionProvider wires the heavy-telemetry version cache.
-// Safe to call at any point; nil means the sub-object stays omitted.
+// SetOPNsenseVersionProvider wires the version used when the version file
+// cannot be read. Safe to call at any point; nil means none.
 func (c *Collector) SetOPNsenseVersionProvider(fn OPNsenseVersionProvider) {
 	c.opnsenseFn = fn
 }
@@ -87,10 +88,8 @@ func (c *Collector) Collect() (*Facts, error) {
 		}
 	}
 
-	if c.opnsenseFn != nil {
-		if version := strings.TrimSpace(c.opnsenseFn()); version != "" {
-			f.OPNsense = &OPNsense{Version: version, Series: seriesOf(version)}
-		}
+	if version := c.opnsenseVersion(); version != "" {
+		f.OPNsense = &OPNsense{Version: version, Series: seriesOf(version)}
 	}
 
 	platform, osVersion, err := c.readHostInfo()
@@ -149,6 +148,33 @@ func (c *Collector) timezone(name string) *Timezone {
 	}
 	abbrev, offset := now().In(loc).Zone()
 	return &Timezone{Name: name, UTCOffsetSec: offset, Abbrev: abbrev}
+}
+
+// opnsenseVersion is the installed release from OPNsense's local version
+// file, read on every collection: it needs no API, no credentials and no web
+// server, so it is there from the first connect after a start or a boot. The
+// provider is the fallback. Only the file is read, never the slower
+// opnsense-version command: the connect waits on this.
+func (c *Collector) opnsenseVersion() string {
+	readRelease := c.release
+	if readRelease == nil {
+		readRelease = installedReleaseFile
+	}
+	if version, err := readRelease(); err == nil && strings.TrimSpace(version) != "" {
+		return strings.TrimSpace(version)
+	}
+	if c.opnsenseFn != nil {
+		return strings.TrimSpace(c.opnsenseFn())
+	}
+	return ""
+}
+
+func installedReleaseFile() (string, error) {
+	release, err := opnapi.InstalledReleaseFromFile()
+	if err != nil {
+		return "", err
+	}
+	return release.Raw, nil
 }
 
 func (c *Collector) readHostInfo() (string, string, error) {

@@ -968,3 +968,56 @@ func TestRun_ASweepThatCannotFinishIsCutOffAndTheNextOneRuns(t *testing.T) {
 		t.Fatalf("resolved %+v, want the row completed by the sweep that followed", got)
 	}
 }
+
+func drainOutcomes() int {
+	n := 0
+	for {
+		select {
+		case <-firmware.Outcomes():
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// A row the reconciler resolves whose run asked OPNsense to apply something, or
+// that has no record of its run (an older agent wrote it), asks the
+// heavy-telemetry collector to check for updates again. A row whose task never
+// triggered anything, and a row someone else resolved, do not.
+func TestSweep_AResolvedRunThatTriggeredAsksForAFirmwareCheck(t *testing.T) {
+	cases := []struct {
+		name  string
+		setup func(f *reconcilerFixture)
+		want  int
+	}{
+		{"a run that was triggered", func(f *reconcilerFixture) {
+			f.beginRecorded("1", weeklyRun())
+			f.dev.set(func(d *fakeDevice) { // back from the reboot, idle, on the new release
+				d.state, d.release, d.boot = firmware.RunReady, toRel, testBoot+3600
+				d.installed = map[string]string{"opnsense": toRel, "os-netdefense": "1.19.5"}
+			})
+		}, 1},
+		{"a row with no record of its run", func(f *reconcilerFixture) { f.begin("1", "FIRMWARE_UPGRADE") }, 1},
+		{"a task that never triggered anything", func(f *reconcilerFixture) { f.beginNotTriggered("1", weeklyRun()) }, 0},
+		{"a row resolved elsewhere", func(f *reconcilerFixture) {
+			f.begin("1", "FIRMWARE_UPGRADE")
+			f.rec.resolve = func(id, status, message string) (bool, error) { return false, nil }
+		}, 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newReconcilerFixture(t)
+			tc.setup(f)
+			drainOutcomes()
+
+			f.rec.Sweep(context.Background())
+			if len(f.resolved()) == 0 && tc.want > 0 {
+				t.Fatalf("the row was not resolved: %v", f.logged())
+			}
+			if n := drainOutcomes(); n != tc.want {
+				t.Fatalf("%d firmware checks asked for, want %d", n, tc.want)
+			}
+		})
+	}
+}

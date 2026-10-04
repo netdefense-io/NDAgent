@@ -10,16 +10,20 @@ import (
 // check and an update also share one progress log, and starting a check truncates
 // it. The agent has three callers that would each do that to the others: two
 // FIRMWARE_UPGRADE tasks (a daily and a weekly schedule dispatch in the same
-// second every Sunday), the heavy-telemetry collector (a check every 15 minutes
-// and after every start), and the reconciler that is waiting for an update the
-// previous process started. This is their shared, in-process guard. It cannot
-// see a job somebody else started (the web GUI, a shell): the pre-trigger wait
-// and the start check in the handler cover that.
+// second every Sunday), the heavy-telemetry collector (a check every 6 hours
+// and when something calls for one), and the reconciler that is waiting for an
+// update the previous process started. This is their shared, in-process guard.
+// It cannot see a job somebody else started (the web GUI, a shell): the
+// pre-trigger wait and the start check in the handler, and the collector's own
+// look at /running, cover that.
 
 var (
 	guardMu sync.Mutex
 	// taken: a FIRMWARE_UPGRADE run holds the slot.
 	taken bool
+	// triggered: the run holding the slot asked OPNsense to apply an update or
+	// upgrade.
+	triggered bool
 	// watching is how many rows the reconciler is waiting on.
 	watching int
 	// changed is closed, and replaced, whenever taken or watching changes, so
@@ -73,10 +77,25 @@ func releaser() func() {
 	return func() {
 		once.Do(func() {
 			guardMu.Lock()
-			taken = false
+			applied := triggered
+			taken, triggered = false, false
 			wake()
 			guardMu.Unlock()
+			if applied {
+				NoteOutcome()
+			}
 		})
+	}
+}
+
+// NoteTriggered records that the run holding the slot asked OPNsense to apply
+// an update or upgrade: giving the slot back then notes an outcome
+// (NoteOutcome). Without a run holding the slot it does nothing.
+func NoteTriggered() {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	if taken {
+		triggered = true
 	}
 }
 
@@ -100,4 +119,25 @@ func Busy() bool {
 	guardMu.Lock()
 	defer guardMu.Unlock()
 	return taken || watching > 0
+}
+
+// outcomes holds at most one pending "an update or upgrade ended": however many
+// end, one check for updates afterwards is enough.
+var outcomes = make(chan struct{}, 1)
+
+// NoteOutcome records that a FIRMWARE_UPGRADE run that applied, or tried to
+// apply, an update or upgrade reached its outcome. What is pending has changed,
+// so the heavy-telemetry collector checks for updates again. A dry run, a run
+// with nothing to apply and one that failed before asking OPNsense for anything
+// change nothing, and note none. It never blocks.
+func NoteOutcome() {
+	select {
+	case outcomes <- struct{}{}:
+	default:
+	}
+}
+
+// Outcomes delivers a value after one or more NoteOutcome calls.
+func Outcomes() <-chan struct{} {
+	return outcomes
 }

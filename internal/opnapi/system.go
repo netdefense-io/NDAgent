@@ -14,8 +14,9 @@ import (
 //
 // Three groups of fields:
 //   - service running state — cheap, one GET
-//   - pending firmware/package updates — async on OPNsense (POST /check, then
-//     poll /status), so the collector triggers a check, sleeps, and reads
+//   - pending firmware/package updates — GET /status returns the result of
+//     the last check; a check (POST /check) runs in the background and holds
+//     /running busy until its result is written
 //   - certificate expiries — one POST search
 //
 // All return types are stable subsets of the OPNsense response so the
@@ -31,28 +32,75 @@ type ServiceEntry struct {
 }
 
 // FirmwareStatus is the dashboard-relevant slice of `firmware/status`.
-// `Status` is one of "none" (no check has been run yet), "update" (updates
-// pending), "error", or "ok" (no updates). The counters are zero when the
-// status field doesn't report a real result.
+// `Status` is OPNsense's: "update" or "upgrade" (something is pending),
+// "none" (nothing is pending, or no check has completed: then LastCheck is
+// empty) or "error" (the check could not use the mirror; Connection and
+// Repository say why). The counters are zero unless a completed check found
+// something.
 //
-// `OPNsenseVersion` and `OPNsenseLatest` come from the response's `product`
-// block (`product_version` / `product_latest`). The current version is
-// present on every successful check; `OPNsenseLatest` only populates when
-// the upstream pkg catalog actually has a newer release. Both are
-// surfaced to the dashboard so NDManager can build a fleet distribution.
+// `OPNsenseVersion` is the installed release (`product.product_version`,
+// which OPNsense builds from the local version file on every request).
+// `OPNsenseLatest` is the core package's candidate in the check's
+// `upgrade_packages`, the installed release when a clean check lists none,
+// and empty when the check did not complete, failed or ran against another
+// release. It is never `product.product_latest`: OPNsense computes that from
+// its changelog index and keeps the last newer entry in file order, not the
+// newest (an installed 26.7 reads 26.7.2 while 26.7.5 is out), and no check
+// moves it. `OPNsensePackage`, the installed core package, tells consumers
+// the value has this meaning. `UpgradeMajorVersion` is the next series the
+// mirror offers.
 type FirmwareStatus struct {
-	Status          string `json:"status"`
-	StatusMsg       string `json:"status_msg"`
-	LastCheck       string `json:"last_check"`
-	UpgradeCount    int    `json:"upgrade_count"`
-	NewCount        int    `json:"new_count"`
-	ReinstallCount  int    `json:"reinstall_count"`
-	RemoveCount     int    `json:"remove_count"`
-	NeedsReboot     bool   `json:"needs_reboot"`
-	Connection      string `json:"connection"`
-	Repository      string `json:"repository"`
-	OPNsenseVersion string `json:"opnsense_version,omitempty"`
-	OPNsenseLatest  string `json:"opnsense_latest,omitempty"`
+	Status              string `json:"status"`
+	StatusMsg           string `json:"status_msg"`
+	LastCheck           string `json:"last_check"`
+	UpgradeCount        int    `json:"upgrade_count"`
+	NewCount            int    `json:"new_count"`
+	ReinstallCount      int    `json:"reinstall_count"`
+	RemoveCount         int    `json:"remove_count"`
+	NeedsReboot         bool   `json:"needs_reboot"`
+	Connection          string `json:"connection"`
+	Repository          string `json:"repository"`
+	OPNsenseVersion     string `json:"opnsense_version,omitempty"`
+	OPNsenseLatest      string `json:"opnsense_latest,omitempty"`
+	OPNsensePackage     string `json:"opnsense_package,omitempty"`
+	UpgradeMajorVersion string `json:"upgrade_major_version,omitempty"`
+	LastCheckUnix       int64  `json:"last_check_unix,omitempty"`
+
+	// CheckedVersion is the release the check ran against (the top-level
+	// `product_version`). Not sent.
+	CheckedVersion string `json:"-"`
+}
+
+// Completed reports whether the reading is the result of a finished check.
+// While a check runs, and after a reboot until one has run, OPNsense has no
+// result and answers "none" without a last_check.
+func (s *FirmwareStatus) Completed() bool {
+	return s.LastCheck != ""
+}
+
+// Clean reports whether the reading is the result of a check that could use
+// the mirror. A check that could not (status "error", or a connection or
+// repository other than "ok") says nothing about what is pending.
+func (s *FirmwareStatus) Clean() bool {
+	return s.Completed() && s.Status != "error" && s.Connection == "ok" && s.Repository == "ok"
+}
+
+// Stale reports whether the check ran against another release than the
+// installed one. Only a check rewrites its result, so after an update the
+// reading describes the release that was replaced.
+func (s *FirmwareStatus) Stale() bool {
+	return s.CheckedVersion != "" && s.OPNsenseVersion != "" && s.CheckedVersion != s.OPNsenseVersion
+}
+
+// IsCorePackage reports whether name is OPNsense's own package, whose version
+// is the release: "opnsense", or the business edition's or development
+// flavour's name for it.
+func IsCorePackage(name string) bool {
+	switch name {
+	case "opnsense", "opnsense-business", "opnsense-devel":
+		return true
+	}
+	return false
 }
 
 // CertEntry is one row from `/api/trust/cert/search`, trimmed to what the
@@ -97,8 +145,9 @@ func (c *Client) ListServices(ctx context.Context) ([]ServiceEntry, error) {
 
 // TriggerFirmwareCheck kicks off an async check. OPNsense returns
 // immediately with `{msg_uuid, status:"ok"}`; the actual catalog
-// refresh runs in the background. The caller must wait
-// (recommended: ~30 s) before reading `FirmwareStatus`.
+// refresh runs in the background, and /running reports busy until its
+// result is written. A request that finds another firmware job running is
+// dropped, and the answer is still "ok".
 func (c *Client) TriggerFirmwareCheck(ctx context.Context) error {
 	_, err := c.doRequest(ctx, "POST", "/core/firmware/check", nil)
 	if err != nil {
@@ -107,8 +156,9 @@ func (c *Client) TriggerFirmwareCheck(ctx context.Context) error {
 	return nil
 }
 
-// GetFirmwareStatus reads the cached result of the most recent firmware
-// check. Returns `status: "none"` if no check has run since boot.
+// GetFirmwareStatus reads the result of the most recent firmware check. It
+// starts no check. Without a result (no check since boot, or one running) the
+// status is "none" and LastCheck is empty.
 //
 // The OPNsense response is enormous when updates exist (it includes
 // the full `all_packages` map with version diffs for every pending pkg);
@@ -119,43 +169,100 @@ func (c *Client) GetFirmwareStatus(ctx context.Context) (*FirmwareStatus, error)
 	if err != nil {
 		return nil, fmt.Errorf("firmware status: %w", err)
 	}
+	return parseFirmwareStatus(body, time.Local)
+}
+
+// parseFirmwareStatus decodes a /status response. loc is the zone last_check
+// is written in: the device's own, as `date` prints it.
+func parseFirmwareStatus(body []byte, loc *time.Location) (*FirmwareStatus, error) {
 	var resp struct {
-		Status      string            `json:"status"`
-		StatusMsg   string            `json:"status_msg"`
-		LastCheck   string            `json:"last_check"`
-		Connection  string            `json:"connection"`
-		Repository  string            `json:"repository"`
-		NeedsReboot string            `json:"needs_reboot"`
-		Upgrade     []json.RawMessage `json:"upgrade_packages"`
-		New         []json.RawMessage `json:"new_packages"`
-		Reinstall   []json.RawMessage `json:"reinstall_packages"`
-		Remove      []json.RawMessage `json:"remove_packages"`
-		// OPNsense returns its current + upstream version inside a
-		// `product` block. Both fields are present when the catalog
-		// has been fetched at least once; OPNsenseLatest is only set
-		// when an upstream version exists that's newer than current.
+		Status              string            `json:"status"`
+		StatusMsg           string            `json:"status_msg"`
+		LastCheck           string            `json:"last_check"`
+		Connection          string            `json:"connection"`
+		Repository          string            `json:"repository"`
+		NeedsReboot         string            `json:"needs_reboot"`
+		ProductVersion      string            `json:"product_version"`
+		ProductID           string            `json:"product_id"`
+		UpgradeMajorVersion string            `json:"upgrade_major_version"`
+		Upgrade             []json.RawMessage `json:"upgrade_packages"`
+		New                 []json.RawMessage `json:"new_packages"`
+		Reinstall           []json.RawMessage `json:"reinstall_packages"`
+		Remove              []json.RawMessage `json:"remove_packages"`
+		// The `product` block is built from the installed version file on
+		// every request; the top-level product fields are the check's.
 		Product struct {
-			Version string `json:"product_version"`
-			Latest  string `json:"product_latest"`
+			Version  string `json:"product_version"`
+			ID       string `json:"product_id"`
+			CoreName string `json:"CORE_NAME"`
 		} `json:"product"`
 	}
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil, fmt.Errorf("firmware status decode: %w", err)
 	}
-	return &FirmwareStatus{
-		Status:          resp.Status,
-		StatusMsg:       resp.StatusMsg,
-		LastCheck:       resp.LastCheck,
-		UpgradeCount:    len(resp.Upgrade),
-		NewCount:        len(resp.New),
-		ReinstallCount:  len(resp.Reinstall),
-		RemoveCount:     len(resp.Remove),
-		NeedsReboot:     resp.NeedsReboot == "1",
-		Connection:      resp.Connection,
-		Repository:      resp.Repository,
-		OPNsenseVersion: resp.Product.Version,
-		OPNsenseLatest:  resp.Product.Latest,
-	}, nil
+	st := &FirmwareStatus{
+		Status:              resp.Status,
+		StatusMsg:           resp.StatusMsg,
+		LastCheck:           resp.LastCheck,
+		UpgradeCount:        len(resp.Upgrade),
+		NewCount:            len(resp.New),
+		ReinstallCount:      len(resp.Reinstall),
+		RemoveCount:         len(resp.Remove),
+		NeedsReboot:         resp.NeedsReboot == "1",
+		Connection:          resp.Connection,
+		Repository:          resp.Repository,
+		OPNsenseVersion:     resp.Product.Version,
+		OPNsensePackage:     firstCorePackage(resp.Product.ID, resp.Product.CoreName, resp.ProductID),
+		UpgradeMajorVersion: strings.TrimSpace(resp.UpgradeMajorVersion),
+		CheckedVersion:      resp.ProductVersion,
+	}
+	if checked, ok := parseCheckTime(resp.LastCheck, loc); ok {
+		st.LastCheckUnix = checked.Unix()
+	}
+	if st.Clean() && !st.Stale() {
+		st.OPNsenseLatest = coreCandidate(parsePackageEntries(resp.Upgrade), st.OPNsensePackage)
+		if st.OPNsenseLatest == "" {
+			st.OPNsenseLatest = st.OPNsenseVersion
+		}
+	}
+	return st, nil
+}
+
+// firstCorePackage is the first of names that is a core package name, or "".
+func firstCorePackage(names ...string) string {
+	for _, name := range names {
+		if IsCorePackage(name) {
+			return name
+		}
+	}
+	return ""
+}
+
+// coreCandidate is the version the check offers for the core package: the
+// entry for the installed one, else any core entry (a flavour switch lists
+// the target's), or "" when the check offers none.
+func coreCandidate(upgrades []FirmwarePackageEntry, installed string) string {
+	candidate := ""
+	for _, e := range upgrades {
+		if !IsCorePackage(e.Name) {
+			continue
+		}
+		if e.Name == installed {
+			return e.VersionString()
+		}
+		if candidate == "" {
+			candidate = e.VersionString()
+		}
+	}
+	return candidate
+}
+
+// parseCheckTime reads last_check. check.sh stores `date`'s output, as in
+// "Sun Oct  4 03:02:47 UTC 2026", in the device's zone; an abbreviation loc
+// does not know is read as UTC.
+func parseCheckTime(text string, loc *time.Location) (time.Time, bool) {
+	t, err := time.ParseInLocation(time.UnixDate, strings.TrimSpace(text), loc)
+	return t, err == nil
 }
 
 // ListCerts returns the cert search result with `valid_to` parsed into
@@ -278,7 +385,7 @@ func daysLeft(expiry, now time.Time) int {
 type FirmwareUpgradeStatus struct {
 	// Core version info
 	ProductVersion string `json:"product_version"` // current installed version, e.g. "26.1.2"
-	ProductLatest  string `json:"product_latest"`  // latest in same series, e.g. "26.1.9"
+	ProductLatest  string `json:"product_latest"`  // the series' last newer changelog entry in file order, not the newest
 	ProductSeries  string `json:"product_series"`  // e.g. "26.1"
 	ProductABI     string `json:"product_abi"`     // e.g. "26.1" (ABI label, not FreeBSD ABI)
 	OSVersion      string `json:"os_version"`      // e.g. "FreeBSD 14.3-RELEASE-p8"
@@ -286,7 +393,7 @@ type FirmwareUpgradeStatus struct {
 	ProductTarget  string `json:"product_target"`  // e.g. "opnsense" (may differ for variants)
 
 	// Overall status
-	Status    string `json:"status"`     // "none", "update", "ok", "error"
+	Status    string `json:"status"`     // "none", "update", "upgrade", "error"
 	StatusMsg string `json:"status_msg"` // human readable
 
 	// Reboot signals
@@ -331,8 +438,8 @@ func (e FirmwarePackageEntry) VersionString() string {
 }
 
 // GetFirmwareUpgradeStatus reads the full /status response and returns the
-// classified FirmwareUpgradeStatus. Callers should call TriggerFirmwareCheck
-// and wait ~30 s before this call to get a fresh result.
+// classified FirmwareUpgradeStatus. For a fresh result, call
+// TriggerFirmwareCheck first and wait for /running to report "ready".
 func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgradeStatus, error) {
 	body, err := c.doRequest(ctx, "GET", "/core/firmware/status", nil)
 	if err != nil {
@@ -394,17 +501,6 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 		}
 	}
 
-	parsePackages := func(msgs []json.RawMessage) []FirmwarePackageEntry {
-		out := make([]FirmwarePackageEntry, 0, len(msgs))
-		for _, m := range msgs {
-			var e FirmwarePackageEntry
-			if err := json.Unmarshal(m, &e); err == nil {
-				out = append(out, e)
-			}
-		}
-		return out
-	}
-
 	return &FirmwareUpgradeStatus{
 		ProductVersion:      productVersion,
 		ProductLatest:       raw.Product.Latest,
@@ -417,16 +513,28 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 		StatusMsg:           raw.StatusMsg,
 		NeedsReboot:         raw.NeedsReboot == "1",
 		UpgradeNeedsReboot:  raw.UpgradeNeedsReboot == "1",
-		UpgradePackages:     parsePackages(raw.UpgradePackages),
+		UpgradePackages:     parsePackageEntries(raw.UpgradePackages),
 		UpgradeSets:         raw.UpgradeSets,
 		UpgradeMajorVersion: raw.UpgradeMajorVersion,
 		UpgradeMajorMessage: raw.UpgradeMajorMessage,
-		NewPackages:         parsePackages(raw.NewPackages),
-		ReinstallPackages:   parsePackages(raw.ReinstallPackages),
-		RemovePackages:      parsePackages(raw.RemovePackages),
+		NewPackages:         parsePackageEntries(raw.NewPackages),
+		ReinstallPackages:   parsePackageEntries(raw.ReinstallPackages),
+		RemovePackages:      parsePackageEntries(raw.RemovePackages),
 		Connection:          raw.Connection,
 		Repository:          raw.Repository,
 	}, nil
+}
+
+// parsePackageEntries decodes a package list, skipping an entry it cannot read.
+func parsePackageEntries(msgs []json.RawMessage) []FirmwarePackageEntry {
+	out := make([]FirmwarePackageEntry, 0, len(msgs))
+	for _, m := range msgs {
+		var e FirmwarePackageEntry
+		if err := json.Unmarshal(m, &e); err == nil {
+			out = append(out, e)
+		}
+	}
+	return out
 }
 
 // FirmwareUpdateResponse is the response from POST /core/firmware/update.

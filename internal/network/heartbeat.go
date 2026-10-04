@@ -41,10 +41,10 @@ type FactsProvider func() *facts.Facts
 // without waiting for the operator to change something on the box.
 const factsResyncInterval = time.Hour
 
-// HeavyProvider returns the latest heavy-telemetry snapshot, or nil if
-// the collector hasn't completed its first refresh yet. The heartbeat
-// embeds the result on every frame; the warm-up window is handled by
-// the dashboard accepting a nil sub-object.
+// HeavyProvider returns the latest heavy-telemetry snapshot, or nil while
+// there is none: no snapshot was restored from the previous process and
+// no probe has answered yet. The heartbeat embeds the result on every
+// frame, and the dashboard accepts a nil sub-object.
 type HeavyProvider func() *telemetry.HeavySnapshot
 
 // HeartbeatManager manages WebSocket heartbeat functionality.

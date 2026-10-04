@@ -124,7 +124,8 @@ func recordFirmwareRun(
 // markFirmwareTriggered persists, and sets on meta, the moment the run is
 // requested. It is called right before the request: from then on the row is
 // judged as a run that started, and the log of a failure is only looked for from
-// this moment on.
+// this moment on. It also tells the firmware guard, so that giving the slot
+// back asks the heavy-telemetry collector for a check.
 func markFirmwareTriggered(
 	ws *network.WebSocketClient,
 	cmd network.Command,
@@ -133,4 +134,5 @@ func markFirmwareTriggered(
 ) {
 	meta.TriggeredAt = firmwareNow().Unix()
 	persistFirmwareMeta(ws, cmd, log, *meta)
+	firmware.NoteTriggered()
 }

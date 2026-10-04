@@ -200,7 +200,7 @@ func (r *firmwareReconciler) Sweep(ctx context.Context) {
 			continue
 		}
 		in.Meta = meta
-		r.apply(row, firmware.Evaluate(ctx, in, probes))
+		r.apply(row, meta, firmware.Evaluate(ctx, in, probes))
 	}
 	for id := range r.lastNote {
 		if _, ok := seen[id]; !ok {
@@ -233,19 +233,25 @@ func (r *firmwareReconciler) recordedRun(taskID string) (*firmware.Meta, error) 
 	return &meta, nil
 }
 
-func (r *firmwareReconciler) apply(row taskstore.Record, v firmware.Verdict) {
+// apply acts on a row's verdict. meta is what the handler recorded about the
+// run, nil for a row an older agent wrote.
+func (r *firmwareReconciler) apply(row taskstore.Record, meta *firmware.Meta, v firmware.Verdict) {
+	// A row with no record may have been a run that applied something.
+	triggered := meta == nil || meta.Triggered()
 	switch v.Action {
 	case firmware.Wait:
 		r.note(row.TaskID, "wait:"+v.Reason,
 			"firmware-reconcile: task %s stays IN_PROGRESS: %s", row.TaskID, v.Message)
 	case firmware.Complete:
-		r.finish(row.TaskID, taskstore.StatusCompleted, v)
+		r.finish(row.TaskID, taskstore.StatusCompleted, v, triggered)
 	case firmware.Fail:
-		r.finish(row.TaskID, taskstore.StatusFailed, v)
+		r.finish(row.TaskID, taskstore.StatusFailed, v, triggered)
 	}
 }
 
-func (r *firmwareReconciler) finish(taskID, status string, v firmware.Verdict) {
+// finish resolves a row. triggered says whether its run asked OPNsense to
+// apply something: only then does the outcome ask for a firmware check.
+func (r *firmwareReconciler) finish(taskID, status string, v firmware.Verdict, triggered bool) {
 	won, err := r.resolve(taskID, status, v.Message)
 	switch {
 	case !won && err != nil:
@@ -257,6 +263,9 @@ func (r *firmwareReconciler) finish(taskID, status string, v firmware.Verdict) {
 			taskID, status, v.Reason, err)
 	default:
 		r.logf("firmware-reconcile: task %s resolved %s (%s)", taskID, status, v.Reason)
+	}
+	if won && triggered {
+		firmware.NoteOutcome()
 	}
 	delete(r.lastNote, taskID)
 }

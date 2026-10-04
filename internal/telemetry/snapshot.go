@@ -1,8 +1,8 @@
 // Package telemetry collects a per-heartbeat snapshot of the OPNsense host's
 // instantaneous OS-level health for the NetDefense dashboard. No history is
 // kept here — the snapshot is shipped on every heartbeat (60s) and stored
-// transiently by NDBroker. Heavier OPNsense-specific probes (service states,
-// pkg updates, certificate expiries) will land in a follow-up.
+// by NDBroker. Heavier OPNsense-specific probes (service states, pkg
+// updates, certificate expiries) are HeavyCollector's (heavy.go).
 package telemetry
 
 import (
@@ -18,9 +18,6 @@ import (
 // Snapshot is the wire shape embedded in HeartbeatMessage.Telemetry. Field
 // names match the dashboard contract; absent values stay zero-valued so the
 // dashboard can distinguish "0% used" from "not collected".
-//
-// Heavy fields (pending_updates, cert_expiry, services) are intentionally
-// not present yet — adding them is an additive wire change.
 type Snapshot struct {
 	UptimeSec    uint64      `json:"uptime_sec"`
 	Load1        float64     `json:"load1"`
@@ -37,10 +34,10 @@ type Snapshot struct {
 	OSVersion    string      `json:"os_version,omitempty"`
 	CollectedAt  float64     `json:"collected_at"`
 	CollectionMs int64       `json:"collection_ms"`
-	// Heavy holds OPNsense-API-derived fields refreshed every 15 min by
-	// HeavyCollector. Absent until the collector's first refresh succeeds
-	// and on agents where the OPNsense API client wasn't configured (no
-	// SYNC creds). Older brokers ignore the unknown field.
+	// Heavy holds the OPNsense-API-derived blocks HeavyCollector keeps
+	// (services, update reading, certificates), each with its own as_of.
+	// Absent while there is none, and on agents without OPNsense API
+	// credentials. Older brokers ignore the unknown field.
 	Heavy *HeavySnapshot `json:"heavy,omitempty"`
 }
 

@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/config"
@@ -30,6 +31,16 @@ type LifecycleManager struct {
 	registrationClient *network.RegistrationClient
 	state              *state.Store
 	status             *status.Writer
+
+	// heavy is the process's heavy-telemetry collector, nil without OPNsense
+	// API credentials. It is created once, and every WebSocket phase wires
+	// the same one: a collector per phase would start a firmware check
+	// schedule of its own each time, never stop, and begin with an empty
+	// cache.
+	heavy      *telemetry.HeavyCollector
+	heavyStart sync.Once
+	stopHeavy  context.CancelFunc
+	heavyDone  chan struct{}
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -68,6 +79,17 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		)
 	}
 
+	// The snapshot the previous process saved is restored now, so the first
+	// heartbeat of the first connection carries it.
+	var heavy *telemetry.HeavyCollector
+	if cfg.HasAPICreds() {
+		heavy = telemetry.NewHeavyCollector(
+			opnapi.NewClient(cfg.OPNsenseAPIURL, cfg.APIKey, cfg.APISecret, true),
+			telemetry.DefaultHeavyCachePath,
+		)
+		heavy.Restore()
+	}
+
 	return &LifecycleManager{
 		cfg:                cfg,
 		configPath:         configPath,
@@ -75,7 +97,39 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		registrationClient: network.NewRegistrationClient(cfg),
 		state:              stateStore,
 		status:             statusWriter,
+		heavy:              heavy,
 	}, nil
+}
+
+// startHeavyTelemetry starts the collector the first time a WebSocket phase
+// begins, for the life of the process.
+func (l *LifecycleManager) startHeavyTelemetry() {
+	l.heavyStart.Do(func() {
+		ctx, cancel := context.WithCancel(l.shutdown.Context())
+		l.stopHeavy = cancel
+		l.heavyDone = make(chan struct{})
+		go func() {
+			defer close(l.heavyDone)
+			if err := l.heavy.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
+				logging.Named("lifecycle").Warnw("heavy-telemetry collector exited", "error", err)
+			}
+		}()
+	})
+}
+
+// stopHeavyTelemetry stops the collector, waits for it, and removes the
+// snapshot it keeps on disk.
+func (l *LifecycleManager) stopHeavyTelemetry() {
+	if l.heavy == nil {
+		return
+	}
+	if l.stopHeavy != nil {
+		l.stopHeavy()
+		<-l.heavyDone
+	}
+	if err := l.heavy.RemoveCache(); err != nil {
+		logging.Named("lifecycle").Warnw("Could not remove the saved heavy-telemetry snapshot", "error", err)
+	}
 }
 
 // maybeRotateForRebindToken rotates the device keypair when ndagent.conf
@@ -328,21 +382,13 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 		log.Infow("OPNsense API client initialized for SYNC_API",
 			"api_url", l.cfg.OPNsenseAPIURL,
 		)
-
-		// Start the heavy-telemetry collector. Lifetime is the agent
-		// process — survives WS reconnects so the cache doesn't reset
-		// every time NDBroker bounces. The shutdown coordinator's
-		// context cancels the goroutine on agent stop.
-		heavy := telemetry.NewHeavyCollector(apiClient)
-		go func() {
-			if err := heavy.Run(l.shutdown.Context()); err != nil && err != context.Canceled {
-				log.Warnw("heavy-telemetry collector exited", "error", err)
-			}
-		}()
-		wsClient.SetHeavyProvider(heavy.Snapshot)
-		log.Info("Heavy telemetry collector started")
 	} else {
 		log.Info("SYNC_API disabled: no API credentials configured")
+	}
+
+	if l.heavy != nil {
+		l.startHeavyTelemetry()
+		wsClient.SetHeavyProvider(l.heavy.Snapshot)
 	}
 
 	// Register task handlers

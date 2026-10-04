@@ -251,6 +251,83 @@ func TestHandleFirmwareUpgrade_EveryExitReleasesTheSlot(t *testing.T) {
 	}
 }
 
+func drainFirmwareOutcomes() int {
+	n := 0
+	for {
+		select {
+		case <-firmware.Outcomes():
+			n++
+		default:
+			return n
+		}
+	}
+}
+
+// Only a run that applied, or tried to apply, something asks the heavy-telemetry
+// collector for a firmware check, and only once the slot is free: a dry run, a
+// run with nothing to apply and one that fails before the trigger leave the
+// schedule alone, or a scheduled task would make every device check twice.
+func TestHandleFirmwareUpgrade_OnlyARunThatTriggeredAsksForACheck(t *testing.T) {
+	ws := firmwareWS()
+	nothingTriggered := []struct {
+		name    string
+		payload map[string]interface{}
+		client  firmwareOPNAPIClient
+	}{
+		{"no update pending", map[string]interface{}{"mode": "minor", "check_first": false},
+			&stubFirmwareClient{statusResp: nothingPendingStatus()}},
+		{"dry run", map[string]interface{}{"mode": "minor", "check_first": false, "dry_run": true},
+			&stubFirmwareClient{statusResp: planStatus(), release: "26.7.3_8"}},
+		{"status cannot be read", map[string]interface{}{"mode": "minor", "check_first": false},
+			&stubFirmwareClient{statusErr: errors.New("boom")}},
+	}
+	for _, tc := range nothingTriggered {
+		t.Run(tc.name, func(t *testing.T) {
+			requireSlotFree(t)
+			newFirmwareFixture(t)
+			defer SetOPNAPIClientForFirmwareForTest(tc.client)()
+			drainFirmwareOutcomes()
+
+			cmd := network.Command{TaskID: "86", TaskType: "FIRMWARE_UPGRADE", Payload: tc.payload}
+			if err := HandleFirmwareUpgrade(context.Background(), ws, cmd); err != nil {
+				t.Fatalf("HandleFirmwareUpgrade: %v", err)
+			}
+			if n := drainFirmwareOutcomes(); n != 0 {
+				t.Fatalf("%d firmware checks asked for by a run that triggered nothing", n)
+			}
+		})
+	}
+
+	t.Run("an applied update", func(t *testing.T) {
+		requireSlotFree(t)
+		newFirmwareFixture(t)
+		defer SetOPNAPIClientForFirmwareForTest(&stubFirmwareClient{statusResp: planStatus(), release: "26.7.3_8"})()
+		defer SetFirmwareExecFuncForTest(func(context.Context, ...string) ([]byte, []byte, int) {
+			return []byte("ok"), nil, 0
+		})()
+		drainFirmwareOutcomes()
+
+		busyAtSignal := make(chan bool, 1)
+		go func() {
+			<-firmware.Outcomes()
+			busyAtSignal <- firmware.Busy()
+		}()
+		cmd := network.Command{TaskID: "87", TaskType: "FIRMWARE_UPGRADE",
+			Payload: map[string]interface{}{"mode": "minor", "reboot": false, "check_first": false}}
+		if err := HandleFirmwareUpgrade(context.Background(), ws, cmd); err != nil {
+			t.Fatalf("HandleFirmwareUpgrade: %v", err)
+		}
+		select {
+		case busy := <-busyAtSignal:
+			if busy {
+				t.Fatal("the check was asked for while the run still held the slot")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("an applied update asked for no firmware check")
+		}
+	})
+}
+
 // rebootFlowClient is OPNsense as an update that ends in a reboot shows itself:
 // idle until the update is requested, then busy and holding the firmware lock
 // (a check made now is dropped without a word), then announcing the reboot, then,

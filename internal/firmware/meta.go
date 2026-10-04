@@ -64,17 +64,6 @@ func TTL(mode string) time.Duration {
 	return MinorTTL
 }
 
-// isCorePackage reports whether name is OPNsense's own package, whose version is
-// the release: "opnsense", or with the edition suffix the device's firmware
-// type gives it (see the suffix allowlist in the FIRMWARE_UPGRADE handler).
-func isCorePackage(name string) bool {
-	switch name {
-	case "opnsense", "opnsense-business", "opnsense-devel":
-		return true
-	}
-	return false
-}
-
 // isBaseOrKernel reports whether name is one of the two pseudo-packages OPNsense
 // lists for the base system and the kernel, which are installed by a reboot and
 // are not in the package database.
@@ -109,7 +98,7 @@ func PlannedPackages(st *opnapi.FirmwareUpgradeStatus) []Package {
 // installed changelog and does not move with the update.
 func CoreVersion(plan []Package) string {
 	for _, p := range plan {
-		if isCorePackage(p.Name) {
+		if opnapi.IsCorePackage(p.Name) {
 			return p.Version
 		}
 	}
@@ -179,7 +168,7 @@ func NewMeta(mode string, reboot bool, fromVersion string, st *opnapi.FirmwareUp
 }
 
 func keepFirst(name string) bool {
-	return isCorePackage(name) || isBaseOrKernel(name) || strings.HasPrefix(name, "os-netdefense")
+	return opnapi.IsCorePackage(name) || isBaseOrKernel(name) || strings.HasPrefix(name, "os-netdefense")
 }
 
 // Expiry is when NDManager gives up on the task.

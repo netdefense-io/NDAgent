@@ -977,12 +977,11 @@ func pluginInstallPkgChecker(ctx context.Context, packageName, _ string) (string
 }
 
 // SetHeavyProvider wires the heavy-telemetry cache reader into the
-// heartbeat path. lifecycle.go calls this once after starting the
-// HeavyCollector goroutine; the provider is just a thin getter on the
-// collector and is safe to call concurrently with heartbeats.
-// It also feeds the facts collector's OPNsense version, which comes from
-// the same cache — no extra REST call, and the sub-object stays omitted
-// until the collector's first refresh lands.
+// heartbeat path. lifecycle.go calls this for every phase, before Run, with
+// the process's one HeavyCollector; the provider is just a thin getter on
+// the collector and is safe to call concurrently with heartbeats.
+// The cache's OPNsense version is also the facts collector's fallback for
+// when the local version file, its source, cannot be read.
 func (w *WebSocketClient) SetHeavyProvider(fn HeavyProvider) {
 	w.heartbeat.SetHeavyProvider(fn)
 	if fn == nil {

@@ -54,6 +54,10 @@ func (l *LifecycleManager) runDecommission(ctx context.Context, req *network.Dec
 	)
 	_ = l.status.MarkDisconnected("device deleted; decommissioning")
 
+	// The collector would keep reading the API the sequence dismantles and
+	// keep saving its snapshot into the state the helper removes.
+	l.stopHeavyTelemetry()
+
 	var apiClient *opnapi.Client
 	if l.cfg.HasAPICreds() {
 		apiClient = opnapi.NewClient(
