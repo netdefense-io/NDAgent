@@ -292,20 +292,20 @@ func TestReadRetry_RecoversFromCorruption(t *testing.T) {
 	}
 }
 
-// TestReadRetry_RecoversSearchPOST runs the search whose body carries the
-// filter the rule discovery depends on: a retry must ask the same question,
-// or OPNsense answers with a different row set.
+// TestReadRetry_RecoversSearchPOST runs a page of the rule search: a retry must
+// ask the same question, page included, or OPNsense answers with a different
+// row set.
 func TestReadRetry_RecoversSearchPOST(t *testing.T) {
 	fastRetries(t)
 	body := listBody(t)
 	srv := newScriptedServer(t, replayCorruptedReply(body), cutShortReply(body), goodReply(body))
 
-	rules, err := newRetryClient(srv.URL).SearchRulesOnInterface(context.Background(), "wan,lan", "nd-")
+	resp, err := newRetryClient(srv.URL).searchRulePage(context.Background(), "nd-", 2, ruleSearchPageSize)
 	if err != nil {
-		t.Fatalf("SearchRulesOnInterface() error = %v", err)
+		t.Fatalf("searchRulePage() error = %v", err)
 	}
-	if len(rules) != 600 {
-		t.Errorf("got %d rules, want 600", len(rules))
+	if len(resp.Rows) != 600 {
+		t.Errorf("got %d rules, want 600", len(resp.Rows))
 	}
 
 	first := requireIdenticalAttempts(t, srv, 3)
@@ -319,8 +319,8 @@ func TestReadRetry_RecoversSearchPOST(t *testing.T) {
 	if err := json.Unmarshal(first.body, &sent); err != nil {
 		t.Fatalf("body %q is not the search request: %v", first.body, err)
 	}
-	if sent.Interface != "wan,lan" || sent.SearchPhrase != "nd-" || sent.RowCount != -1 {
-		t.Errorf("body = %+v, want the interface, phrase and row count the caller asked for", sent)
+	if sent.Current != 2 || sent.SearchPhrase != "nd-" || sent.RowCount != ruleSearchPageSize {
+		t.Errorf("body = %+v, want the page, phrase and row count the caller asked for", sent)
 	}
 }
 
@@ -400,10 +400,10 @@ func TestReadRetry_NeverRetriesMutations(t *testing.T) {
 	const uuid = "221f3268-0001-4abc-9001-000000000001"
 
 	mutations := map[string]func(*Client) error{
-		"SetAlias":              func(c *Client) error { return c.SetAlias(ctx, uuid, Alias{Name: "a"}) },
+		"SetAlias":              func(c *Client) error { return c.SetAlias(ctx, uuid, map[string]string{"name": "a"}) },
 		"DeleteAlias":           func(c *Client) error { return c.DeleteAlias(ctx, uuid) },
 		"ReconfigureAliases":    func(c *Client) error { return c.ReconfigureAliases(ctx) },
-		"SetRule":               func(c *Client) error { return c.SetRule(ctx, uuid, Rule{Description: "r"}) },
+		"SetRule":               func(c *Client) error { return c.SetRule(ctx, uuid, map[string]string{"description": "r"}) },
 		"DeleteRule":            func(c *Client) error { return c.DeleteRule(ctx, uuid) },
 		"ApplyRules":            func(c *Client) error { return c.ApplyRules(ctx) },
 		"AddUser":               func(c *Client) error { _, err := c.AddUser(ctx, User{Name: "u"}); return err },

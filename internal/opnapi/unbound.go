@@ -592,6 +592,7 @@ func ConvertToOPNHostOverride(payload APIHostOverridePayload) HostOverride {
 		MX:          payload.MX,
 		TTL:         payload.TTL,
 		TXTData:     payload.TXTData,
+		AddPTR:      payload.AddPTR,
 		Description: strings.TrimSpace(desc),
 	}
 }
@@ -689,6 +690,7 @@ func ConvertHostOverrideToAPI(raw map[string]interface{}) APIHostOverridePayload
 	mx, _ := raw["mx"].(string)
 	ttl, _ := raw["ttl"].(string)
 	txtdata, _ := raw["txtdata"].(string)
+	addptr, _ := raw["addptr"].(string)
 	description, _ := raw["description"].(string)
 
 	return APIHostOverridePayload{
@@ -702,6 +704,7 @@ func ConvertHostOverrideToAPI(raw map[string]interface{}) APIHostOverridePayload
 		MX:          mx,
 		TTL:         ttl,
 		TXTData:     txtdata,
+		AddPTR:      addptr,
 		Description: StripTemplateTags(description),
 		Templates:   ParseTemplateTags(description),
 	}

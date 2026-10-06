@@ -12,6 +12,7 @@ type HostOverride struct {
 	MX          string `json:"mx,omitempty"`     // MX target
 	TTL         string `json:"ttl,omitempty"`    // Optional TTL
 	TXTData     string `json:"txtdata,omitempty"`
+	AddPTR      string `json:"addptr,omitempty"` // "0"/"1"; left out, the device keeps its value (new: on)
 	Description string `json:"description"`
 }
 
@@ -84,6 +85,7 @@ type APIHostOverridePayload struct {
 	MX          string   `json:"mx,omitempty"`      // MX target
 	TTL         string   `json:"ttl,omitempty"`     // Optional TTL
 	TXTData     string   `json:"txtdata,omitempty"` // TXT record data
+	AddPTR      string   `json:"addptr,omitempty"`  // "0" or "1"; empty keeps the device's
 	Description string   `json:"description"`
 	Templates   []string `json:"templates,omitempty"`
 

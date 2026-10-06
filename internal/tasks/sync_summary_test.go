@@ -125,3 +125,18 @@ func TestBuildSyncSummary_AuthSections(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestBuildSyncSummary_LocalRenumbersAreChanges: a sync that only moved local
+// rules out of the way of PREPEND rules changed the device, and says so.
+func TestBuildSyncSummary_LocalRenumbersAreChanges(t *testing.T) {
+	results := []SyncAPIItemResult{
+		{Type: "rule", Action: "unchanged", Status: "success"},
+		{Type: "rule_local", Action: "renumbered", Status: "success", Code: codeRuleLocalRenumbered},
+		{Type: "rule_placement", Action: "warning", Status: "warning", Code: codeRulePrependAfterLocal},
+	}
+	got := buildSyncSummary(results, 0)
+	want := "Local rules ~1"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

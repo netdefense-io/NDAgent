@@ -2,6 +2,7 @@ package opnapi
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -454,5 +455,24 @@ func TestConvertHostOverrideToAPITXTRecord(t *testing.T) {
 	}
 	if payload.TXTData != "v=DMARC1; p=none" {
 		t.Errorf("Expected TXTData='v=DMARC1; p=none', got %s", payload.TXTData)
+	}
+}
+
+func TestHostOverrideAddPTR(t *testing.T) {
+	off := ConvertToOPNHostOverride(APIHostOverridePayload{Hostname: "nas", Domain: "lan", RR: "A", Server: "192.0.2.5", AddPTR: "0"})
+	raw, _ := json.Marshal(HostOverrideWrapper{Host: off})
+	if !strings.Contains(string(raw), `"addptr":"0"`) {
+		t.Errorf("addptr is not sent: %s", raw)
+	}
+
+	unset := ConvertToOPNHostOverride(APIHostOverridePayload{Hostname: "nas", Domain: "lan", RR: "A", Server: "192.0.2.5"})
+	raw, _ = json.Marshal(HostOverrideWrapper{Host: unset})
+	if strings.Contains(string(raw), "addptr") {
+		t.Errorf("an unset addptr is sent, which would overwrite the device's: %s", raw)
+	}
+
+	pulled := ConvertHostOverrideToAPI(map[string]interface{}{"uuid": "x", "hostname": "nas", "domain": "lan", "addptr": "0"})
+	if pulled.AddPTR != "0" {
+		t.Errorf("pulled addptr = %q", pulled.AddPTR)
 	}
 }

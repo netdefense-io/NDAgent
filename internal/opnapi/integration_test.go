@@ -88,12 +88,12 @@ func TestIntegration_CreateAndDeleteAlias(t *testing.T) {
 	testUUID := "221f3268-aaaa-4abc-9001-000000000001"
 
 	// Create test alias
-	alias := Alias{
-		Enabled:     "1",
-		Name:        "ND_IntegrationTest",
-		Type:        "host",
-		Content:     "test.example.com",
-		Description: "Integration test alias [nd-template:test]",
+	alias := map[string]string{
+		"enabled":     "1",
+		"name":        "ND_IntegrationTest",
+		"type":        "host",
+		"content":     "test.example.com",
+		"description": "Integration test alias [nd-template:test]",
 	}
 
 	t.Log("Creating test alias...")
@@ -142,18 +142,18 @@ func TestIntegration_CreateAndDeleteRule(t *testing.T) {
 	testUUID := "221f3268-bbbb-4abc-9002-000000000001"
 
 	// Create test rule with description marker for searchability
-	rule := Rule{
-		Enabled:         "1",
-		Sequence:        "999",
-		Action:          "pass",
-		Interface:       "lan",
-		Direction:       "in",
-		IPProtocol:      "inet",
-		Protocol:        "TCP",
-		SourceNet:       "any",
-		DestinationNet:  "any",
-		DestinationPort: "8888",
-		Description:     "Integration test rule [nd-template:integration-test]",
+	rule := map[string]string{
+		"enabled":          "1",
+		"sequence":         "999",
+		"action":           "pass",
+		"interface":        "lan",
+		"direction":        "in",
+		"ipprotocol":       "inet",
+		"protocol":         "TCP",
+		"source_net":       "any",
+		"destination_net":  "any",
+		"destination_port": "8888",
+		"description":      "Integration test rule [nd-template:integration-test]",
 	}
 
 	t.Log("Creating test rule...")
@@ -204,17 +204,19 @@ func TestIntegration_CreateAndDeleteRule(t *testing.T) {
 	t.Log("Rule cleanup verified")
 }
 
-func TestIntegration_GetInterfaceList(t *testing.T) {
+func TestIntegration_GetRuleModel(t *testing.T) {
 	client := getTestClient(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	interfaces, err := client.GetInterfaceList(ctx)
+	model, err := client.GetRuleModel(ctx)
 	if err != nil {
-		t.Fatalf("GetInterfaceList() error = %v", err)
+		t.Fatalf("GetRuleModel() error = %v", err)
 	}
+	field, _ := model.Field("interface")
+	interfaces := field.OptionKeys()
 
-	t.Logf("Found %d interfaces: %v", len(interfaces), interfaces)
+	t.Logf("Rule model: %d fields; %d interfaces: %v", model.Len(), len(interfaces), interfaces)
 
 	// Should have at least lan and wan
 	if len(interfaces) < 2 {
@@ -254,12 +256,12 @@ func TestIntegration_GetAliasByName(t *testing.T) {
 
 	// First create a test alias
 	testUUID := "221f3268-cccc-4abc-9001-000000000001"
-	alias := Alias{
-		Enabled:     "1",
-		Name:        "ND_TestPullAlias",
-		Type:        "host",
-		Content:     "test.example.com",
-		Description: "Test alias for PULL_API [nd-template:test]",
+	alias := map[string]string{
+		"enabled":     "1",
+		"name":        "ND_TestPullAlias",
+		"type":        "host",
+		"content":     "test.example.com",
+		"description": "Test alias for PULL_API [nd-template:test]",
 	}
 
 	t.Log("Creating test alias...")
@@ -302,18 +304,18 @@ func TestIntegration_GetRuleByDescription(t *testing.T) {
 
 	// First create a test rule
 	testUUID := "221f3268-dddd-4abc-9002-000000000001"
-	rule := Rule{
-		Enabled:         "1",
-		Sequence:        "999",
-		Action:          "pass",
-		Interface:       "lan",
-		Direction:       "in",
-		IPProtocol:      "inet",
-		Protocol:        "TCP",
-		SourceNet:       "any",
-		DestinationNet:  "any",
-		DestinationPort: "9999",
-		Description:     "Test rule for PULL_API [nd-template:test]",
+	rule := map[string]string{
+		"enabled":          "1",
+		"sequence":         "999",
+		"action":           "pass",
+		"interface":        "lan",
+		"direction":        "in",
+		"ipprotocol":       "inet",
+		"protocol":         "TCP",
+		"source_net":       "any",
+		"destination_net":  "any",
+		"destination_port": "9999",
+		"description":      "Test rule for PULL_API [nd-template:test]",
 	}
 
 	t.Log("Creating test rule...")

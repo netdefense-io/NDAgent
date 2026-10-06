@@ -34,6 +34,7 @@ var retrySleep = util.ShutdownAwareSleep
 var readOnlyPOSTs = map[string]bool{
 	"/firewall/alias/searchItem":           true,
 	"/firewall/filter/searchRule":          true,
+	"/firewall/group/search_item":          true,
 	"/auth/user/search":                    true,
 	"/auth/group/search":                   true,
 	"/auth/priv/search":                    true,

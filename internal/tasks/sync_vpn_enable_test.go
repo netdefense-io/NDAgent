@@ -189,42 +189,19 @@ func TestExecuteSyncVPN_NoNetworksLeavesMasterSwitchAlone(t *testing.T) {
 	}
 }
 
-// interfaceListServer serves the `GET /firewall/filter/getRule` template
-// GetInterfaceList reads, with the given interface options.
-func interfaceListServer(t *testing.T, interfaces ...string) *opnapi.Client {
-	t.Helper()
-
-	mux := http.NewServeMux()
-	mux.HandleFunc("/firewall/filter/getRule", func(w http.ResponseWriter, r *http.Request) {
-		options := map[string]map[string]interface{}{}
-		for _, iface := range interfaces {
-			options[iface] = map[string]interface{}{"value": iface, "selected": 0}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"rule": map[string]interface{}{"interface": options},
-		})
-	})
-
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	return opnapi.NewClient(srv.URL, "key", "secret", true)
-}
-
 // TestCheckRuleInterfaces_MissingWireGuardGroup covers the reporter's third
 // suggestion: a rule targeting the `wireguard` interface group on a device
 // that has no active WireGuard network must produce a message naming the
 // rule and the missing group, not OPNsense's bare
 // `Option [wireguard] not in list.`
 func TestCheckRuleInterfaces_MissingWireGuardGroup(t *testing.T) {
-	client := interfaceListServer(t, "lan", "wan", "opt1")
-
 	rules := []APIRulePayload{{
 		UUID:        "221f3268-rule-1",
 		Description: "Allow VPN to LAN",
 		Interface:   "wireguard",
 	}}
 
-	errs := checkRuleInterfaces(context.Background(), client, rules)
+	errs := checkRuleInterfaces(rules, []string{"lan", "wan", "opt1"})
 
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 validation error, got %d: %+v", len(errs), errs)
@@ -248,8 +225,6 @@ func TestCheckRuleInterfaces_MissingWireGuardGroup(t *testing.T) {
 // interface (floating rule), and OPNsense's comma-separated multi-interface
 // form must all pass.
 func TestCheckRuleInterfaces_AcceptsValidAndFloatingRules(t *testing.T) {
-	client := interfaceListServer(t, "lan", "wan", "wireguard")
-
 	rules := []APIRulePayload{
 		{UUID: "221f3268-a", Description: "on lan", Interface: "lan"},
 		{UUID: "221f3268-b", Description: "floating", Interface: ""},
@@ -257,40 +232,18 @@ func TestCheckRuleInterfaces_AcceptsValidAndFloatingRules(t *testing.T) {
 		{UUID: "221f3268-d", Description: "vpn", Interface: "wireguard"},
 	}
 
-	if errs := checkRuleInterfaces(context.Background(), client, rules); len(errs) != 0 {
+	if errs := checkRuleInterfaces(rules, []string{"lan", "wan", "wireguard"}); len(errs) != 0 {
 		t.Errorf("expected no validation errors, got %+v", errs)
 	}
 }
 
-// TestCheckRuleInterfaces_UnreadableListDoesNotBlockSync pins that the
-// pre-flight degrades to a no-op rather than failing the sync when the
-// interface list cannot be read. It is a diagnostic that improves an error
-// message; losing it must never block a sync that would otherwise succeed.
-func TestCheckRuleInterfaces_UnreadableListDoesNotBlockSync(t *testing.T) {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/firewall/filter/getRule", func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "boom", http.StatusInternalServerError)
-	})
-	srv := httptest.NewServer(mux)
-	t.Cleanup(srv.Close)
-	client := opnapi.NewClient(srv.URL, "key", "secret", true)
-
-	rules := []APIRulePayload{{UUID: "221f3268-a", Description: "vpn", Interface: "wireguard"}}
-
-	if errs := checkRuleInterfaces(context.Background(), client, rules); len(errs) != 0 {
-		t.Errorf("expected the pre-flight to no-op on an unreadable interface list, got %+v", errs)
-	}
-}
-
-// TestCheckRuleInterfaces_EmptyOptionListDoesNotBlockSync guards the same
-// fail-open property for a well-formed response with no options: treating
-// "nothing is valid" literally would block every rule on the device.
+// TestCheckRuleInterfaces_EmptyOptionListDoesNotBlockSync pins the fail-open
+// property for a rule model with no interface options: treating "nothing is
+// valid" literally would block every rule on the device.
 func TestCheckRuleInterfaces_EmptyOptionListDoesNotBlockSync(t *testing.T) {
-	client := interfaceListServer(t)
-
 	rules := []APIRulePayload{{UUID: "221f3268-a", Description: "vpn", Interface: "wireguard"}}
 
-	if errs := checkRuleInterfaces(context.Background(), client, rules); len(errs) != 0 {
+	if errs := checkRuleInterfaces(rules, nil); len(errs) != 0 {
 		t.Errorf("expected the pre-flight to no-op on an empty option list, got %+v", errs)
 	}
 }
@@ -378,15 +331,10 @@ func (m *teardownMock) client(t *testing.T) *opnapi.Client {
 		}
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: rows, RowCount: len(rows), Total: len(rows)})
 	})
-	// Bare path (no UUID) is the interface-option template GetInterfaceList reads.
+	// Bare path (no UUID) is the rule model, interface options included.
 	mux.HandleFunc("/firewall/filter/getRule", func(w http.ResponseWriter, r *http.Request) {
-		options := map[string]map[string]interface{}{}
-		for _, iface := range m.interfaceOptions() {
-			options[iface] = map[string]interface{}{"value": iface, "selected": 0}
-		}
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"rule": map[string]interface{}{"interface": options},
-		})
+		template := ruleTemplate(t, withInterfaces(m.interfaceOptions()...))
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"rule": template})
 	})
 
 	// WireGuard endpoints, so a test can drive the real executor order
@@ -456,7 +404,7 @@ func (m *teardownMock) client(t *testing.T) *opnapi.Client {
 // rule discovery succeed regardless of what was queried.
 //
 // Discovery surviving the group's disappearance is the load-bearing part:
-// ListAllRules' first call omits the interface filter, so rules bound to the
+// ListAllRules omits the interface filter, so rules bound to the
 // vanished group are still enumerated and can still be swept. See
 // opnapi.TestListAllRulesFindsRulesOnUnlistedInterfaces.
 func TestExecuteSyncAPI_VPNTeardownSweepsAutoRulesAndFailsOnUserRule(t *testing.T) {
@@ -497,12 +445,8 @@ func TestExecuteSyncAPI_VPNTeardownSweepsAutoRulesAndFailsOnUserRule(t *testing.
 
 	// Phase two: NDManager no longer emits the auto rule; the user's template
 	// rule is still attached and still targets the now-missing group.
-	desired := []APIRulePayload{{
-		UUID:        userRuleUUID,
-		Enabled:     true,
-		Description: "Ops VPN access",
-		Interface:   wireGuardInterfaceGroup,
-	}}
+	desired := []APIRulePayload{desiredRule(t, "ops-vpn", RulePositionPrepend, 1000,
+		`{"uuid":"`+userRuleUUID+`","enabled":"1","action":"pass","description":"Ops VPN access","interface":"`+wireGuardInterfaceGroup+`"}`)}
 
 	result := executeSyncAPI(ctx, client, nil, desired)
 

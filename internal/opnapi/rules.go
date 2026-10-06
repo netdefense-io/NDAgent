@@ -4,123 +4,86 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 )
 
-// SearchRules searches for filter rules matching the search phrase.
-// Note: This only searches floating rules (no interface). Use SearchRulesOnInterface
-// for interface-specific rules.
-func (c *Client) SearchRules(ctx context.Context, searchPhrase string) ([]map[string]interface{}, error) {
-	req := SearchRequest{SearchPhrase: searchPhrase}
+// ruleSearchPageSize bounds one page of a rule search. A rule row is about
+// 1 KB of JSON, and responses near 100 KB can arrive corrupted over the
+// loopback connection the agent uses (see read_retry.go), so the ruleset is
+// read in pages rather than with rowCount -1.
+const ruleSearchPageSize = 40
 
-	respBody, err := c.doRequest(ctx, "POST", "/firewall/filter/searchRule", req)
-	if err != nil {
-		return nil, err
-	}
+// maxRuleSearchPages stops a search whose pages never end, rather than
+// looping on a device that ignores the page number.
+const maxRuleSearchPages = 2500
 
-	var resp SearchResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse search response: %w", err)
-	}
-
-	c.log.Debugw("SearchRules completed",
-		"search_phrase", searchPhrase,
-		"count", len(resp.Rows),
-	)
-
-	return resp.Rows, nil
-}
-
-// SearchRulesOnInterface searches for filter rules on a specific interface.
-// OPNsense organizes rules by interface with different priority groups:
-// - No interface = floating rules (prio_group 200000)
-// - With interface = interface rules (prio_group 400000)
-func (c *Client) SearchRulesOnInterface(ctx context.Context, iface, searchPhrase string) ([]map[string]interface{}, error) {
+// searchRulePage reads one page of the unfiltered rule search.
+func (c *Client) searchRulePage(ctx context.Context, searchPhrase string, page, rowCount int) (SearchResponse, error) {
 	req := RuleSearchRequest{
-		Current:      1,
-		RowCount:     -1, // All results
+		Current:      page,
+		RowCount:     rowCount,
 		Sort:         map[string]string{},
 		SearchPhrase: searchPhrase,
-		Interface:    iface,
 	}
 
 	respBody, err := c.doRequest(ctx, "POST", "/firewall/filter/searchRule", req)
 	if err != nil {
-		return nil, err
+		return SearchResponse{}, err
 	}
 
 	var resp SearchResponse
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse search response: %w", err)
+		return SearchResponse{}, fmt.Errorf("failed to parse search response: %w", err)
 	}
-
-	c.log.Debugw("SearchRulesOnInterface completed",
-		"interface", iface,
-		"search_phrase", searchPhrase,
-		"count", len(resp.Rows),
-	)
-
-	return resp.Rows, nil
+	return resp, nil
 }
 
-// ListAllRules retrieves ALL rules from OPNsense across all interfaces.
-// Makes 2 API calls: floating rules + all interface rules (comma-separated).
-// Returns raw results; caller must filter by UUID prefix for managed objects.
-func (c *Client) ListAllRules(ctx context.Context) ([]map[string]interface{}, error) {
-	seenUUIDs := make(map[string]bool)
-	var allRules []map[string]interface{}
-
-	// Call 1: Get floating rules (no interface)
-	floatingRules, err := c.searchRulesWithParams(ctx, "", "")
-	if err != nil {
-		return nil, fmt.Errorf("list floating rules: %w", err)
-	}
-	for _, rule := range floatingRules {
-		if uuid, ok := rule["uuid"].(string); ok && !seenUUIDs[uuid] {
-			seenUUIDs[uuid] = true
-			allRules = append(allRules, rule)
+// searchRules reads every rule the search phrase matches, page by page, in
+// OPNsense's evaluation order (sort_order). A rule listed twice because the
+// ruleset changed between pages is kept once. The search ends at a short page
+// (an empty one included) or at a page that adds no rule (a device that
+// ignores the page number answers the first page again). The total the device
+// reports does not end it: a missing or stale one would cut the list short.
+func (c *Client) searchRules(ctx context.Context, searchPhrase string) ([]map[string]interface{}, error) {
+	seen := make(map[string]bool)
+	var rows []map[string]interface{}
+	for page := 1; page <= maxRuleSearchPages; page++ {
+		resp, err := c.searchRulePage(ctx, searchPhrase, page, ruleSearchPageSize)
+		if err != nil {
+			return nil, err
 		}
-	}
-
-	// Get interface list for combined query
-	interfaces, err := c.GetInterfaceList(ctx)
-	if err != nil {
-		c.log.Warnw("Failed to get interface list, using defaults", "error", err)
-		interfaces = []string{"lan", "wan"}
-	}
-
-	// Call 2: Get all interface rules with comma-separated list
-	// OPNsense API accepts: interface=lan,wan,opt1
-	interfaceList := strings.Join(interfaces, ",")
-	interfaceRules, err := c.searchRulesWithParams(ctx, interfaceList, "")
-	if err != nil {
-		// Fallback: iterate interfaces individually
-		c.log.Warnw("Comma-separated interface search failed, falling back to iteration", "error", err)
-		for _, iface := range interfaces {
-			rules, err := c.searchRulesWithParams(ctx, iface, "")
-			if err != nil {
-				c.log.Warnw("Failed to list rules on interface", "interface", iface, "error", err)
+		added := 0
+		for _, row := range resp.Rows {
+			uuid, _ := row["uuid"].(string)
+			if uuid != "" && seen[uuid] {
 				continue
 			}
-			for _, rule := range rules {
-				if uuid, ok := rule["uuid"].(string); ok && !seenUUIDs[uuid] {
-					seenUUIDs[uuid] = true
-					allRules = append(allRules, rule)
-				}
-			}
+			seen[uuid] = true
+			rows = append(rows, row)
+			added++
 		}
-	} else {
-		for _, rule := range interfaceRules {
-			if uuid, ok := rule["uuid"].(string); ok && !seenUUIDs[uuid] {
-				seenUUIDs[uuid] = true
-				allRules = append(allRules, rule)
-			}
+		if len(resp.Rows) < ruleSearchPageSize || added == 0 {
+			return rows, nil
 		}
 	}
+	return nil, fmt.Errorf("rule search did not end after %d pages", maxRuleSearchPages)
+}
 
-	c.log.Infow("ListAllRules completed", "total", len(allRules))
+// ListAllRules retrieves ALL rules from OPNsense: MVC rules wherever they are
+// bound, legacy rules and the rules OPNsense generates (both listed with
+// "legacy": true). One unfiltered search returns them all on 26.1 and later;
+// see RuleSearchRequest.
+// Returns raw results; caller must filter by UUID prefix for managed objects.
+func (c *Client) ListAllRules(ctx context.Context) ([]map[string]interface{}, error) {
+	rules, err := c.searchRules(ctx, "")
+	if err != nil {
+		return nil, fmt.Errorf("list rules: %w", err)
+	}
 
-	return allRules, nil
+	c.log.Infow("ListAllRules completed", "total", len(rules))
+
+	return rules, nil
 }
 
 // FilterManagedRules filters rules by NDAgent UUID prefix.
@@ -137,44 +100,33 @@ func FilterManagedRules(rules []map[string]interface{}) []map[string]interface{}
 	return managed
 }
 
-// searchRulesWithParams searches rules with interface and search phrase parameters.
-func (c *Client) searchRulesWithParams(ctx context.Context, iface, searchPhrase string) ([]map[string]interface{}, error) {
-	req := RuleSearchRequest{
-		Current:      1,
-		RowCount:     -1, // All results
-		Sort:         map[string]string{},
-		SearchPhrase: searchPhrase,
-		Interface:    iface,
-	}
-
-	respBody, err := c.doRequest(ctx, "POST", "/firewall/filter/searchRule", req)
-	if err != nil {
-		return nil, err
-	}
-
-	var resp SearchResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse search response: %w", err)
-	}
-
-	return resp.Rows, nil
-}
-
-// GetRule retrieves a single rule by UUID.
-func (c *Client) GetRule(ctx context.Context, uuid string) (map[string]interface{}, error) {
+// GetRule reads one rule as the device holds it: every field's value in
+// OPNsense's string form, a list field's as its selected keys, comma-joined.
+// found is false when the device holds no rule with this uuid, which getRule
+// answers with [].
+func (c *Client) GetRule(ctx context.Context, uuid string) (values map[string]string, found bool, err error) {
 	path := fmt.Sprintf("/firewall/filter/getRule/%s", uuid)
 
 	respBody, err := c.doRequest(ctx, "GET", path, nil)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
-	var resp map[string]interface{}
+	var resp interface{}
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %w", err)
+		return nil, false, fmt.Errorf("failed to parse response: %w", err)
 	}
-
-	return resp, nil
+	switch answer := resp.(type) {
+	case []interface{}:
+		if len(answer) == 0 {
+			return nil, false, nil
+		}
+	case map[string]interface{}:
+		if rule, ok := answer["rule"].(map[string]interface{}); ok {
+			return ParseEntityModel(rule).Values(), true, nil
+		}
+	}
+	return nil, false, fmt.Errorf("getRule answered neither a rule nor []")
 }
 
 // SetRuleResponse is the response from setRule endpoint.
@@ -184,10 +136,14 @@ type SetRuleResponse struct {
 	ValidationErrors FlexibleValidation `json:"validations,omitempty"`
 }
 
-// SetRule creates or updates a filter rule (upsert operation).
-func (c *Client) SetRule(ctx context.Context, uuid string, rule Rule) error {
+// SetRule creates or updates a filter rule (upsert operation) from a flat body
+// of OPNsense string values. A refusal with field validations is a
+// *ValidationFailedError; only "saved" is success.
+func (c *Client) SetRule(ctx context.Context, uuid string, rule map[string]string) error {
 	path := fmt.Sprintf("/firewall/filter/setRule/%s", uuid)
 	wrapper := RuleWrapper{Rule: rule}
+
+	c.log.Debugw("SetRule request", "uuid", uuid, "body", wrapper)
 
 	respBody, err := c.doRequest(ctx, "POST", path, wrapper)
 	if err != nil {
@@ -200,10 +156,9 @@ func (c *Client) SetRule(ctx context.Context, uuid string, rule Rule) error {
 	}
 
 	if result.Result != "saved" {
-		// Check for validation errors
 		if result.ValidationErrors.HasErrors() {
 			c.log.Debugw("Validation errors", "errors", result.ValidationErrors.String())
-			return fmt.Errorf("validation failed: %s", result.ValidationErrors.String())
+			return &ValidationFailedError{Entity: "rule", Validations: result.ValidationErrors}
 		}
 		return fmt.Errorf("unexpected result: %s (response: %s)", result.Result, string(respBody))
 	}
@@ -239,6 +194,32 @@ func (c *Client) DeleteRule(ctx context.Context, uuid string) error {
 	return nil
 }
 
+// ToggleRule sets a filter rule's enabled flag. Unlike setRule it never creates
+// a rule: for a uuid the device does not hold OPNsense answers "failed".
+func (c *Client) ToggleRule(ctx context.Context, uuid string, enabled bool) error {
+	path := fmt.Sprintf("/firewall/filter/toggleRule/%s/%s", uuid, BoolToOPNsense(enabled))
+
+	// OPNsense API requires an empty JSON object, not nil
+	respBody, err := c.doRequest(ctx, "POST", path, struct{}{})
+	if err != nil {
+		return err
+	}
+
+	var result APIResult
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	want := "Disabled"
+	if enabled {
+		want = "Enabled"
+	}
+	if result.Result != want {
+		return fmt.Errorf("unexpected result: %s", result.Result)
+	}
+	return nil
+}
+
 // ApplyRules applies pending filter rule changes.
 // This is the simple version without savepoint/rollback.
 func (c *Client) ApplyRules(ctx context.Context) error {
@@ -253,38 +234,105 @@ func (c *Client) ApplyRules(ctx context.Context) error {
 	return nil
 }
 
-// GetInterfaceList retrieves available interfaces from OPNsense.
-// Returns actual interface names (lan, wan, opt1, etc.) for rule search.
-// Extracts from the getRule template which contains valid interface options.
-func (c *Client) GetInterfaceList(ctx context.Context) ([]string, error) {
-	// Get the rule template which contains interface options
+// GetRuleModel reads the device's filter rule model: getRule without a uuid
+// answers every field with its default, and every list field with the options
+// this device offers (its interfaces and groups, gateways, aliases, ...).
+func (c *Client) GetRuleModel(ctx context.Context) (EntityModel, error) {
 	respBody, err := c.doRequest(ctx, "GET", "/firewall/filter/getRule", nil)
+	if err != nil {
+		return EntityModel{}, err
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return EntityModel{}, fmt.Errorf("failed to parse rule template: %w", err)
+	}
+	template, ok := resp["rule"].(map[string]interface{})
+	if !ok {
+		return EntityModel{}, fmt.Errorf("rule template has no %q object", "rule")
+	}
+	model := ParseEntityModel(template)
+	if model.Len() == 0 {
+		return EntityModel{}, fmt.Errorf("rule template has no fields")
+	}
+
+	c.log.Debugw("GetRuleModel completed", "fields", model.Len())
+
+	return model, nil
+}
+
+// InterfaceGroup is one interface group, as the group search lists it.
+type InterfaceGroup struct {
+	Name     string
+	Sequence int
+	Members  []string
+}
+
+// GetInterfaceTypes reads which rule interface options are interface groups:
+// the interface list the rule editor offers, keyed by interface, with "group"
+// or "interface" as the value. OPNsense ranks a rule bound to a single group
+// by the same test (FilterRuleField::getPriority).
+func (c *Client) GetInterfaceTypes(ctx context.Context) (map[string]string, error) {
+	respBody, err := c.doRequest(ctx, "GET", "/firewall/filter/get_interface_list", nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Parse the response to extract interface options
-	var resp struct {
-		Rule struct {
-			Interface map[string]struct {
-				Value    string `json:"value"`
-				Selected int    `json:"selected"`
-			} `json:"interface"`
-		} `json:"rule"`
+	var sections map[string]struct {
+		Items []struct {
+			Value string `json:"value"`
+			Type  string `json:"type"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(respBody, &sections); err != nil {
+		return nil, fmt.Errorf("failed to parse interface list: %w", err)
 	}
 
+	types := make(map[string]string)
+	for _, section := range sections {
+		for _, item := range section.Items {
+			if item.Type == "group" || item.Type == "interface" {
+				types[item.Value] = item.Type
+			}
+		}
+	}
+	if len(types) == 0 {
+		return nil, fmt.Errorf("interface list has no interfaces")
+	}
+	return types, nil
+}
+
+// ListInterfaceGroups reads every interface group with its sequence and
+// members, the plugin groups (openvpn, enc0, wireguard) included.
+func (c *Client) ListInterfaceGroups(ctx context.Context) ([]InterfaceGroup, error) {
+	respBody, err := c.doRequest(ctx, "POST", "/firewall/group/search_item", SearchRequest{})
+	if err != nil {
+		return nil, err
+	}
+
+	var resp SearchResponse
 	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse rule template: %w", err)
+		return nil, fmt.Errorf("failed to parse group search: %w", err)
 	}
 
-	var interfaces []string
-	for iface := range resp.Rule.Interface {
-		interfaces = append(interfaces, iface)
+	groups := make([]InterfaceGroup, 0, len(resp.Rows))
+	for _, row := range resp.Rows {
+		name, _ := row["ifname"].(string)
+		if name == "" {
+			continue
+		}
+		group := InterfaceGroup{Name: name}
+		switch seq := row["sequence"].(type) {
+		case string:
+			group.Sequence, _ = strconv.Atoi(seq)
+		case float64:
+			group.Sequence = int(seq)
+		}
+		members, _ := row["members"].(string)
+		group.Members = CSVToStrings(members)
+		groups = append(groups, group)
 	}
-
-	c.log.Debugw("GetInterfaceList completed", "count", len(interfaces))
-
-	return interfaces, nil
+	return groups, nil
 }
 
 // ErrMultipleRulesMatch is returned when a partial description search matches multiple rules.
@@ -297,56 +345,21 @@ func (e *ErrMultipleRulesMatch) Error() string {
 	return fmt.Sprintf("multiple rules match description '%s': found %d rules. Please use a more specific description to identify a unique rule", e.SearchTerm, e.MatchCount)
 }
 
-// GetRuleByDescription searches for a rule by partial description match.
-// Searches both floating rules and interface-specific rules.
+// GetRuleByDescription searches for a rule by partial description match,
+// case-insensitive, over every rule the device lists.
 // Returns an error if multiple rules match the description (requires unique match).
 func (c *Client) GetRuleByDescription(ctx context.Context, description string) (map[string]interface{}, error) {
-	var matchingRules []map[string]interface{}
-
-	// Search floating rules first
-	rules, err := c.SearchRules(ctx, description)
+	rules, err := c.searchRules(ctx, description)
 	if err != nil {
 		return nil, err
 	}
 
-	// Collect all rules whose description contains the search term (case-insensitive)
+	var matchingRules []map[string]interface{}
 	searchLower := strings.ToLower(description)
 	for _, rule := range rules {
 		if ruleDesc, ok := rule["description"].(string); ok {
 			if strings.Contains(strings.ToLower(ruleDesc), searchLower) {
 				matchingRules = append(matchingRules, rule)
-			}
-		}
-	}
-
-	// Get available interfaces and search each one
-	interfaces, err := c.GetInterfaceList(ctx)
-	if err != nil {
-		c.log.Warnw("Failed to get interface list, using common defaults", "error", err)
-		interfaces = []string{"lan", "wan"}
-	}
-
-	for _, iface := range interfaces {
-		rules, err := c.SearchRulesOnInterface(ctx, iface, description)
-		if err != nil {
-			continue
-		}
-		for _, rule := range rules {
-			if ruleDesc, ok := rule["description"].(string); ok {
-				if strings.Contains(strings.ToLower(ruleDesc), searchLower) {
-					// Avoid duplicates (rules may appear in multiple searches)
-					uuid, _ := rule["uuid"].(string)
-					isDuplicate := false
-					for _, existing := range matchingRules {
-						if existingUUID, ok := existing["uuid"].(string); ok && existingUUID == uuid {
-							isDuplicate = true
-							break
-						}
-					}
-					if !isDuplicate {
-						matchingRules = append(matchingRules, rule)
-					}
-				}
 			}
 		}
 	}

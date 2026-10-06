@@ -1,0 +1,263 @@
+{
+ "schema": 1,
+ "kind": "ignored-content-keys",
+ "rule": "a content key of a snippet type is ignored when it equals one of the type's names or starts with one of its prefixes, compared exactly and case-sensitively; an ignored key may hold any JSON value",
+ "types": {
+  "ALIAS": {
+   "names": [
+    "categories_uuid",
+    "current_items",
+    "eval_match",
+    "eval_nomatch",
+    "in_block_b",
+    "in_block_p",
+    "in_pass_b",
+    "in_pass_p",
+    "last_updated",
+    "out_block_b",
+    "out_block_p",
+    "out_pass_b",
+    "out_pass_p"
+   ],
+   "prefixes": [
+    "%"
+   ]
+  },
+  "AUTH_ORDER": {
+   "names": [],
+   "prefixes": []
+  },
+  "AUTH_SERVER": {
+   "names": [],
+   "prefixes": []
+  },
+  "GROUP": {
+   "names": [],
+   "prefixes": []
+  },
+  "RULE": {
+   "names": [
+    "#priority",
+    "audit",
+    "category_colors",
+    "is_automatic",
+    "legacy",
+    "prio_group",
+    "ref",
+    "seq",
+    "sequence",
+    "sort_order"
+   ],
+   "prefixes": [
+    "%",
+    "alias_meta_"
+   ]
+  },
+  "TRUST_CA": {
+   "names": [],
+   "prefixes": []
+  },
+  "TRUST_CERT": {
+   "names": [],
+   "prefixes": []
+  },
+  "UNBOUND_ACL": {
+   "names": [
+    "templates"
+   ],
+   "prefixes": []
+  },
+  "UNBOUND_DOMAIN_FORWARD": {
+   "names": [
+    "templates"
+   ],
+   "prefixes": []
+  },
+  "UNBOUND_HOST_ALIAS": {
+   "names": [
+    "templates"
+   ],
+   "prefixes": []
+  },
+  "UNBOUND_HOST_OVERRIDE": {
+   "names": [
+    "templates"
+   ],
+   "prefixes": []
+  },
+  "USER": {
+   "names": [],
+   "prefixes": []
+  },
+  "ZABBIX_ALIAS": {
+   "names": [],
+   "prefixes": []
+  },
+  "ZABBIX_SETTINGS": {
+   "names": [],
+   "prefixes": []
+  },
+  "ZABBIX_USERPARAMETER": {
+   "names": [],
+   "prefixes": []
+  }
+ },
+ "vectors": [
+  {"type": "RULE", "key": "sequence", "ignored": true},
+  {"type": "RULE", "key": "sort_order", "ignored": true},
+  {"type": "RULE", "key": "prio_group", "ignored": true},
+  {"type": "RULE", "key": "category_colors", "ignored": true},
+  {"type": "RULE", "key": "legacy", "ignored": true},
+  {"type": "RULE", "key": "is_automatic", "ignored": true},
+  {"type": "RULE", "key": "ref", "ignored": true},
+  {"type": "RULE", "key": "seq", "ignored": true},
+  {"type": "RULE", "key": "#priority", "ignored": true},
+  {"type": "RULE", "key": "audit", "ignored": true},
+  {"type": "RULE", "key": "%action", "ignored": true},
+  {"type": "RULE", "key": "%", "ignored": true},
+  {"type": "RULE", "key": "alias_meta_source_net", "ignored": true},
+  {"type": "RULE", "key": "alias_meta_", "ignored": true},
+  {"type": "RULE", "key": "uuid", "ignored": false},
+  {"type": "RULE", "key": "enabled", "ignored": false},
+  {"type": "RULE", "key": "log", "ignored": false},
+  {"type": "RULE", "key": "description", "ignored": false},
+  {"type": "RULE", "key": "interface", "ignored": false},
+  {"type": "RULE", "key": "lgo", "ignored": false},
+  {"type": "RULE", "key": "Sequence", "ignored": false},
+  {"type": "RULE", "key": "SEQUENCE", "ignored": false},
+  {"type": "RULE", "key": "sequences", "ignored": false},
+  {"type": "RULE", "key": " sequence", "ignored": false},
+  {"type": "RULE", "key": "sort-order", "ignored": false},
+  {"type": "RULE", "key": "alias_meta", "ignored": false},
+  {"type": "RULE", "key": "aliasmeta_source_net", "ignored": false},
+  {"type": "RULE", "key": "_%action", "ignored": false},
+  {"type": "RULE", "key": "categories_uuid", "ignored": false},
+  {"type": "RULE", "key": "templates", "ignored": false},
+  {"type": "RULE", "key": "Audit", "ignored": false},
+  {"type": "RULE", "key": "audits", "ignored": false},
+  {"type": "RULE", "key": "", "ignored": false},
+  {"type": "ALIAS", "key": "categories_uuid", "ignored": true},
+  {"type": "ALIAS", "key": "current_items", "ignored": true},
+  {"type": "ALIAS", "key": "last_updated", "ignored": true},
+  {"type": "ALIAS", "key": "eval_match", "ignored": true},
+  {"type": "ALIAS", "key": "eval_nomatch", "ignored": true},
+  {"type": "ALIAS", "key": "in_block_b", "ignored": true},
+  {"type": "ALIAS", "key": "in_block_p", "ignored": true},
+  {"type": "ALIAS", "key": "in_pass_b", "ignored": true},
+  {"type": "ALIAS", "key": "in_pass_p", "ignored": true},
+  {"type": "ALIAS", "key": "out_block_b", "ignored": true},
+  {"type": "ALIAS", "key": "out_block_p", "ignored": true},
+  {"type": "ALIAS", "key": "out_pass_b", "ignored": true},
+  {"type": "ALIAS", "key": "out_pass_p", "ignored": true},
+  {"type": "ALIAS", "key": "%type", "ignored": true},
+  {"type": "ALIAS", "key": "%", "ignored": true},
+  {"type": "ALIAS", "key": "uuid", "ignored": false},
+  {"type": "ALIAS", "key": "name", "ignored": false},
+  {"type": "ALIAS", "key": "type", "ignored": false},
+  {"type": "ALIAS", "key": "content", "ignored": false},
+  {"type": "ALIAS", "key": "categories", "ignored": false},
+  {"type": "ALIAS", "key": "counters", "ignored": false},
+  {"type": "ALIAS", "key": "enabled", "ignored": false},
+  {"type": "ALIAS", "key": "sequence", "ignored": false},
+  {"type": "ALIAS", "key": "alias_meta_content", "ignored": false},
+  {"type": "ALIAS", "key": "templates", "ignored": false},
+  {"type": "ALIAS", "key": "in_block", "ignored": false},
+  {"type": "ALIAS", "key": "eval_matches", "ignored": false},
+  {"type": "ALIAS", "key": "Current_items", "ignored": false},
+  {"type": "ALIAS", "key": "audit", "ignored": false},
+  {"type": "ALIAS", "key": "", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "templates", "ignored": true},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "uuid", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "enabled", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "template", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "Templates", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "%type", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "sequence", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "categories_uuid", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "templates", "ignored": true},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "uuid", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "enabled", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "template", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "Templates", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "%type", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "sequence", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "categories_uuid", "ignored": false},
+  {"type": "UNBOUND_DOMAIN_FORWARD", "key": "", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "templates", "ignored": true},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "uuid", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "enabled", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "template", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "Templates", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "%type", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "sequence", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "categories_uuid", "ignored": false},
+  {"type": "UNBOUND_HOST_ALIAS", "key": "", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "templates", "ignored": true},
+  {"type": "UNBOUND_ACL", "key": "uuid", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "enabled", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "template", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "Templates", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "%type", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "sequence", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "categories_uuid", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "addptr", "ignored": false},
+  {"type": "UNBOUND_HOST_OVERRIDE", "key": "ttl", "ignored": false},
+  {"type": "UNBOUND_ACL", "key": "networks", "ignored": false},
+  {"type": "USER", "key": "templates", "ignored": false},
+  {"type": "USER", "key": "%x", "ignored": false},
+  {"type": "USER", "key": "sequence", "ignored": false},
+  {"type": "USER", "key": "categories_uuid", "ignored": false},
+  {"type": "USER", "key": "alias_meta_x", "ignored": false},
+  {"type": "USER", "key": "uuid", "ignored": false},
+  {"type": "GROUP", "key": "templates", "ignored": false},
+  {"type": "GROUP", "key": "%x", "ignored": false},
+  {"type": "GROUP", "key": "sequence", "ignored": false},
+  {"type": "GROUP", "key": "categories_uuid", "ignored": false},
+  {"type": "GROUP", "key": "alias_meta_x", "ignored": false},
+  {"type": "GROUP", "key": "uuid", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "templates", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "%x", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "sequence", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "categories_uuid", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "alias_meta_x", "ignored": false},
+  {"type": "ZABBIX_SETTINGS", "key": "uuid", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "templates", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "%x", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "sequence", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "categories_uuid", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "alias_meta_x", "ignored": false},
+  {"type": "ZABBIX_USERPARAMETER", "key": "uuid", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "templates", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "%x", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "sequence", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "categories_uuid", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "alias_meta_x", "ignored": false},
+  {"type": "ZABBIX_ALIAS", "key": "uuid", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "templates", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "%x", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "sequence", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "categories_uuid", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "alias_meta_x", "ignored": false},
+  {"type": "AUTH_SERVER", "key": "uuid", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "templates", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "%x", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "sequence", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "categories_uuid", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "alias_meta_x", "ignored": false},
+  {"type": "AUTH_ORDER", "key": "uuid", "ignored": false},
+  {"type": "TRUST_CA", "key": "templates", "ignored": false},
+  {"type": "TRUST_CA", "key": "%x", "ignored": false},
+  {"type": "TRUST_CA", "key": "sequence", "ignored": false},
+  {"type": "TRUST_CA", "key": "categories_uuid", "ignored": false},
+  {"type": "TRUST_CA", "key": "alias_meta_x", "ignored": false},
+  {"type": "TRUST_CA", "key": "uuid", "ignored": false},
+  {"type": "TRUST_CERT", "key": "templates", "ignored": false},
+  {"type": "TRUST_CERT", "key": "%x", "ignored": false},
+  {"type": "TRUST_CERT", "key": "sequence", "ignored": false},
+  {"type": "TRUST_CERT", "key": "categories_uuid", "ignored": false},
+  {"type": "TRUST_CERT", "key": "alias_meta_x", "ignored": false},
+  {"type": "TRUST_CERT", "key": "uuid", "ignored": false}
+ ]
+}

@@ -58,6 +58,9 @@ func (m *aliasCollisionMock) client(t *testing.T) *opnapi.Client {
 		m.aliasDeleteCalls = append(m.aliasDeleteCalls, strings.TrimPrefix(r.URL.Path, "/firewall/alias/delItem/"))
 		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "deleted"})
 	})
+	mux.HandleFunc("/firewall/alias/getItem", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{"alias": aliasTemplate(t)})
+	})
 	mux.HandleFunc("/firewall/alias/reconfigure", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "ok"})
 	})
@@ -84,11 +87,12 @@ const managedAliasUUID = "221f3268-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
 
 func aliasPayload(name string) APIAliasPayload {
 	return APIAliasPayload{
-		UUID:    managedAliasUUID,
-		Enabled: true,
-		Name:    name,
-		Type:    "host",
-		Content: []string{"192.168.50.0/24"},
+		UUID: managedAliasUUID,
+		Name: name,
+		Type: "host",
+		Content: map[string]interface{}{
+			"uuid": managedAliasUUID, "enabled": true, "name": name, "type": "host", "content": []interface{}{"192.168.50.0/24"},
+		},
 	}
 }
 

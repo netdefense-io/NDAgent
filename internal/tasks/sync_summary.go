@@ -16,6 +16,7 @@ var syncSectionLabels = []struct {
 	{"trust_cert", "Trust certificates"},
 	{"alias", "Aliases"},
 	{"rule", "Rules"},
+	{"rule_local", "Local rules"},
 	{"auth_server", "Auth servers"},
 	{"auth_facility", "Auth order"},
 	{"user", "Users"},
@@ -39,7 +40,8 @@ var syncSectionLabels = []struct {
 // "written" is the AUTH_ORDER facility's own vocabulary for "the value
 // changed" (its "unchanged" already reads unchanged) — counted as
 // "updated" so a facility write shows up in the summary the same way any
-// other family's modification does. Every other AUTH facility/server
+// other family's modification does. "renumbered" is a local rule whose
+// sequence rule placement raised: a change to the device, so it counts too. Every other AUTH facility/server
 // action ("unresolved", "refused", "rejected", "blocked", "retained",
 // "deferred", etc.) is a non-mutating or blocked outcome and is
 // deliberately left unrecognized here — it belongs in errors, not in the
@@ -48,7 +50,7 @@ func normalizeSyncAction(action string) string {
 	switch action {
 	case "create", "created":
 		return "created"
-	case "update", "updated", "written":
+	case "update", "updated", "written", "renumbered":
 		return "updated"
 	case "delete", "deleted":
 		return "deleted"

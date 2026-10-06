@@ -141,17 +141,6 @@ func pullResultData(content map[string]interface{}, adminEquivalent *bool) map[s
 	return data
 }
 
-// pullAlias searches for an alias by exact name match.
-func pullAlias(ctx context.Context, client *opnapi.Client, name string) (map[string]interface{}, error) {
-	return client.GetAliasByName(ctx, name)
-}
-
-// pullRule searches for a rule by partial description match.
-// Returns error if multiple rules match (uniqueness required).
-func pullRule(ctx context.Context, client *opnapi.Client, description string) (map[string]interface{}, error) {
-	return client.GetRuleByDescription(ctx, description)
-}
-
 // pullUser searches for a user by exact name match and returns the portable
 // format, without the password, and whether the live rows make the account
 // administrator-equivalent.
@@ -256,8 +245,8 @@ func pullHostOverride(ctx context.Context, client *opnapi.Client, name string) (
 		"mx":          payload.MX,
 		"ttl":         payload.TTL,
 		"txtdata":     payload.TXTData,
+		"addptr":      payload.AddPTR,
 		"description": payload.Description,
-		"templates":   payload.Templates,
 	}, nil
 }
 
@@ -285,7 +274,6 @@ func pullDomainForward(ctx context.Context, client *opnapi.Client, domain string
 		"forward_tcp_upstream": payload.ForwardTCPUpstream,
 		"forward_first":        payload.ForwardFirst,
 		"description":          payload.Description,
-		"templates":            payload.Templates,
 	}, nil
 }
 
@@ -319,7 +307,6 @@ func pullHostAlias(ctx context.Context, client *opnapi.Client, name string) (map
 		"hostname":        payload.Hostname,
 		"domain":          payload.Domain,
 		"description":     payload.Description,
-		"templates":       payload.Templates,
 	}, nil
 }
 
@@ -343,7 +330,6 @@ func pullUnboundACL(ctx context.Context, client *opnapi.Client, name string) (ma
 		"action":      payload.Action,
 		"networks":    payload.Networks,
 		"description": payload.Description,
-		"templates":   payload.Templates,
 	}, nil
 }
 

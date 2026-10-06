@@ -510,7 +510,7 @@
                     </div>
                     <div class="alert alert-info" style="margin-top: 15px; margin-bottom: 0;">
                         <i class="fa fa-info-circle"></i>
-                        {{ lang._('API credentials allow the NetDefense agent to manage the system. A user "netdefense-agent" with the required privileges is automatically created.') }}
+                        {{ lang._('API credentials allow the NetDefense agent to manage the system. A user "netdefense-agent" with full administrative privileges is automatically created.') }}
                     </div>
                 </td>
             </tr>

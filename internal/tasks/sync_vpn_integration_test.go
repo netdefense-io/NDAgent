@@ -113,14 +113,23 @@ func vpnNetworkFromDevice(ctx context.Context, t *testing.T, client *opnapi.Clie
 	return network, true
 }
 
+// ruleInterfaceOptions reads the interface options of the device's rule model,
+// the list the interface pre-flight checks against.
+func ruleInterfaceOptions(ctx context.Context, t *testing.T, client *opnapi.Client) []string {
+	t.Helper()
+
+	model, err := client.GetRuleModel(ctx)
+	if err != nil {
+		t.Fatalf("GetRuleModel() error = %v", err)
+	}
+	field, _ := model.Field("interface")
+	return field.OptionKeys()
+}
+
 func hasWireGuardInterfaceGroup(ctx context.Context, t *testing.T, client *opnapi.Client) bool {
 	t.Helper()
 
-	interfaces, err := client.GetInterfaceList(ctx)
-	if err != nil {
-		t.Fatalf("GetInterfaceList() error = %v", err)
-	}
-	for _, iface := range interfaces {
+	for _, iface := range ruleInterfaceOptions(ctx, t, client) {
 		if iface == wireGuardInterfaceGroup {
 			return true
 		}
@@ -291,7 +300,7 @@ func TestIntegration_CheckRuleInterfacesNamesMissingGroup(t *testing.T) {
 		t.Fatalf("failed to reconfigure WireGuard: %v", err)
 	}
 
-	errs := checkRuleInterfaces(ctx, client, rules)
+	errs := checkRuleInterfaces(rules, ruleInterfaceOptions(ctx, t, client))
 	if len(errs) != 1 {
 		t.Fatalf("expected 1 validation error with WireGuard disabled, got %d: %+v", len(errs), errs)
 	}
@@ -313,7 +322,7 @@ func TestIntegration_CheckRuleInterfacesNamesMissingGroup(t *testing.T) {
 		t.Fatalf("failed to reconfigure WireGuard: %v", err)
 	}
 
-	if errs := checkRuleInterfaces(ctx, client, rules); len(errs) != 0 {
+	if errs := checkRuleInterfaces(rules, ruleInterfaceOptions(ctx, t, client)); len(errs) != 0 {
 		t.Errorf("expected no validation errors with WireGuard enabled, got %+v", errs)
 	}
 }

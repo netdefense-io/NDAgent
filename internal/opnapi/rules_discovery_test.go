@@ -135,17 +135,13 @@ func matchesAnyInterface(ruleIface, want string) bool {
 // they are stranded on the device pointing at a group that no longer exists.
 //
 // This holds **on OPNsense 26.1+ only**, which is NDAgent's supported floor.
-// ListAllRules' FIRST call omits the interface filter, and on 26.1 that
-// returns every rule — which makes the second, interface-scoped call
-// redundant for this purpose. On 25.x the unfiltered call took the floating
-// view and excluded single-interface rules, so the second call was the only
-// way such a rule was discovered; that is why ListAllRules makes two calls
-// and dedupes. See RuleSearchRequest for the controller behaviour at each
-// release.
+// ListAllRules omits the interface filter, and on 26.1 that returns every
+// rule. On 25.x the unfiltered search took the floating view and excluded
+// single-interface rules. See RuleSearchRequest for the controller behaviour
+// at each release.
 //
-// The test exists because nothing said any of this, and because the
-// guarantee is easy to optimise away: read the second call, conclude
-// discovery is interface-scoped, and a VPN teardown starts stranding rules.
+// The test exists because the guarantee is easy to optimise away: add an
+// interface filter "to read less", and a VPN teardown starts stranding rules.
 func TestListAllRulesFindsRulesOnUnlistedInterfaces(t *testing.T) {
 	fixture := &ruleSearchFixture{
 		rules: []map[string]interface{}{
@@ -178,9 +174,9 @@ func TestListAllRulesFindsRulesOnUnlistedInterfaces(t *testing.T) {
 		}
 	}
 
-	// Guard the reasoning as well as the result. The first call must OMIT the
+	// Guard the reasoning as well as the result. The search must OMIT the
 	// field, not send it empty: on 26.1 those differ, and only the absent
-	// form returns single-interface rules. If the first call ever stops being
+	// form returns single-interface rules. If the search ever stops being
 	// the absent form, discovery becomes interface-bounded and the assertion
 	// above would start passing only by luck of the fixture.
 	if len(fixture.lastInterfaceFilters) == 0 || fixture.lastInterfaceFilters[0] != absentFilter {
@@ -193,11 +189,10 @@ func TestListAllRulesFindsRulesOnUnlistedInterfaces(t *testing.T) {
 // ABSENT interface key returns every rule, while a PRESENT-but-EMPTY one
 // takes the floating view and excludes single-interface rules.
 //
-// NDAgent only ever sends the absent form — RuleSearchRequest tags Interface
-// `omitempty` — so this is latent for us today. It is pinned because the two
-// shapes look identical in Go (both start life as an empty string) and a
-// future caller that builds the body by hand, or a fixture that treats them
-// as the same, would be silently wrong in the direction that loses rules.
+// NDAgent only ever sends the absent form — RuleSearchRequest has no interface
+// field — so this is latent for us today. It is pinned because a future caller
+// that adds the field back, or a fixture that treats the two shapes as the
+// same, would be silently wrong in the direction that loses rules.
 func TestRuleSearchAbsentAndEmptyInterfaceDiffer(t *testing.T) {
 	rules := []map[string]interface{}{
 		{"uuid": "single", "interface": "wireguard"},
@@ -208,11 +203,12 @@ func TestRuleSearchAbsentAndEmptyInterfaceDiffer(t *testing.T) {
 	fixture := &ruleSearchFixture{rules: rules, interfaces: []string{"lan", "wan"}}
 	client := fixture.client(t)
 
-	// Absent: everything. This is what ListAllRules' first call sends.
-	all, err := client.searchRulesWithParams(context.Background(), "", "")
+	// Absent: everything. This is what ListAllRules sends.
+	resp, err := client.searchRulePage(context.Background(), "", 1, ruleSearchPageSize)
 	if err != nil {
 		t.Fatalf("unfiltered search: %v", err)
 	}
+	all := resp.Rows
 	if len(all) != 3 {
 		t.Errorf("absent interface returned %d rules, want all 3 (26.1 semantics)", len(all))
 	}

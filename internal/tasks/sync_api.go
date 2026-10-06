@@ -13,116 +13,29 @@ import (
 	"go.uber.org/zap"
 )
 
-// RulePosition defines where managed rules are placed relative to unmanaged rules.
+// RulePosition defines where managed rules are placed relative to the local
+// rules of their section; see rule_placement.go.
 type RulePosition string
 
 const (
-	// RulePositionPrepend places rules BEFORE unmanaged rules (lower sequence numbers).
+	// RulePositionPrepend places rules BEFORE the local rules of their section.
 	RulePositionPrepend RulePosition = "PREPEND"
-	// RulePositionAppend places rules AFTER unmanaged rules (higher sequence numbers).
+	// RulePositionAppend places rules AFTER the local MVC rules of their section.
 	RulePositionAppend RulePosition = "APPEND"
 )
 
-// SequenceCalculator computes OPNsense sequence values for managed rules
-// based on their position (PREPEND/APPEND) relative to unmanaged rules.
-type SequenceCalculator struct {
-	MinUnmanaged int
-	MaxUnmanaged int
-}
-
-// NewSequenceCalculator analyzes current OPNsense rules and creates a calculator.
-// It finds the min/max sequence numbers of unmanaged rules to determine boundaries.
-func NewSequenceCalculator(allRules []map[string]interface{}) *SequenceCalculator {
-	calc := &SequenceCalculator{
-		MinUnmanaged: 100000, // Default if no unmanaged rules
-		MaxUnmanaged: 100000,
-	}
-
-	hasUnmanaged := false
-	for _, rule := range allRules {
-		uuid, _ := rule["uuid"].(string)
-		if strings.HasPrefix(uuid, opnapi.NDAgentUUIDPrefix+"-") {
-			continue // Skip managed rules
-		}
-
-		// Parse sequence from unmanaged rule
-		var seq int
-		switch s := rule["sequence"].(type) {
-		case string:
-			fmt.Sscanf(s, "%d", &seq)
-		case float64:
-			seq = int(s)
-		}
-
-		if seq > 0 {
-			if !hasUnmanaged {
-				calc.MinUnmanaged = seq
-				calc.MaxUnmanaged = seq
-				hasUnmanaged = true
-			} else {
-				if seq < calc.MinUnmanaged {
-					calc.MinUnmanaged = seq
-				}
-				if seq > calc.MaxUnmanaged {
-					calc.MaxUnmanaged = seq
-				}
-			}
-		}
-	}
-
-	return calc
-}
-
-// ComputeSequences assigns sequence numbers to rules based on position and priority.
-// Returns a map of UUID -> computed sequence.
-// PREPEND rules get sequences before MinUnmanaged (100, 200, 300, ...)
-// APPEND rules get sequences after MaxUnmanaged (max+1000, +100, ...)
-func (c *SequenceCalculator) ComputeSequences(rules []APIRulePayload) map[string]int {
-	// Separate rules by position
-	var prependRules, appendRules []APIRulePayload
-	for _, r := range rules {
-		if r.Position == RulePositionAppend {
-			appendRules = append(appendRules, r)
-		} else {
-			prependRules = append(prependRules, r)
-		}
-	}
-
-	// Sort each group by priority (ascending = lower priority value = evaluated first)
-	sort.Slice(prependRules, func(i, j int) bool {
-		return prependRules[i].Priority < prependRules[j].Priority
-	})
-	sort.Slice(appendRules, func(i, j int) bool {
-		return appendRules[i].Priority < appendRules[j].Priority
-	})
-
-	sequences := make(map[string]int)
-
-	// PREPEND rules: sequences 100, 200, 300, ... (before unmanaged)
-	// Start at 100 with gaps of 100 for future flexibility
-	prependStart := 100
-	for i, r := range prependRules {
-		sequences[r.UUID] = prependStart + (i * 100)
-	}
-
-	// APPEND rules: sequences after max unmanaged with gaps of 100
-	appendStart := c.MaxUnmanaged + 1000
-	for i, r := range appendRules {
-		sequences[r.UUID] = appendStart + (i * 100)
-	}
-
-	return sequences
-}
-
 // APIAliasPayload represents an alias in JSON-native format for SYNC_API.
+//
+// Content is the alias as the snippet holds it, checked against the device's
+// alias model and converted once executeSyncAPI has read that model
+// (buildAliasBody). Name and Type are read from it at parse time, where they
+// are required.
 type APIAliasPayload struct {
-	UUID        string   `json:"uuid"`
-	Enabled     bool     `json:"enabled"`
-	Name        string   `json:"name"`
-	Type        string   `json:"type"`
-	Content     []string `json:"content"`
-	Description string   `json:"description"`
-	Templates   []string `json:"templates"`
+	UUID      string                 `json:"uuid"`
+	Name      string                 `json:"name"`
+	Type      string                 `json:"type"`
+	Content   map[string]interface{} `json:"content"`
+	Templates []string               `json:"templates"`
 
 	// SnippetName and SnippetIndex record where in the SYNC payload this
 	// object came from, so a validation failure can name the snippet the
@@ -135,23 +48,23 @@ type APIAliasPayload struct {
 
 // APIRulePayload represents a rule in JSON-native format for SYNC_API.
 // Position and Priority are extracted from snippet metadata (not content JSON).
-// Sequence is computed dynamically based on position relative to unmanaged rules.
+// The sequence is placement's (rule_placement.go).
+//
+// Content is the rule as the snippet holds it. Its keys are checked against
+// the device's rule model, and its values converted to OPNsense's string
+// forms, once executeSyncAPI has read that model (buildRuleBody). Description,
+// Interface, SourceNet and DestinationNet are read from it at parse time for
+// the checks that run before then, and for messages.
 type APIRulePayload struct {
-	UUID            string       `json:"uuid"`
-	Enabled         bool         `json:"enabled"`
-	Position        RulePosition `json:"position"` // PREPEND or APPEND relative to unmanaged rules
-	Priority        int          `json:"priority"` // Ordering within position group (lower = higher priority)
-	Action          string       `json:"action"`
-	Interface       string       `json:"interface"`
-	Direction       string       `json:"direction"`
-	IPProtocol      string       `json:"ipprotocol"`
-	Protocol        string       `json:"protocol"`
-	SourceNet       string       `json:"source_net"`
-	SourcePort      string       `json:"source_port,omitempty"`
-	DestinationNet  string       `json:"destination_net"`
-	DestinationPort string       `json:"destination_port,omitempty"`
-	Description     string       `json:"description"`
-	Templates       []string     `json:"templates"`
+	UUID           string                 `json:"uuid"`
+	Position       RulePosition           `json:"position"` // PREPEND or APPEND relative to unmanaged rules
+	Priority       int                    `json:"priority"` // Ordering within position group (lower = higher priority)
+	Content        map[string]interface{} `json:"content"`
+	Interface      string                 `json:"interface"`
+	SourceNet      string                 `json:"source_net"`
+	DestinationNet string                 `json:"destination_net"`
+	Description    string                 `json:"description"`
+	Templates      []string               `json:"templates"`
 
 	// SnippetName and SnippetIndex record where in the SYNC payload this
 	// object came from, so a validation failure can name the snippet the
@@ -184,15 +97,13 @@ type SyncAPIResult struct {
 // SyncAPIItemResult contains the result for a single item.
 //
 // Code, Before, After, Available and Risks are additive fields (all
-// `omitempty`, so every non-AUTH family and every older control-plane
-// consumer sees no shape change at all). They exist for the AUTH_SERVER/
-// AUTH_ORDER family: every AUTH result item carries a structured Code a consumer (NDBroker,
-// NDCLI, NDWeb) can key on together with Status, never on free-text
-// parsing of Error — this now includes the "group_member"/"user" deferral
-// items (USER_DEFERRED_EXCLUSION_STALE) and the "auth_local_server"
-// warning's risk list, which used to live only inside Error. Before/
-// After/Available are names only (never a value) and are populated on
-// the "auth_facility" item — see mapAuthResponseToResult.
+// `omitempty`, so an item without them and every older control-plane
+// consumer sees no shape change at all). Code is a structured outcome a
+// consumer (NDBroker, NDCLI, NDWeb) keys on together with Status, never on
+// free-text parsing of Error. Before/After/Available/Risks exist for the
+// AUTH_SERVER/AUTH_ORDER family: Before/After/Available are names only
+// (never a value) and are populated on the "auth_facility" item — see
+// mapAuthResponseToResult.
 type SyncAPIItemResult struct {
 	Type   string `json:"type"`
 	UUID   string `json:"uuid"`
@@ -207,9 +118,12 @@ type SyncAPIItemResult struct {
 	// embedded in Error; for the "group_member"/"user" deferral items it
 	// is authCodeUserDeferredExclusionStale; for a "user"/"group" element
 	// refused for missing Superuser clearance it is
-	// codeAdminEquivalentRequiresSuperuser. A refusal by the owner's own
-	// reject_dangerous_snippets policy carries none. Never populated
-	// outside these families today.
+	// codeAdminEquivalentRequiresSuperuser, and a USER password refused as
+	// a hash is USER_PASSWORD_IS_HASH; the trust family's items carry its
+	// TRUST_* codes; a rule refused before its write, or by the device,
+	// carries a RULE_* code or INTERFACE_NOT_FOUND (rule_content.go). A
+	// refusal of a USER, GROUP or ZABBIX_* element by the owner's own
+	// reject_dangerous_snippets policy carries none.
 	Code string `json:"code,omitempty"`
 	// Before/After are the auth_facility item's kept/written order, names
 	// only. Available is the resolution set an unresolved
@@ -722,26 +636,16 @@ func checkOrphanAliasUsage(
 // deep inside OPNsense's model validation with `Option [wireguard] not in
 // list.` — the option name, no rule identity, no list of what IS valid, and
 // no hint that the cause is a VPN network that was never realized on this
-// device. GetInterfaceList reads the same option list the model validates
-// against (`GET /firewall/filter/getRule`), so the check is exact rather
-// than an approximation.
-//
-// A failure to read the interface list is NOT treated as a validation
-// failure: the check is a diagnostic that produces a better error message,
-// and losing it must never block a sync that would otherwise succeed. In
-// that case OPNsense's own validation still applies, exactly as before.
-func checkRuleInterfaces(ctx context.Context, client *opnapi.Client, rules []APIRulePayload) []ValidationError {
+// device. interfaces is the rule model's own option list (`GET
+// /firewall/filter/getRule`), the one OPNsense validates against, so the
+// check is exact rather than an approximation.
+func checkRuleInterfaces(rules []APIRulePayload, interfaces []string) []ValidationError {
 	log := logging.Named("SYNC_API")
 
 	if len(rules) == 0 {
 		return nil
 	}
 
-	interfaces, err := client.GetInterfaceList(ctx)
-	if err != nil {
-		log.Warnw("Skipping rule interface pre-flight: failed to list interfaces", "error", err)
-		return nil
-	}
 	if len(interfaces) == 0 {
 		// An empty list means the template shape changed; treating it as
 		// "nothing is valid" would block every rule on the device.
@@ -801,7 +705,7 @@ func checkRuleInterfaces(ctx context.Context, client *opnapi.Client, rules []API
 			Type:       "rule",
 			UUID:       rule.UUID,
 			Name:       rule.Description,
-			ErrorCode:  "INTERFACE_NOT_FOUND",
+			ErrorCode:  codeRuleInterfaceNotFound,
 			Message:    message,
 			References: missing,
 		})
@@ -938,39 +842,22 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		"managed_rules", len(currentRules),
 	)
 
-	// Compute sequences for rules based on position relative to unmanaged rules
-	seqCalc := NewSequenceCalculator(allRules)
-	computedSequences := seqCalc.ComputeSequences(rules)
-
-	// Count rules by position for logging
-	prependCount, appendCount := 0, 0
-	for _, r := range rules {
-		if r.Position == RulePositionAppend {
-			appendCount++
-		} else {
-			prependCount++
-		}
-	}
-
-	log.Infow("Computed rule sequences",
-		"min_unmanaged_seq", seqCalc.MinUnmanaged,
-		"max_unmanaged_seq", seqCalc.MaxUnmanaged,
-		"prepend_rules", prependCount,
-		"append_rules", appendCount,
-	)
-
 	// Build maps of current UUIDs
 	currentAliasUUIDs := make(map[string]bool)
+	currentAliasRows := make(map[string]map[string]interface{})
 	for _, a := range currentAliases {
 		if uuid, ok := a["uuid"].(string); ok {
 			currentAliasUUIDs[uuid] = true
+			currentAliasRows[uuid] = a
 		}
 	}
 
 	currentRuleUUIDs := make(map[string]bool)
+	currentRuleRows := make(map[string]map[string]interface{})
 	for _, r := range currentRules {
 		if uuid, ok := r["uuid"].(string); ok {
 			currentRuleUUIDs[uuid] = true
+			currentRuleRows[uuid] = r
 		}
 	}
 
@@ -1012,10 +899,125 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		}
 	}
 
-	// Phase 1.6: Pre-flight every rule's interface against what the device
-	// actually offers, so a rule naming a missing interface (group) reports
-	// the problem by name instead of OPNsense's bare `Option [x] not in
-	// list.`
+	// Phase 2: Create/Update aliases (before rules, as rules may depend on aliases).
+	// Like a rule, an alias may set any field of the device's alias model,
+	// and is refused alone when its content does not fit the model (see the
+	// rule pre-flight below for why a refusal never fails fast). An alias the
+	// device already holds exactly as desired is not written.
+	release := deviceRelease(ctx, client)
+	if len(aliases) > 0 {
+		writable := aliases
+		aliasModel, err := client.GetAliasModel(ctx)
+		if err != nil {
+			msg := fmt.Sprintf("Cannot write aliases: failed to read this device's alias model: %v", err)
+			log.Warnw("SYNC_API: alias model unavailable; no alias is written this pass", "error", err)
+			results = append(results, SyncAPIItemResult{
+				Type:   "alias_discovery",
+				Name:   "alias_model",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+				Code:   codeAliasModelUnavailable,
+			})
+			errors = append(errors, msg)
+			writable = nil
+		}
+
+		for _, alias := range writable {
+			action := "created"
+			if currentAliasUUIDs[alias.UUID] {
+				action = "updated"
+			}
+
+			body, refusal := buildAliasBody(alias, aliasModel, release)
+			if refusal != nil {
+				log.Warnw("SYNC_API: alias refused before it was written",
+					"uuid", alias.UUID,
+					"name", alias.Name,
+					"code", refusal.Code,
+					"message", refusal.Message,
+				)
+				results = append(results, SyncAPIItemResult{
+					Type:   "alias",
+					UUID:   alias.UUID,
+					Name:   alias.Name,
+					Action: "blocked",
+					Status: "blocked",
+					Error:  refusal.Message,
+					Code:   refusal.Code,
+				})
+				errors = append(errors, refusal.Message)
+				continue
+			}
+
+			// Pre-flight the device-side unique-name constraint, so a collision
+			// reports what is wrong and what to do rather than OPNsense's raw
+			// "An alias with this name already exists."
+			if collision := checkAliasNameCollision(ctx, client, alias); collision != "" {
+				log.Warnw("SYNC_API: alias name collides with an existing object on this device",
+					"uuid", alias.UUID,
+					"name", alias.Name,
+					"message", collision,
+				)
+				results = append(results, SyncAPIItemResult{
+					Type:   "alias",
+					UUID:   alias.UUID,
+					Name:   alias.Name,
+					Action: "blocked",
+					Status: "blocked",
+					Error:  collision,
+				})
+				errors = append(errors, collision)
+				continue
+			}
+
+			if row, exists := currentAliasRows[alias.UUID]; exists && aliasContract.rowMatches(body, row) {
+				results = append(results, SyncAPIItemResult{
+					Type:   "alias",
+					UUID:   alias.UUID,
+					Name:   alias.Name,
+					Action: "unchanged",
+					Status: "success",
+				})
+				continue
+			}
+
+			err := client.SetAlias(ctx, alias.UUID, body)
+
+			itemResult := SyncAPIItemResult{
+				Type:   "alias",
+				UUID:   alias.UUID,
+				Name:   alias.Name,
+				Action: action,
+			}
+
+			refused, isRefusal := validationFailure(err)
+			switch {
+			case err == nil:
+				itemResult.Status = "success"
+			case isRefusal:
+				msg := fmt.Sprintf("%s: %s", aliasLabel(alias), strings.Join(refused.Messages(), "; "))
+				itemResult.Status = "error"
+				itemResult.Error = msg
+				itemResult.Code = codeAliasRejectedByDevice
+				errors = append(errors, msg)
+			default:
+				msg := fmt.Sprintf("%s: %v", aliasLabel(alias), err)
+				itemResult.Status = "error"
+				itemResult.Error = msg
+				errors = append(errors, msg)
+			}
+
+			results = append(results, itemResult)
+		}
+	}
+
+	// Phase 2.5: Pre-flight every desired rule against the device's own rule
+	// model, so a rule OPNsense would refuse, or would silently store wrong,
+	// is reported by name instead: a key the model does not define, a value
+	// of the wrong kind, an option the device does not offer, an interface
+	// (group) that does not exist. The model is read after the aliases are
+	// written because it offers them as overload tables.
 	//
 	// This deliberately does NOT fail fast, unlike the orphan-alias check
 	// above. The two teardown outcomes have to happen in the SAME sync:
@@ -1036,128 +1038,94 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 	// what `success := len(errors) == 0` keys off) — the same shape the
 	// dangerous-snippet gate uses. Everything else in the sync, orphan
 	// deletion included, still runs.
-	interfaceErrors := checkRuleInterfaces(ctx, client, rules)
-
+	//
 	// Offending rules stay OUT of the create/update pass but stay IN the
 	// desired set, so they are not orphan-deleted. Same principle as the
 	// dangerous-snippet gate: the check refuses to write a rule it knows
-	// OPNsense will reject; it does not delete pre-existing device state
-	// that happens to match the same criteria. A rule whose interface group
-	// vanished underneath it is left exactly as it is on the device for the
-	// operator to fix.
-	applyRules := rules
-	if len(interfaceErrors) > 0 {
-		blockedRuleUUIDs := make(map[string]bool, len(interfaceErrors))
-		for _, ve := range interfaceErrors {
-			blockedRuleUUIDs[ve.UUID] = true
-		}
+	// is wrong; it does not delete pre-existing device state. A rule whose
+	// interface group vanished underneath it is left exactly as it is on the
+	// device for the operator to fix.
+	ruleBodies := make(map[string]map[string]string, len(rules))
+	var applyRules []APIRulePayload
+	var ruleModel opnapi.EntityModel
+	if len(rules) > 0 {
+		model, err := client.GetRuleModel(ctx)
+		ruleModel = model
+		if err != nil {
+			// Without the model no body can be built or checked, so no rule
+			// is written this pass; the sweep below still runs.
+			msg := fmt.Sprintf("Cannot write rules: failed to read this device's rule model: %v", err)
+			log.Warnw("SYNC_API: rule model unavailable; no rule is written this pass", "error", err)
+			results = append(results, SyncAPIItemResult{
+				Type:   "rule_discovery",
+				Name:   "rule_model",
+				Action: "discover",
+				Status: "error",
+				Error:  msg,
+				Code:   codeRuleModelUnavailable,
+			})
+			errors = append(errors, msg)
+		} else {
+			var interfaceOptions []string
+			if field, ok := model.Field("interface"); ok {
+				interfaceOptions = field.OptionKeys()
+			}
+			interfaceErrors := map[string]ValidationError{}
+			for _, ve := range checkRuleInterfaces(rules, interfaceOptions) {
+				interfaceErrors[ve.UUID] = ve
+			}
 
-		applyRules = make([]APIRulePayload, 0, len(rules))
-		for _, r := range rules {
-			if !blockedRuleUUIDs[r.UUID] {
-				applyRules = append(applyRules, r)
+			for _, rule := range rules {
+				body, refusal := buildRuleBody(rule, model, release)
+				if refusal == nil {
+					if ve, blocked := interfaceErrors[rule.UUID]; blocked {
+						refusal = &contentRefusal{Code: codeRuleInterfaceNotFound, Message: ve.Message}
+						validationErrors = append(validationErrors, ve)
+					}
+				}
+				if refusal != nil {
+					log.Warnw("SYNC_API: rule refused before it was written",
+						"uuid", rule.UUID,
+						"rule", rule.Description,
+						"code", refusal.Code,
+						"message", refusal.Message,
+					)
+					results = append(results, SyncAPIItemResult{
+						Type:   "rule",
+						UUID:   rule.UUID,
+						Name:   rule.Description,
+						Action: "blocked",
+						Status: "blocked",
+						Error:  refusal.Message,
+						Code:   refusal.Code,
+					})
+					errors = append(errors, refusal.Message)
+					continue
+				}
+				ruleBodies[rule.UUID] = body
+				applyRules = append(applyRules, rule)
 			}
 		}
-
-		for _, ve := range interfaceErrors {
-			log.Warnw("SYNC_API: rule references an interface that does not exist on this device",
-				"uuid", ve.UUID,
-				"rule", ve.Name,
-				"message", ve.Message,
-			)
-			results = append(results, SyncAPIItemResult{
-				Type:   "rule",
-				UUID:   ve.UUID,
-				Name:   ve.Name,
-				Action: "blocked",
-				Status: "blocked",
-				Error:  ve.Message,
-			})
-			errors = append(errors, ve.Message)
-		}
-
-		validationErrors = append(validationErrors, interfaceErrors...)
 	}
 
-	// Phase 2: Create/Update aliases (before rules, as rules may depend on aliases)
-	for _, alias := range aliases {
-		action := "created"
-		if currentAliasUUIDs[alias.UUID] {
-			action = "updated"
+	// Phase 3: Place and write the rules (ruleSync): PREPEND rules before the
+	// local rules of their section and APPEND rules after them, raising local
+	// rules' sequences when the PREPEND rules do not fit below them. applyRules
+	// is `rules` minus anything the pre-flight refused. A rule the device
+	// already holds exactly as desired is not written: every setRule is a
+	// config save and a new /conf/backup revision.
+	// A rule the pre-flight refused keeps its sequence: placement holds it
+	// where it is and places the others around it.
+	held := map[string]bool{}
+	for _, rule := range rules {
+		if _, applied := ruleBodies[rule.UUID]; !applied {
+			held[rule.UUID] = true
 		}
-
-		// Pre-flight the device-side unique-name constraint, so a collision
-		// reports what is wrong and what to do rather than OPNsense's raw
-		// "An alias with this name already exists."
-		if collision := checkAliasNameCollision(ctx, client, alias); collision != "" {
-			log.Warnw("SYNC_API: alias name collides with an existing object on this device",
-				"uuid", alias.UUID,
-				"name", alias.Name,
-				"message", collision,
-			)
-			results = append(results, SyncAPIItemResult{
-				Type:   "alias",
-				UUID:   alias.UUID,
-				Name:   alias.Name,
-				Action: "blocked",
-				Status: "blocked",
-				Error:  collision,
-			})
-			errors = append(errors, collision)
-			continue
-		}
-
-		opnAlias := convertToOPNAlias(alias)
-		err := client.SetAlias(ctx, alias.UUID, opnAlias)
-
-		itemResult := SyncAPIItemResult{
-			Type:   "alias",
-			UUID:   alias.UUID,
-			Name:   alias.Name,
-			Action: action,
-		}
-
-		if err != nil {
-			itemResult.Status = "error"
-			itemResult.Error = err.Error()
-			errors = append(errors, fmt.Sprintf("Alias %s: %v", alias.Name, err))
-		} else {
-			itemResult.Status = "success"
-		}
-
-		results = append(results, itemResult)
 	}
-
-	// Phase 3: Create/Update rules with computed sequences.
-	// applyRules is `rules` minus anything the interface pre-flight blocked.
-	for _, rule := range applyRules {
-		action := "created"
-		if currentRuleUUIDs[rule.UUID] {
-			action = "updated"
-		}
-
-		// Get the computed sequence for this rule
-		computedSeq := computedSequences[rule.UUID]
-		opnRule := convertToOPNRuleWithSequence(rule, computedSeq)
-		err := client.SetRule(ctx, rule.UUID, opnRule)
-
-		itemResult := SyncAPIItemResult{
-			Type:   "rule",
-			UUID:   rule.UUID,
-			Name:   rule.Description,
-			Action: action,
-		}
-
-		if err != nil {
-			itemResult.Status = "error"
-			itemResult.Error = err.Error()
-			errors = append(errors, fmt.Sprintf("Rule %s: %v", rule.Description, err))
-		} else {
-			itemResult.Status = "success"
-		}
-
-		results = append(results, itemResult)
-	}
+	placement := newRuleSync(client, applyRules, ruleBodies, currentRuleUUIDs, held, ruleModel)
+	placement.run(ctx, allRules)
+	results = append(results, placement.results...)
+	errors = append(errors, placement.errors...)
 
 	// Phase 4: Delete rules no longer in desired state (before aliases)
 	for uuid := range currentRuleUUIDs {
@@ -1220,7 +1188,26 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		})
 	}
 
-	if err := client.ApplyRules(ctx); err != nil {
+	if withheld := placement.withheld; len(withheld) > 0 {
+		// A renumber may have re-created a local rule as a pass rule on every
+		// interface: nothing is applied while it may be there.
+		names := make([]string, len(withheld))
+		reasons := make([]string, len(withheld))
+		for i, w := range withheld {
+			names[i], reasons[i] = w.name, w.why
+		}
+		msg := fmt.Sprintf("Firewall rules were not applied this SYNC. %s Check the device, then SYNC again", strings.Join(reasons, " "))
+		log.Errorw("SYNC_API: firewall rules not applied", "local_rules", names)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "rule_apply",
+			Name:   "apply",
+			Action: "skipped",
+			Status: "error",
+			Error:  msg,
+			Code:   codeRuleApplyWithheld,
+		})
+	} else if err := client.ApplyRules(ctx); err != nil {
 		msg := fmt.Sprintf("Rule apply: %v", err)
 		errors = append(errors, msg)
 		results = append(results, SyncAPIItemResult{
@@ -1299,62 +1286,10 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		Message: message,
 		Results: results,
 		Errors:  errors,
-		// Carries any INTERFACE_NOT_FOUND entries from the Phase 1.6
+		// Carries any INTERFACE_NOT_FOUND entries from the Phase 2.5
 		// pre-flight — the sync continued past them (so orphan sweeps ran),
 		// but the structured detail still reaches the task response.
 		ValidationErrors: validationErrors,
-	}
-}
-
-// convertToOPNAlias converts APIAliasPayload to opnapi.Alias.
-func convertToOPNAlias(a APIAliasPayload) opnapi.Alias {
-	enabled := "0"
-	if a.Enabled {
-		enabled = "1"
-	}
-
-	// Build template tags for description
-	desc := a.Description
-	for _, t := range a.Templates {
-		desc += fmt.Sprintf(" [nd-template:%s]", t)
-	}
-
-	return opnapi.Alias{
-		Enabled:     enabled,
-		Name:        a.Name,
-		Type:        a.Type,
-		Content:     strings.Join(a.Content, "\n"),
-		Description: strings.TrimSpace(desc),
-	}
-}
-
-// convertToOPNRuleWithSequence converts APIRulePayload to opnapi.Rule with a computed sequence.
-// The sequence is calculated based on the rule's position (PREPEND/APPEND) and priority.
-func convertToOPNRuleWithSequence(r APIRulePayload, computedSequence int) opnapi.Rule {
-	enabled := "0"
-	if r.Enabled {
-		enabled = "1"
-	}
-
-	// Build template tags for description
-	desc := r.Description
-	for _, t := range r.Templates {
-		desc += fmt.Sprintf(" [nd-template:%s]", t)
-	}
-
-	return opnapi.Rule{
-		Enabled:         enabled,
-		Sequence:        fmt.Sprintf("%d", computedSequence),
-		Action:          r.Action,
-		Interface:       r.Interface,
-		Direction:       r.Direction,
-		IPProtocol:      r.IPProtocol,
-		Protocol:        r.Protocol,
-		SourceNet:       r.SourceNet,
-		SourcePort:      r.SourcePort,
-		DestinationNet:  r.DestinationNet,
-		DestinationPort: r.DestinationPort,
-		Description:     strings.TrimSpace(desc),
 	}
 }
 
@@ -1483,14 +1418,21 @@ func parseAPIAliases(payload map[string]interface{}) ([]APIAliasPayload, error) 
 	return aliases, nil
 }
 
-// parseAliasContent parses the JSON content of an alias snippet.
+// parseAliasContent parses the JSON content of an alias snippet. The uuid, the
+// name and the type are required here; every other key is checked against the
+// device's alias model at SYNC time (buildAliasBody), so a key the device does
+// not define refuses this alias alone rather than the whole payload.
 func parseAliasContent(jsonContent string, templates []string) (APIAliasPayload, error) {
 	var contentMap map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonContent), &contentMap); err != nil {
 		return APIAliasPayload{}, fmt.Errorf("failed to parse alias JSON: %v", err)
 	}
+	if contentMap == nil {
+		return APIAliasPayload{}, fmt.Errorf("alias content must be a JSON object")
+	}
 
 	alias := APIAliasPayload{
+		Content:   contentMap,
 		Templates: templates,
 	}
 
@@ -1500,37 +1442,14 @@ func parseAliasContent(jsonContent string, templates []string) (APIAliasPayload,
 		return APIAliasPayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	alias.Name, _ = contentMap["name"].(string)
+	alias.Name = contentText(contentMap, "name")
 	if alias.Name == "" {
 		return APIAliasPayload{}, fmt.Errorf("missing required field: name")
 	}
 
-	alias.Type, _ = contentMap["type"].(string)
+	alias.Type = contentText(contentMap, "type")
 	if alias.Type == "" {
 		return APIAliasPayload{}, fmt.Errorf("missing required field: type")
-	}
-
-	// Parse enabled - can be bool, string "1"/"0", or number
-	alias.Enabled = parseEnabled(contentMap["enabled"])
-
-	// Parse description
-	alias.Description, _ = contentMap["description"].(string)
-
-	// Parse content - can be string (single value) or already an array
-	switch v := contentMap["content"].(type) {
-	case string:
-		// Single value - split by newlines if present, otherwise single item
-		if strings.Contains(v, "\n") {
-			alias.Content = strings.Split(v, "\n")
-		} else if v != "" {
-			alias.Content = []string{v}
-		}
-	case []interface{}:
-		for _, c := range v {
-			if cs, ok := c.(string); ok {
-				alias.Content = append(alias.Content, cs)
-			}
-		}
 	}
 
 	return alias, nil
@@ -1618,14 +1537,22 @@ func parseAPIRules(payload map[string]interface{}) ([]APIRulePayload, error) {
 
 // parseRuleContent parses the JSON content of a rule snippet.
 // Note: Position and Priority are NOT parsed here - they come from snippet metadata.
-// Sequence is computed dynamically and is not expected in content JSON.
+// A sequence in content is ignored: placement sets it.
+//
+// Only the uuid is required here. Every other key is checked against the
+// device's rule model at SYNC time (buildRuleBody), so a key the device does
+// not define refuses this rule alone rather than the whole payload.
 func parseRuleContent(jsonContent string, templates []string) (APIRulePayload, error) {
 	var contentMap map[string]interface{}
 	if err := json.Unmarshal([]byte(jsonContent), &contentMap); err != nil {
 		return APIRulePayload{}, fmt.Errorf("failed to parse rule JSON: %v", err)
 	}
+	if contentMap == nil {
+		return APIRulePayload{}, fmt.Errorf("rule content must be a JSON object")
+	}
 
 	rule := APIRulePayload{
+		Content:   contentMap,
 		Templates: templates,
 	}
 
@@ -1635,23 +1562,10 @@ func parseRuleContent(jsonContent string, templates []string) (APIRulePayload, e
 		return APIRulePayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	// Parse enabled
-	rule.Enabled = parseEnabled(contentMap["enabled"])
-
-	// Note: sequence field is no longer parsed from content.
-	// It is computed dynamically based on position and priority from snippet metadata.
-
-	// Parse other fields
-	rule.Action, _ = contentMap["action"].(string)
-	rule.Interface, _ = contentMap["interface"].(string)
-	rule.Direction, _ = contentMap["direction"].(string)
-	rule.IPProtocol, _ = contentMap["ipprotocol"].(string)
-	rule.Protocol, _ = contentMap["protocol"].(string)
-	rule.SourceNet, _ = contentMap["source_net"].(string)
-	rule.SourcePort, _ = contentMap["source_port"].(string)
-	rule.DestinationNet, _ = contentMap["destination_net"].(string)
-	rule.DestinationPort, _ = contentMap["destination_port"].(string)
-	rule.Description, _ = contentMap["description"].(string)
+	rule.Description = contentText(contentMap, "description")
+	rule.Interface = contentText(contentMap, "interface")
+	rule.SourceNet = contentText(contentMap, "source_net")
+	rule.DestinationNet = contentText(contentMap, "destination_net")
 
 	return rule, nil
 }
@@ -2493,6 +2407,50 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 // Unbound DNS Parsing Functions
 // ============================================================================
 
+// unboundText reads a text field of UNBOUND content the way every snippet
+// family reads values: a string as it is, a number in decimal ("ttl": 300 is
+// "300"), a list of strings and numbers comma-joined. These used to be dropped
+// without a word. A boolean or an object is no text field's value and is
+// refused, naming the field: "ttl": true read as "1" would apply a TTL of one
+// second. The boolean fields (enabled, addptr, the forward flags) have their
+// own readers.
+func unboundText(content map[string]interface{}, key string) (string, error) {
+	value, problem := opnsenseValue(content[key], false, false)
+	if problem != "" {
+		return "", fmt.Errorf("%s: %s", key, problem)
+	}
+	return value, nil
+}
+
+// unboundBoolean reads a "0"/"1" field of UNBOUND content; the strings "true"
+// and "false" are read as "1" and "0" too.
+func unboundBoolean(content map[string]interface{}, key string) (string, error) {
+	value, problem := opnsenseValue(content[key], true, false)
+	if problem != "" {
+		return "", fmt.Errorf("%s: %s", key, problem)
+	}
+	return value, nil
+}
+
+// unboundField is a text field of UNBOUND content and where it is read to.
+type unboundField struct {
+	key  string
+	dest *string
+}
+
+// unboundTextFields reads text fields into their destinations, in order, so
+// content with two bad values is always refused naming the first.
+func unboundTextFields(content map[string]interface{}, fields []unboundField) error {
+	for _, field := range fields {
+		value, err := unboundText(content, field.key)
+		if err != nil {
+			return err
+		}
+		*field.dest = value
+	}
+	return nil
+}
+
 // parseAPIHostOverrides extracts host overrides from the payload snippets array.
 func parseAPIHostOverrides(payload map[string]interface{}) ([]opnapi.APIHostOverridePayload, error) {
 	snippetsRaw, ok := payload["snippets"]
@@ -2564,12 +2522,23 @@ func parseHostOverrideContent(jsonContent string, templates []string) (opnapi.AP
 		return opnapi.APIHostOverridePayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	override.Hostname, _ = contentMap["hostname"].(string)
+	err := unboundTextFields(contentMap, []unboundField{
+		{"hostname", &override.Hostname},
+		{"domain", &override.Domain},
+		{"rr", &override.RR},
+		{"server", &override.Server},
+		{"mxprio", &override.MXPrio},
+		{"mx", &override.MX},
+		{"ttl", &override.TTL},
+		{"txtdata", &override.TXTData},
+		{"description", &override.Description},
+	})
+	if err != nil {
+		return opnapi.APIHostOverridePayload{}, err
+	}
 	if override.Hostname == "" {
 		return opnapi.APIHostOverridePayload{}, fmt.Errorf("missing required field: hostname")
 	}
-
-	override.Domain, _ = contentMap["domain"].(string)
 	if override.Domain == "" {
 		return opnapi.APIHostOverridePayload{}, fmt.Errorf("missing required field: domain")
 	}
@@ -2577,17 +2546,12 @@ func parseHostOverrideContent(jsonContent string, templates []string) (opnapi.AP
 	// Parse enabled
 	override.Enabled = parseEnabled(contentMap["enabled"])
 
-	// Optional fields
-	override.RR, _ = contentMap["rr"].(string)
 	if override.RR == "" {
 		override.RR = "A" // Default to A record
 	}
-	override.Server, _ = contentMap["server"].(string)
-	override.MXPrio, _ = contentMap["mxprio"].(string)
-	override.MX, _ = contentMap["mx"].(string)
-	override.TTL, _ = contentMap["ttl"].(string)
-	override.TXTData, _ = contentMap["txtdata"].(string)
-	override.Description, _ = contentMap["description"].(string)
+	if override.AddPTR, err = unboundBoolean(contentMap, "addptr"); err != nil {
+		return opnapi.APIHostOverridePayload{}, err
+	}
 
 	return override, nil
 }
@@ -2663,12 +2627,20 @@ func parseDomainForwardContent(jsonContent string, templates []string) (opnapi.A
 		return opnapi.APIDomainForwardPayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	forward.Domain, _ = contentMap["domain"].(string)
+	err := unboundTextFields(contentMap, []unboundField{
+		{"domain", &forward.Domain},
+		{"server", &forward.Server},
+		{"type", &forward.Type},
+		{"port", &forward.Port},
+		{"verify", &forward.Verify},
+		{"description", &forward.Description},
+	})
+	if err != nil {
+		return opnapi.APIDomainForwardPayload{}, err
+	}
 	if forward.Domain == "" {
 		return opnapi.APIDomainForwardPayload{}, fmt.Errorf("missing required field: domain")
 	}
-
-	forward.Server, _ = contentMap["server"].(string)
 	if forward.Server == "" {
 		return opnapi.APIDomainForwardPayload{}, fmt.Errorf("missing required field: server")
 	}
@@ -2676,16 +2648,11 @@ func parseDomainForwardContent(jsonContent string, templates []string) (opnapi.A
 	// Parse enabled
 	forward.Enabled = parseEnabled(contentMap["enabled"])
 
-	// Optional fields
-	forward.Type, _ = contentMap["type"].(string)
 	if forward.Type == "" {
 		forward.Type = "forward" // Default to standard forwarding
 	}
-	forward.Port, _ = contentMap["port"].(string)
-	forward.Verify, _ = contentMap["verify"].(string)
 	forward.ForwardTCPUpstream = parseBoolField(contentMap["forward_tcp_upstream"])
 	forward.ForwardFirst = parseBoolField(contentMap["forward_first"])
-	forward.Description, _ = contentMap["description"].(string)
 
 	return forward, nil
 }
@@ -2761,25 +2728,26 @@ func parseHostAliasContent(jsonContent string, templates []string) (opnapi.APIHo
 		return opnapi.APIHostAliasPayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	alias.Hostname, _ = contentMap["hostname"].(string)
+	// The parent is referenced by hostname and domain, for portability.
+	err := unboundTextFields(contentMap, []unboundField{
+		{"hostname", &alias.Hostname},
+		{"domain", &alias.Domain},
+		{"parent_hostname", &alias.ParentHostname},
+		{"parent_domain", &alias.ParentDomain},
+		{"description", &alias.Description},
+	})
+	if err != nil {
+		return opnapi.APIHostAliasPayload{}, err
+	}
 	if alias.Hostname == "" {
 		return opnapi.APIHostAliasPayload{}, fmt.Errorf("missing required field: hostname")
 	}
-
-	alias.Domain, _ = contentMap["domain"].(string)
 	if alias.Domain == "" {
 		return opnapi.APIHostAliasPayload{}, fmt.Errorf("missing required field: domain")
 	}
 
-	// Parent reference (for portability)
-	alias.ParentHostname, _ = contentMap["parent_hostname"].(string)
-	alias.ParentDomain, _ = contentMap["parent_domain"].(string)
-
 	// Parse enabled
 	alias.Enabled = parseEnabled(contentMap["enabled"])
-
-	// Optional fields
-	alias.Description, _ = contentMap["description"].(string)
 
 	return alias, nil
 }
@@ -2855,12 +2823,19 @@ func parseUnboundACLContent(jsonContent string, templates []string) (opnapi.APIU
 		return opnapi.APIUnboundACLPayload{}, fmt.Errorf("missing required field: uuid")
 	}
 
-	acl.Name, _ = contentMap["name"].(string)
+	var networks string
+	err := unboundTextFields(contentMap, []unboundField{
+		{"name", &acl.Name},
+		{"action", &acl.Action},
+		{"networks", &networks},
+		{"description", &acl.Description},
+	})
+	if err != nil {
+		return opnapi.APIUnboundACLPayload{}, err
+	}
 	if acl.Name == "" {
 		return opnapi.APIUnboundACLPayload{}, fmt.Errorf("missing required field: name")
 	}
-
-	acl.Action, _ = contentMap["action"].(string)
 	if acl.Action == "" {
 		return opnapi.APIUnboundACLPayload{}, fmt.Errorf("missing required field: action")
 	}
@@ -2868,25 +2843,13 @@ func parseUnboundACLContent(jsonContent string, templates []string) (opnapi.APIU
 	// Parse enabled
 	acl.Enabled = parseEnabled(contentMap["enabled"])
 
-	// Parse networks - can be string (CSV) or array
-	switch v := contentMap["networks"].(type) {
-	case string:
-		if v != "" {
-			acl.Networks = strings.Split(v, ",")
-			for i := range acl.Networks {
-				acl.Networks[i] = strings.TrimSpace(acl.Networks[i])
-			}
-		}
-	case []interface{}:
-		for _, n := range v {
-			if ns, ok := n.(string); ok {
-				acl.Networks = append(acl.Networks, ns)
-			}
+	// Networks may be a comma-separated string or a list.
+	if networks != "" {
+		acl.Networks = strings.Split(networks, ",")
+		for i := range acl.Networks {
+			acl.Networks[i] = strings.TrimSpace(acl.Networks[i])
 		}
 	}
-
-	// Optional fields
-	acl.Description, _ = contentMap["description"].(string)
 
 	return acl, nil
 }

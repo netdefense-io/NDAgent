@@ -1,0 +1,2303 @@
+{
+  "rule": {
+    "enabled": "1",
+    "statetype": {
+      "keep": {
+        "value": "keep state",
+        "selected": 1
+      },
+      "sloppy": {
+        "value": "sloppy state",
+        "selected": 0
+      },
+      "modulate": {
+        "value": "modulate state",
+        "selected": 0
+      },
+      "synproxy": {
+        "value": "synproxy state",
+        "selected": 0
+      },
+      "none": {
+        "value": "no state",
+        "selected": 0
+      }
+    },
+    "state-policy": {
+      "": {
+        "value": "default",
+        "selected": 1
+      },
+      "if-bound": {
+        "value": "Bind states to interface",
+        "selected": 0
+      },
+      "floating": {
+        "value": "Floating states",
+        "selected": 0
+      }
+    },
+    "sequence": "200",
+    "sort_order": "",
+    "prio_group": "",
+    "action": {
+      "pass": {
+        "value": "Pass",
+        "selected": 1
+      },
+      "block": {
+        "value": "Block",
+        "selected": 0
+      },
+      "reject": {
+        "value": "Reject",
+        "selected": 0
+      }
+    },
+    "quick": "1",
+    "interfacenot": "0",
+    "interface": {
+      "lan": {
+        "value": "LAN",
+        "selected": 0
+      },
+      "wan": {
+        "value": "WAN",
+        "selected": 0
+      },
+      "wireguard": {
+        "value": "WireGuard (Group)",
+        "selected": 0
+      }
+    },
+    "direction": {
+      "in": {
+        "value": "In",
+        "selected": 1
+      },
+      "out": {
+        "value": "Out",
+        "selected": 0
+      },
+      "any": {
+        "value": "Both",
+        "selected": 0
+      }
+    },
+    "ipprotocol": {
+      "inet": {
+        "value": "IPv4",
+        "selected": 1
+      },
+      "inet6": {
+        "value": "IPv6",
+        "selected": 0
+      },
+      "inet46": {
+        "value": "any",
+        "selected": 0
+      }
+    },
+    "protocol": {
+      "any": {
+        "value": "any",
+        "selected": 1
+      },
+      "TCP": {
+        "value": "TCP",
+        "selected": 0
+      },
+      "UDP": {
+        "value": "UDP",
+        "selected": 0
+      },
+      "TCP/UDP": {
+        "value": "TCP/UDP",
+        "selected": 0
+      },
+      "ICMP": {
+        "value": "ICMP",
+        "selected": 0
+      },
+      "ESP": {
+        "value": "ESP",
+        "selected": 0
+      },
+      "AH": {
+        "value": "AH",
+        "selected": 0
+      },
+      "GRE": {
+        "value": "GRE",
+        "selected": 0
+      },
+      "IGMP": {
+        "value": "IGMP",
+        "selected": 0
+      },
+      "PIM": {
+        "value": "PIM",
+        "selected": 0
+      },
+      "OSPF": {
+        "value": "OSPF",
+        "selected": 0
+      },
+      "3PC": {
+        "value": "3PC",
+        "selected": 0
+      },
+      "A/N": {
+        "value": "A/N",
+        "selected": 0
+      },
+      "ARGUS": {
+        "value": "ARGUS",
+        "selected": 0
+      },
+      "ARIS": {
+        "value": "ARIS",
+        "selected": 0
+      },
+      "AX.25": {
+        "value": "AX.25",
+        "selected": 0
+      },
+      "BBN-RCC": {
+        "value": "BBN-RCC",
+        "selected": 0
+      },
+      "BNA": {
+        "value": "BNA",
+        "selected": 0
+      },
+      "BR-SAT-MON": {
+        "value": "BR-SAT-MON",
+        "selected": 0
+      },
+      "CARP": {
+        "value": "CARP",
+        "selected": 0
+      },
+      "CBT": {
+        "value": "CBT",
+        "selected": 0
+      },
+      "CFTP": {
+        "value": "CFTP",
+        "selected": 0
+      },
+      "CHAOS": {
+        "value": "CHAOS",
+        "selected": 0
+      },
+      "COMPAQ-PEER": {
+        "value": "COMPAQ-PEER",
+        "selected": 0
+      },
+      "CPHB": {
+        "value": "CPHB",
+        "selected": 0
+      },
+      "CPNX": {
+        "value": "CPNX",
+        "selected": 0
+      },
+      "CRTP": {
+        "value": "CRTP",
+        "selected": 0
+      },
+      "CRUDP": {
+        "value": "CRUDP",
+        "selected": 0
+      },
+      "DCCP": {
+        "value": "DCCP",
+        "selected": 0
+      },
+      "DCN": {
+        "value": "DCN",
+        "selected": 0
+      },
+      "DDP": {
+        "value": "DDP",
+        "selected": 0
+      },
+      "DDX": {
+        "value": "DDX",
+        "selected": 0
+      },
+      "DGP": {
+        "value": "DGP",
+        "selected": 0
+      },
+      "DIVERT": {
+        "value": "DIVERT",
+        "selected": 0
+      },
+      "DSR": {
+        "value": "DSR",
+        "selected": 0
+      },
+      "EGP": {
+        "value": "EGP",
+        "selected": 0
+      },
+      "EIGRP": {
+        "value": "EIGRP",
+        "selected": 0
+      },
+      "EMCON": {
+        "value": "EMCON",
+        "selected": 0
+      },
+      "ENCAP": {
+        "value": "ENCAP",
+        "selected": 0
+      },
+      "ETHERIP": {
+        "value": "ETHERIP",
+        "selected": 0
+      },
+      "FC": {
+        "value": "FC",
+        "selected": 0
+      },
+      "GGP": {
+        "value": "GGP",
+        "selected": 0
+      },
+      "GMTP": {
+        "value": "GMTP",
+        "selected": 0
+      },
+      "HIP": {
+        "value": "HIP",
+        "selected": 0
+      },
+      "HMP": {
+        "value": "HMP",
+        "selected": 0
+      },
+      "I-NLSP": {
+        "value": "I-NLSP",
+        "selected": 0
+      },
+      "IATP": {
+        "value": "IATP",
+        "selected": 0
+      },
+      "IDPR": {
+        "value": "IDPR",
+        "selected": 0
+      },
+      "IDPR-CMTP": {
+        "value": "IDPR-CMTP",
+        "selected": 0
+      },
+      "IDRP": {
+        "value": "IDRP",
+        "selected": 0
+      },
+      "IFMP": {
+        "value": "IFMP",
+        "selected": 0
+      },
+      "IGP": {
+        "value": "IGP",
+        "selected": 0
+      },
+      "IL": {
+        "value": "IL",
+        "selected": 0
+      },
+      "IPCOMP": {
+        "value": "IPCOMP",
+        "selected": 0
+      },
+      "IPCV": {
+        "value": "IPCV",
+        "selected": 0
+      },
+      "IPENCAP": {
+        "value": "IPENCAP",
+        "selected": 0
+      },
+      "IPIP": {
+        "value": "IPIP",
+        "selected": 0
+      },
+      "IPPC": {
+        "value": "IPPC",
+        "selected": 0
+      },
+      "IPV6": {
+        "value": "IPV6",
+        "selected": 0
+      },
+      "IPV6-ICMP": {
+        "value": "IPV6-ICMP",
+        "selected": 0
+      },
+      "IPX-IN-IP": {
+        "value": "IPX-IN-IP",
+        "selected": 0
+      },
+      "IRTP": {
+        "value": "IRTP",
+        "selected": 0
+      },
+      "ISIS": {
+        "value": "ISIS",
+        "selected": 0
+      },
+      "ISO-IP": {
+        "value": "ISO-IP",
+        "selected": 0
+      },
+      "ISO-TP4": {
+        "value": "ISO-TP4",
+        "selected": 0
+      },
+      "KRYPTOLAN": {
+        "value": "KRYPTOLAN",
+        "selected": 0
+      },
+      "L2TP": {
+        "value": "L2TP",
+        "selected": 0
+      },
+      "LARP": {
+        "value": "LARP",
+        "selected": 0
+      },
+      "LEAF-1": {
+        "value": "LEAF-1",
+        "selected": 0
+      },
+      "LEAF-2": {
+        "value": "LEAF-2",
+        "selected": 0
+      },
+      "MANET": {
+        "value": "MANET",
+        "selected": 0
+      },
+      "MERIT-INP": {
+        "value": "MERIT-INP",
+        "selected": 0
+      },
+      "MFE-NSP": {
+        "value": "MFE-NSP",
+        "selected": 0
+      },
+      "MICP": {
+        "value": "MICP",
+        "selected": 0
+      },
+      "MOBILE": {
+        "value": "MOBILE",
+        "selected": 0
+      },
+      "MPLS-IN-IP": {
+        "value": "MPLS-IN-IP",
+        "selected": 0
+      },
+      "MTP": {
+        "value": "MTP",
+        "selected": 0
+      },
+      "MUX": {
+        "value": "MUX",
+        "selected": 0
+      },
+      "NARP": {
+        "value": "NARP",
+        "selected": 0
+      },
+      "NETBLT": {
+        "value": "NETBLT",
+        "selected": 0
+      },
+      "NSFNET-IGP": {
+        "value": "NSFNET-IGP",
+        "selected": 0
+      },
+      "NVP": {
+        "value": "NVP",
+        "selected": 0
+      },
+      "PFSYNC": {
+        "value": "PFSYNC",
+        "selected": 0
+      },
+      "PGM": {
+        "value": "PGM",
+        "selected": 0
+      },
+      "PIPE": {
+        "value": "PIPE",
+        "selected": 0
+      },
+      "PNNI": {
+        "value": "PNNI",
+        "selected": 0
+      },
+      "PRM": {
+        "value": "PRM",
+        "selected": 0
+      },
+      "PTP": {
+        "value": "PTP",
+        "selected": 0
+      },
+      "PUP": {
+        "value": "PUP",
+        "selected": 0
+      },
+      "PVP": {
+        "value": "PVP",
+        "selected": 0
+      },
+      "QNX": {
+        "value": "QNX",
+        "selected": 0
+      },
+      "RDP": {
+        "value": "RDP",
+        "selected": 0
+      },
+      "ROHC": {
+        "value": "ROHC",
+        "selected": 0
+      },
+      "RSVP": {
+        "value": "RSVP",
+        "selected": 0
+      },
+      "RSVP-E2E-IGNORE": {
+        "value": "RSVP-E2E-IGNORE",
+        "selected": 0
+      },
+      "RVD": {
+        "value": "RVD",
+        "selected": 0
+      },
+      "SAT-EXPAK": {
+        "value": "SAT-EXPAK",
+        "selected": 0
+      },
+      "SAT-MON": {
+        "value": "SAT-MON",
+        "selected": 0
+      },
+      "SCC-SP": {
+        "value": "SCC-SP",
+        "selected": 0
+      },
+      "SCPS": {
+        "value": "SCPS",
+        "selected": 0
+      },
+      "SCTP": {
+        "value": "SCTP",
+        "selected": 0
+      },
+      "SDRP": {
+        "value": "SDRP",
+        "selected": 0
+      },
+      "SECURE-VMTP": {
+        "value": "SECURE-VMTP",
+        "selected": 0
+      },
+      "SHIM6": {
+        "value": "SHIM6",
+        "selected": 0
+      },
+      "SKIP": {
+        "value": "SKIP",
+        "selected": 0
+      },
+      "SM": {
+        "value": "SM",
+        "selected": 0
+      },
+      "SMP": {
+        "value": "SMP",
+        "selected": 0
+      },
+      "SNP": {
+        "value": "SNP",
+        "selected": 0
+      },
+      "SPRITE-RPC": {
+        "value": "SPRITE-RPC",
+        "selected": 0
+      },
+      "SPS": {
+        "value": "SPS",
+        "selected": 0
+      },
+      "SRP": {
+        "value": "SRP",
+        "selected": 0
+      },
+      "ST2": {
+        "value": "ST2",
+        "selected": 0
+      },
+      "STP": {
+        "value": "STP",
+        "selected": 0
+      },
+      "SUN-ND": {
+        "value": "SUN-ND",
+        "selected": 0
+      },
+      "SWIPE": {
+        "value": "SWIPE",
+        "selected": 0
+      },
+      "TCF": {
+        "value": "TCF",
+        "selected": 0
+      },
+      "TLSP": {
+        "value": "TLSP",
+        "selected": 0
+      },
+      "TP++": {
+        "value": "TP++",
+        "selected": 0
+      },
+      "TRUNK-1": {
+        "value": "TRUNK-1",
+        "selected": 0
+      },
+      "TRUNK-2": {
+        "value": "TRUNK-2",
+        "selected": 0
+      },
+      "TTP": {
+        "value": "TTP",
+        "selected": 0
+      },
+      "UDPLITE": {
+        "value": "UDPLITE",
+        "selected": 0
+      },
+      "UTI": {
+        "value": "UTI",
+        "selected": 0
+      },
+      "VINES": {
+        "value": "VINES",
+        "selected": 0
+      },
+      "VISA": {
+        "value": "VISA",
+        "selected": 0
+      },
+      "VMTP": {
+        "value": "VMTP",
+        "selected": 0
+      },
+      "WB-EXPAK": {
+        "value": "WB-EXPAK",
+        "selected": 0
+      },
+      "WB-MON": {
+        "value": "WB-MON",
+        "selected": 0
+      },
+      "WESP": {
+        "value": "WESP",
+        "selected": 0
+      },
+      "WSN": {
+        "value": "WSN",
+        "selected": 0
+      },
+      "XNET": {
+        "value": "XNET",
+        "selected": 0
+      },
+      "XNS-IDP": {
+        "value": "XNS-IDP",
+        "selected": 0
+      },
+      "XTP": {
+        "value": "XTP",
+        "selected": 0
+      }
+    },
+    "icmptype": {
+      "echoreq": {
+        "value": "Echo Request",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "echorep": {
+        "value": "Echo Reply",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "unreach": {
+        "value": "Destination Unreachable",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "redir": {
+        "value": "Redirect",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "routeradv": {
+        "value": "Router Advertisement",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "routersol": {
+        "value": "Router Solicitation",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "timex": {
+        "value": "Time Exceeded",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "paramprob": {
+        "value": "Parameter Problem",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "timereq": {
+        "value": "Timestamp",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "timerep": {
+        "value": "Timestamp Reply",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "photuris": {
+        "value": "Photuris",
+        "optgroup": "Common",
+        "selected": 0
+      },
+      "squench": {
+        "value": "Source Quench",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "althost": {
+        "value": "Alternate Host Address",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "inforeq": {
+        "value": "Information Request",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "inforep": {
+        "value": "Information Reply",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "maskreq": {
+        "value": "Address Mask Request",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "maskrep": {
+        "value": "Address Mask Reply",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "trace": {
+        "value": "Traceroute",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "dataconv": {
+        "value": "Data conversion problem",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "mobredir": {
+        "value": "Mobile host redirection",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "ipv6-where": {
+        "value": "IPv6 where-are-you",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "ipv6-here": {
+        "value": "IPv6 i-am-here",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "mobregreq": {
+        "value": "Mobile registration request",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "mobregrep": {
+        "value": "Mobile registration reply",
+        "optgroup": "Deprecated",
+        "selected": 0
+      },
+      "skip": {
+        "value": "SKIP",
+        "optgroup": "Deprecated",
+        "selected": 0
+      }
+    },
+    "icmp6type": {
+      "1": {
+        "value": "Destination unreachable",
+        "selected": 0
+      },
+      "2": {
+        "value": "Packet too big",
+        "selected": 0
+      },
+      "3": {
+        "value": "Time exceeded",
+        "selected": 0
+      },
+      "4": {
+        "value": "Invalid IPv6 header",
+        "selected": 0
+      },
+      "128": {
+        "value": "Echo service request",
+        "selected": 0
+      },
+      "129": {
+        "value": "Echo service reply",
+        "selected": 0
+      },
+      "130": {
+        "value": "Multicast Listener Query",
+        "selected": 0
+      },
+      "131": {
+        "value": "Multicast listener report",
+        "selected": 0
+      },
+      "132": {
+        "value": "Multicast listener done",
+        "selected": 0
+      },
+      "133": {
+        "value": "Router solicitation",
+        "selected": 0
+      },
+      "134": {
+        "value": "Router advertisement",
+        "selected": 0
+      },
+      "135": {
+        "value": "Neighbor solicitation",
+        "selected": 0
+      },
+      "136": {
+        "value": "Neighbor advertisement",
+        "selected": 0
+      },
+      "137": {
+        "value": "Shorter route exists",
+        "selected": 0
+      },
+      "138": {
+        "value": "Route renumbering",
+        "selected": 0
+      },
+      "139": {
+        "value": "ICMP Node Information Query",
+        "selected": 0
+      },
+      "140": {
+        "value": "Node information reply",
+        "selected": 0
+      },
+      "200": {
+        "value": "mtrace response",
+        "selected": 0
+      },
+      "201": {
+        "value": "mtrace messages",
+        "selected": 0
+      }
+    },
+    "source_net": "any",
+    "source_not": "0",
+    "source_port": "",
+    "destination_net": "any",
+    "destination_not": "0",
+    "destination_port": "",
+    "divert-to": {
+      "": {
+        "value": "None",
+        "selected": 1
+      },
+      "8000": {
+        "value": "Intrusion Detection",
+        "selected": 0
+      }
+    },
+    "gateway": {
+      "": {
+        "value": "None",
+        "selected": 1
+      },
+      "Null4": {
+        "value": "Null4 - 127.0.0.1",
+        "selected": 0
+      },
+      "Null6": {
+        "value": "Null6 - ::1",
+        "selected": 0
+      },
+      "WAN_DHCP": {
+        "value": "WAN_DHCP - 192.0.2.1",
+        "selected": 0
+      },
+      "WAN_DHCP6": {
+        "value": "WAN_DHCP6 - inet6",
+        "selected": 0
+      }
+    },
+    "replyto": {
+      "": {
+        "value": "None",
+        "selected": 1
+      },
+      "Null4": {
+        "value": "Null4 - 127.0.0.1",
+        "selected": 0
+      },
+      "Null6": {
+        "value": "Null6 - ::1",
+        "selected": 0
+      },
+      "WAN_DHCP": {
+        "value": "WAN_DHCP - 192.0.2.1",
+        "selected": 0
+      },
+      "WAN_DHCP6": {
+        "value": "WAN_DHCP6 - inet6",
+        "selected": 0
+      }
+    },
+    "disablereplyto": "0",
+    "log": "0",
+    "allowopts": "0",
+    "nosync": "0",
+    "nopfsync": "0",
+    "statetimeout": "",
+    "udp-first": "",
+    "udp-multiple": "",
+    "udp-single": "",
+    "max-src-nodes": "",
+    "max-src-states": "",
+    "max-src-conn": "",
+    "max": "",
+    "max-src-conn-rate": "",
+    "max-src-conn-rates": "",
+    "overload": {
+      "": {
+        "value": "None",
+        "selected": 1
+      },
+      "bogons": {
+        "value": "bogons",
+        "selected": 0
+      },
+      "bogonsv6": {
+        "value": "bogonsv6",
+        "selected": 0
+      },
+      "221f3268-0000-4000-8000-00000000a001": {
+        "value": "SOC_Hosts",
+        "selected": 0
+      },
+      "sshlockout": {
+        "value": "sshlockout",
+        "selected": 0
+      },
+      "virusprot": {
+        "value": "virusprot",
+        "selected": 0
+      },
+      "__lan_network": {
+        "value": "__lan_network",
+        "selected": 0
+      },
+      "__lo0_network": {
+        "value": "__lo0_network",
+        "selected": 0
+      },
+      "__wan_network": {
+        "value": "__wan_network",
+        "selected": 0
+      },
+      "__wireguard_network": {
+        "value": "__wireguard_network",
+        "selected": 0
+      }
+    },
+    "adaptivestart": "",
+    "adaptiveend": "",
+    "prio": {
+      "": {
+        "value": "Any priority",
+        "selected": 1
+      },
+      "1": {
+        "value": "Background (1, lowest)",
+        "selected": 0
+      },
+      "0": {
+        "value": "Best Effort (0, default)",
+        "selected": 0
+      },
+      "2": {
+        "value": "Excellent Effort (2)",
+        "selected": 0
+      },
+      "3": {
+        "value": "Critical Applications (3)",
+        "selected": 0
+      },
+      "4": {
+        "value": "Video (4)",
+        "selected": 0
+      },
+      "5": {
+        "value": "Voice (5)",
+        "selected": 0
+      },
+      "6": {
+        "value": "Internetwork Control (6)",
+        "selected": 0
+      },
+      "7": {
+        "value": "Network Control (7, highest)",
+        "selected": 0
+      }
+    },
+    "set-prio": {
+      "": {
+        "value": "Keep current priority",
+        "selected": 1
+      },
+      "1": {
+        "value": "Background (1, lowest)",
+        "selected": 0
+      },
+      "0": {
+        "value": "Best Effort (0, default)",
+        "selected": 0
+      },
+      "2": {
+        "value": "Excellent Effort (2)",
+        "selected": 0
+      },
+      "3": {
+        "value": "Critical Applications (3)",
+        "selected": 0
+      },
+      "4": {
+        "value": "Video (4)",
+        "selected": 0
+      },
+      "5": {
+        "value": "Voice (5)",
+        "selected": 0
+      },
+      "6": {
+        "value": "Internetwork Control (6)",
+        "selected": 0
+      },
+      "7": {
+        "value": "Network Control (7, highest)",
+        "selected": 0
+      }
+    },
+    "set-prio-low": {
+      "": {
+        "value": "Keep current priority",
+        "selected": 1
+      },
+      "1": {
+        "value": "Background (1, lowest)",
+        "selected": 0
+      },
+      "0": {
+        "value": "Best Effort (0, default)",
+        "selected": 0
+      },
+      "2": {
+        "value": "Excellent Effort (2)",
+        "selected": 0
+      },
+      "3": {
+        "value": "Critical Applications (3)",
+        "selected": 0
+      },
+      "4": {
+        "value": "Video (4)",
+        "selected": 0
+      },
+      "5": {
+        "value": "Voice (5)",
+        "selected": 0
+      },
+      "6": {
+        "value": "Internetwork Control (6)",
+        "selected": 0
+      },
+      "7": {
+        "value": "Network Control (7, highest)",
+        "selected": 0
+      }
+    },
+    "tag": "",
+    "tagged": "",
+    "tcpflags1": {
+      "syn": {
+        "value": "syn",
+        "selected": 0
+      },
+      "ack": {
+        "value": "ack",
+        "selected": 0
+      },
+      "fin": {
+        "value": "fin",
+        "selected": 0
+      },
+      "rst": {
+        "value": "rst",
+        "selected": 0
+      },
+      "psh": {
+        "value": "psh",
+        "selected": 0
+      },
+      "urg": {
+        "value": "urg",
+        "selected": 0
+      },
+      "ece": {
+        "value": "ece",
+        "selected": 0
+      },
+      "cwr": {
+        "value": "cwr",
+        "selected": 0
+      }
+    },
+    "tcpflags2": {
+      "syn": {
+        "value": "syn",
+        "selected": 0
+      },
+      "ack": {
+        "value": "ack",
+        "selected": 0
+      },
+      "fin": {
+        "value": "fin",
+        "selected": 0
+      },
+      "rst": {
+        "value": "rst",
+        "selected": 0
+      },
+      "psh": {
+        "value": "psh",
+        "selected": 0
+      },
+      "urg": {
+        "value": "urg",
+        "selected": 0
+      },
+      "ece": {
+        "value": "ece",
+        "selected": 0
+      },
+      "cwr": {
+        "value": "cwr",
+        "selected": 0
+      }
+    },
+    "tcpflags_any": "0",
+    "categories": [],
+    "sched": {
+      "": {
+        "value": "None",
+        "selected": 1
+      }
+    },
+    "tos": {
+      "": {
+        "value": "Any",
+        "selected": 1
+      },
+      "lowdelay": {
+        "value": "lowdelay",
+        "selected": 0
+      },
+      "critical": {
+        "value": "critical",
+        "selected": 0
+      },
+      "inetcontrol": {
+        "value": "inetcontrol",
+        "selected": 0
+      },
+      "netcontrol": {
+        "value": "netcontrol",
+        "selected": 0
+      },
+      "throughput": {
+        "value": "throughput",
+        "selected": 0
+      },
+      "reliability": {
+        "value": "reliability",
+        "selected": 0
+      },
+      "ef": {
+        "value": "EF",
+        "selected": 0
+      },
+      "af11": {
+        "value": "AF11",
+        "selected": 0
+      },
+      "af12": {
+        "value": "AF12",
+        "selected": 0
+      },
+      "af13": {
+        "value": "AF13",
+        "selected": 0
+      },
+      "af21": {
+        "value": "AF21",
+        "selected": 0
+      },
+      "af22": {
+        "value": "AF22",
+        "selected": 0
+      },
+      "af23": {
+        "value": "AF23",
+        "selected": 0
+      },
+      "af31": {
+        "value": "AF31",
+        "selected": 0
+      },
+      "af32": {
+        "value": "AF32",
+        "selected": 0
+      },
+      "af33": {
+        "value": "AF33",
+        "selected": 0
+      },
+      "af41": {
+        "value": "AF41",
+        "selected": 0
+      },
+      "af42": {
+        "value": "AF42",
+        "selected": 0
+      },
+      "af43": {
+        "value": "AF43",
+        "selected": 0
+      },
+      "cs0": {
+        "value": "CS0",
+        "selected": 0
+      },
+      "cs1": {
+        "value": "CS1",
+        "selected": 0
+      },
+      "cs2": {
+        "value": "CS2",
+        "selected": 0
+      },
+      "cs3": {
+        "value": "CS3",
+        "selected": 0
+      },
+      "cs4": {
+        "value": "CS4",
+        "selected": 0
+      },
+      "cs5": {
+        "value": "CS5",
+        "selected": 0
+      },
+      "cs6": {
+        "value": "CS6",
+        "selected": 0
+      },
+      "cs7": {
+        "value": "CS7",
+        "selected": 0
+      },
+      "0x0": {
+        "value": "0x00",
+        "selected": 0
+      },
+      "0x1": {
+        "value": "0x01",
+        "selected": 0
+      },
+      "0x2": {
+        "value": "0x02",
+        "selected": 0
+      },
+      "0x3": {
+        "value": "0x03",
+        "selected": 0
+      },
+      "0x4": {
+        "value": "0x04",
+        "selected": 0
+      },
+      "0x5": {
+        "value": "0x05",
+        "selected": 0
+      },
+      "0x6": {
+        "value": "0x06",
+        "selected": 0
+      },
+      "0x7": {
+        "value": "0x07",
+        "selected": 0
+      },
+      "0x8": {
+        "value": "0x08",
+        "selected": 0
+      },
+      "0x9": {
+        "value": "0x09",
+        "selected": 0
+      },
+      "0xa": {
+        "value": "0x0A",
+        "selected": 0
+      },
+      "0xb": {
+        "value": "0x0B",
+        "selected": 0
+      },
+      "0xc": {
+        "value": "0x0C",
+        "selected": 0
+      },
+      "0xd": {
+        "value": "0x0D",
+        "selected": 0
+      },
+      "0xe": {
+        "value": "0x0E",
+        "selected": 0
+      },
+      "0xf": {
+        "value": "0x0F",
+        "selected": 0
+      },
+      "0x10": {
+        "value": "0x10",
+        "selected": 0
+      },
+      "0x11": {
+        "value": "0x11",
+        "selected": 0
+      },
+      "0x12": {
+        "value": "0x12",
+        "selected": 0
+      },
+      "0x13": {
+        "value": "0x13",
+        "selected": 0
+      },
+      "0x14": {
+        "value": "0x14",
+        "selected": 0
+      },
+      "0x15": {
+        "value": "0x15",
+        "selected": 0
+      },
+      "0x16": {
+        "value": "0x16",
+        "selected": 0
+      },
+      "0x17": {
+        "value": "0x17",
+        "selected": 0
+      },
+      "0x18": {
+        "value": "0x18",
+        "selected": 0
+      },
+      "0x19": {
+        "value": "0x19",
+        "selected": 0
+      },
+      "0x1a": {
+        "value": "0x1A",
+        "selected": 0
+      },
+      "0x1b": {
+        "value": "0x1B",
+        "selected": 0
+      },
+      "0x1c": {
+        "value": "0x1C",
+        "selected": 0
+      },
+      "0x1d": {
+        "value": "0x1D",
+        "selected": 0
+      },
+      "0x1e": {
+        "value": "0x1E",
+        "selected": 0
+      },
+      "0x1f": {
+        "value": "0x1F",
+        "selected": 0
+      },
+      "0x20": {
+        "value": "0x20",
+        "selected": 0
+      },
+      "0x21": {
+        "value": "0x21",
+        "selected": 0
+      },
+      "0x22": {
+        "value": "0x22",
+        "selected": 0
+      },
+      "0x23": {
+        "value": "0x23",
+        "selected": 0
+      },
+      "0x24": {
+        "value": "0x24",
+        "selected": 0
+      },
+      "0x25": {
+        "value": "0x25",
+        "selected": 0
+      },
+      "0x26": {
+        "value": "0x26",
+        "selected": 0
+      },
+      "0x27": {
+        "value": "0x27",
+        "selected": 0
+      },
+      "0x28": {
+        "value": "0x28",
+        "selected": 0
+      },
+      "0x29": {
+        "value": "0x29",
+        "selected": 0
+      },
+      "0x2a": {
+        "value": "0x2A",
+        "selected": 0
+      },
+      "0x2b": {
+        "value": "0x2B",
+        "selected": 0
+      },
+      "0x2c": {
+        "value": "0x2C",
+        "selected": 0
+      },
+      "0x2d": {
+        "value": "0x2D",
+        "selected": 0
+      },
+      "0x2e": {
+        "value": "0x2E",
+        "selected": 0
+      },
+      "0x2f": {
+        "value": "0x2F",
+        "selected": 0
+      },
+      "0x30": {
+        "value": "0x30",
+        "selected": 0
+      },
+      "0x31": {
+        "value": "0x31",
+        "selected": 0
+      },
+      "0x32": {
+        "value": "0x32",
+        "selected": 0
+      },
+      "0x33": {
+        "value": "0x33",
+        "selected": 0
+      },
+      "0x34": {
+        "value": "0x34",
+        "selected": 0
+      },
+      "0x35": {
+        "value": "0x35",
+        "selected": 0
+      },
+      "0x36": {
+        "value": "0x36",
+        "selected": 0
+      },
+      "0x37": {
+        "value": "0x37",
+        "selected": 0
+      },
+      "0x38": {
+        "value": "0x38",
+        "selected": 0
+      },
+      "0x39": {
+        "value": "0x39",
+        "selected": 0
+      },
+      "0x3a": {
+        "value": "0x3A",
+        "selected": 0
+      },
+      "0x3b": {
+        "value": "0x3B",
+        "selected": 0
+      },
+      "0x3c": {
+        "value": "0x3C",
+        "selected": 0
+      },
+      "0x3d": {
+        "value": "0x3D",
+        "selected": 0
+      },
+      "0x3e": {
+        "value": "0x3E",
+        "selected": 0
+      },
+      "0x3f": {
+        "value": "0x3F",
+        "selected": 0
+      },
+      "0x40": {
+        "value": "0x40",
+        "selected": 0
+      },
+      "0x41": {
+        "value": "0x41",
+        "selected": 0
+      },
+      "0x42": {
+        "value": "0x42",
+        "selected": 0
+      },
+      "0x43": {
+        "value": "0x43",
+        "selected": 0
+      },
+      "0x44": {
+        "value": "0x44",
+        "selected": 0
+      },
+      "0x45": {
+        "value": "0x45",
+        "selected": 0
+      },
+      "0x46": {
+        "value": "0x46",
+        "selected": 0
+      },
+      "0x47": {
+        "value": "0x47",
+        "selected": 0
+      },
+      "0x48": {
+        "value": "0x48",
+        "selected": 0
+      },
+      "0x49": {
+        "value": "0x49",
+        "selected": 0
+      },
+      "0x4a": {
+        "value": "0x4A",
+        "selected": 0
+      },
+      "0x4b": {
+        "value": "0x4B",
+        "selected": 0
+      },
+      "0x4c": {
+        "value": "0x4C",
+        "selected": 0
+      },
+      "0x4d": {
+        "value": "0x4D",
+        "selected": 0
+      },
+      "0x4e": {
+        "value": "0x4E",
+        "selected": 0
+      },
+      "0x4f": {
+        "value": "0x4F",
+        "selected": 0
+      },
+      "0x50": {
+        "value": "0x50",
+        "selected": 0
+      },
+      "0x51": {
+        "value": "0x51",
+        "selected": 0
+      },
+      "0x52": {
+        "value": "0x52",
+        "selected": 0
+      },
+      "0x53": {
+        "value": "0x53",
+        "selected": 0
+      },
+      "0x54": {
+        "value": "0x54",
+        "selected": 0
+      },
+      "0x55": {
+        "value": "0x55",
+        "selected": 0
+      },
+      "0x56": {
+        "value": "0x56",
+        "selected": 0
+      },
+      "0x57": {
+        "value": "0x57",
+        "selected": 0
+      },
+      "0x58": {
+        "value": "0x58",
+        "selected": 0
+      },
+      "0x59": {
+        "value": "0x59",
+        "selected": 0
+      },
+      "0x5a": {
+        "value": "0x5A",
+        "selected": 0
+      },
+      "0x5b": {
+        "value": "0x5B",
+        "selected": 0
+      },
+      "0x5c": {
+        "value": "0x5C",
+        "selected": 0
+      },
+      "0x5d": {
+        "value": "0x5D",
+        "selected": 0
+      },
+      "0x5e": {
+        "value": "0x5E",
+        "selected": 0
+      },
+      "0x5f": {
+        "value": "0x5F",
+        "selected": 0
+      },
+      "0x60": {
+        "value": "0x60",
+        "selected": 0
+      },
+      "0x61": {
+        "value": "0x61",
+        "selected": 0
+      },
+      "0x62": {
+        "value": "0x62",
+        "selected": 0
+      },
+      "0x63": {
+        "value": "0x63",
+        "selected": 0
+      },
+      "0x64": {
+        "value": "0x64",
+        "selected": 0
+      },
+      "0x65": {
+        "value": "0x65",
+        "selected": 0
+      },
+      "0x66": {
+        "value": "0x66",
+        "selected": 0
+      },
+      "0x67": {
+        "value": "0x67",
+        "selected": 0
+      },
+      "0x68": {
+        "value": "0x68",
+        "selected": 0
+      },
+      "0x69": {
+        "value": "0x69",
+        "selected": 0
+      },
+      "0x6a": {
+        "value": "0x6A",
+        "selected": 0
+      },
+      "0x6b": {
+        "value": "0x6B",
+        "selected": 0
+      },
+      "0x6c": {
+        "value": "0x6C",
+        "selected": 0
+      },
+      "0x6d": {
+        "value": "0x6D",
+        "selected": 0
+      },
+      "0x6e": {
+        "value": "0x6E",
+        "selected": 0
+      },
+      "0x6f": {
+        "value": "0x6F",
+        "selected": 0
+      },
+      "0x70": {
+        "value": "0x70",
+        "selected": 0
+      },
+      "0x71": {
+        "value": "0x71",
+        "selected": 0
+      },
+      "0x72": {
+        "value": "0x72",
+        "selected": 0
+      },
+      "0x73": {
+        "value": "0x73",
+        "selected": 0
+      },
+      "0x74": {
+        "value": "0x74",
+        "selected": 0
+      },
+      "0x75": {
+        "value": "0x75",
+        "selected": 0
+      },
+      "0x76": {
+        "value": "0x76",
+        "selected": 0
+      },
+      "0x77": {
+        "value": "0x77",
+        "selected": 0
+      },
+      "0x78": {
+        "value": "0x78",
+        "selected": 0
+      },
+      "0x79": {
+        "value": "0x79",
+        "selected": 0
+      },
+      "0x7a": {
+        "value": "0x7A",
+        "selected": 0
+      },
+      "0x7b": {
+        "value": "0x7B",
+        "selected": 0
+      },
+      "0x7c": {
+        "value": "0x7C",
+        "selected": 0
+      },
+      "0x7d": {
+        "value": "0x7D",
+        "selected": 0
+      },
+      "0x7e": {
+        "value": "0x7E",
+        "selected": 0
+      },
+      "0x7f": {
+        "value": "0x7F",
+        "selected": 0
+      },
+      "0x80": {
+        "value": "0x80",
+        "selected": 0
+      },
+      "0x81": {
+        "value": "0x81",
+        "selected": 0
+      },
+      "0x82": {
+        "value": "0x82",
+        "selected": 0
+      },
+      "0x83": {
+        "value": "0x83",
+        "selected": 0
+      },
+      "0x84": {
+        "value": "0x84",
+        "selected": 0
+      },
+      "0x85": {
+        "value": "0x85",
+        "selected": 0
+      },
+      "0x86": {
+        "value": "0x86",
+        "selected": 0
+      },
+      "0x87": {
+        "value": "0x87",
+        "selected": 0
+      },
+      "0x88": {
+        "value": "0x88",
+        "selected": 0
+      },
+      "0x89": {
+        "value": "0x89",
+        "selected": 0
+      },
+      "0x8a": {
+        "value": "0x8A",
+        "selected": 0
+      },
+      "0x8b": {
+        "value": "0x8B",
+        "selected": 0
+      },
+      "0x8c": {
+        "value": "0x8C",
+        "selected": 0
+      },
+      "0x8d": {
+        "value": "0x8D",
+        "selected": 0
+      },
+      "0x8e": {
+        "value": "0x8E",
+        "selected": 0
+      },
+      "0x8f": {
+        "value": "0x8F",
+        "selected": 0
+      },
+      "0x90": {
+        "value": "0x90",
+        "selected": 0
+      },
+      "0x91": {
+        "value": "0x91",
+        "selected": 0
+      },
+      "0x92": {
+        "value": "0x92",
+        "selected": 0
+      },
+      "0x93": {
+        "value": "0x93",
+        "selected": 0
+      },
+      "0x94": {
+        "value": "0x94",
+        "selected": 0
+      },
+      "0x95": {
+        "value": "0x95",
+        "selected": 0
+      },
+      "0x96": {
+        "value": "0x96",
+        "selected": 0
+      },
+      "0x97": {
+        "value": "0x97",
+        "selected": 0
+      },
+      "0x98": {
+        "value": "0x98",
+        "selected": 0
+      },
+      "0x99": {
+        "value": "0x99",
+        "selected": 0
+      },
+      "0x9a": {
+        "value": "0x9A",
+        "selected": 0
+      },
+      "0x9b": {
+        "value": "0x9B",
+        "selected": 0
+      },
+      "0x9c": {
+        "value": "0x9C",
+        "selected": 0
+      },
+      "0x9d": {
+        "value": "0x9D",
+        "selected": 0
+      },
+      "0x9e": {
+        "value": "0x9E",
+        "selected": 0
+      },
+      "0x9f": {
+        "value": "0x9F",
+        "selected": 0
+      },
+      "0xa0": {
+        "value": "0xA0",
+        "selected": 0
+      },
+      "0xa1": {
+        "value": "0xA1",
+        "selected": 0
+      },
+      "0xa2": {
+        "value": "0xA2",
+        "selected": 0
+      },
+      "0xa3": {
+        "value": "0xA3",
+        "selected": 0
+      },
+      "0xa4": {
+        "value": "0xA4",
+        "selected": 0
+      },
+      "0xa5": {
+        "value": "0xA5",
+        "selected": 0
+      },
+      "0xa6": {
+        "value": "0xA6",
+        "selected": 0
+      },
+      "0xa7": {
+        "value": "0xA7",
+        "selected": 0
+      },
+      "0xa8": {
+        "value": "0xA8",
+        "selected": 0
+      },
+      "0xa9": {
+        "value": "0xA9",
+        "selected": 0
+      },
+      "0xaa": {
+        "value": "0xAA",
+        "selected": 0
+      },
+      "0xab": {
+        "value": "0xAB",
+        "selected": 0
+      },
+      "0xac": {
+        "value": "0xAC",
+        "selected": 0
+      },
+      "0xad": {
+        "value": "0xAD",
+        "selected": 0
+      },
+      "0xae": {
+        "value": "0xAE",
+        "selected": 0
+      },
+      "0xaf": {
+        "value": "0xAF",
+        "selected": 0
+      },
+      "0xb0": {
+        "value": "0xB0",
+        "selected": 0
+      },
+      "0xb1": {
+        "value": "0xB1",
+        "selected": 0
+      },
+      "0xb2": {
+        "value": "0xB2",
+        "selected": 0
+      },
+      "0xb3": {
+        "value": "0xB3",
+        "selected": 0
+      },
+      "0xb4": {
+        "value": "0xB4",
+        "selected": 0
+      },
+      "0xb5": {
+        "value": "0xB5",
+        "selected": 0
+      },
+      "0xb6": {
+        "value": "0xB6",
+        "selected": 0
+      },
+      "0xb7": {
+        "value": "0xB7",
+        "selected": 0
+      },
+      "0xb8": {
+        "value": "0xB8",
+        "selected": 0
+      },
+      "0xb9": {
+        "value": "0xB9",
+        "selected": 0
+      },
+      "0xba": {
+        "value": "0xBA",
+        "selected": 0
+      },
+      "0xbb": {
+        "value": "0xBB",
+        "selected": 0
+      },
+      "0xbc": {
+        "value": "0xBC",
+        "selected": 0
+      },
+      "0xbd": {
+        "value": "0xBD",
+        "selected": 0
+      },
+      "0xbe": {
+        "value": "0xBE",
+        "selected": 0
+      },
+      "0xbf": {
+        "value": "0xBF",
+        "selected": 0
+      },
+      "0xc0": {
+        "value": "0xC0",
+        "selected": 0
+      },
+      "0xc1": {
+        "value": "0xC1",
+        "selected": 0
+      },
+      "0xc2": {
+        "value": "0xC2",
+        "selected": 0
+      },
+      "0xc3": {
+        "value": "0xC3",
+        "selected": 0
+      },
+      "0xc4": {
+        "value": "0xC4",
+        "selected": 0
+      },
+      "0xc5": {
+        "value": "0xC5",
+        "selected": 0
+      },
+      "0xc6": {
+        "value": "0xC6",
+        "selected": 0
+      },
+      "0xc7": {
+        "value": "0xC7",
+        "selected": 0
+      },
+      "0xc8": {
+        "value": "0xC8",
+        "selected": 0
+      },
+      "0xc9": {
+        "value": "0xC9",
+        "selected": 0
+      },
+      "0xca": {
+        "value": "0xCA",
+        "selected": 0
+      },
+      "0xcb": {
+        "value": "0xCB",
+        "selected": 0
+      },
+      "0xcc": {
+        "value": "0xCC",
+        "selected": 0
+      },
+      "0xcd": {
+        "value": "0xCD",
+        "selected": 0
+      },
+      "0xce": {
+        "value": "0xCE",
+        "selected": 0
+      },
+      "0xcf": {
+        "value": "0xCF",
+        "selected": 0
+      },
+      "0xd0": {
+        "value": "0xD0",
+        "selected": 0
+      },
+      "0xd1": {
+        "value": "0xD1",
+        "selected": 0
+      },
+      "0xd2": {
+        "value": "0xD2",
+        "selected": 0
+      },
+      "0xd3": {
+        "value": "0xD3",
+        "selected": 0
+      },
+      "0xd4": {
+        "value": "0xD4",
+        "selected": 0
+      },
+      "0xd5": {
+        "value": "0xD5",
+        "selected": 0
+      },
+      "0xd6": {
+        "value": "0xD6",
+        "selected": 0
+      },
+      "0xd7": {
+        "value": "0xD7",
+        "selected": 0
+      },
+      "0xd8": {
+        "value": "0xD8",
+        "selected": 0
+      },
+      "0xd9": {
+        "value": "0xD9",
+        "selected": 0
+      },
+      "0xda": {
+        "value": "0xDA",
+        "selected": 0
+      },
+      "0xdb": {
+        "value": "0xDB",
+        "selected": 0
+      },
+      "0xdc": {
+        "value": "0xDC",
+        "selected": 0
+      },
+      "0xdd": {
+        "value": "0xDD",
+        "selected": 0
+      },
+      "0xde": {
+        "value": "0xDE",
+        "selected": 0
+      },
+      "0xdf": {
+        "value": "0xDF",
+        "selected": 0
+      },
+      "0xe0": {
+        "value": "0xE0",
+        "selected": 0
+      },
+      "0xe1": {
+        "value": "0xE1",
+        "selected": 0
+      },
+      "0xe2": {
+        "value": "0xE2",
+        "selected": 0
+      },
+      "0xe3": {
+        "value": "0xE3",
+        "selected": 0
+      },
+      "0xe4": {
+        "value": "0xE4",
+        "selected": 0
+      },
+      "0xe5": {
+        "value": "0xE5",
+        "selected": 0
+      },
+      "0xe6": {
+        "value": "0xE6",
+        "selected": 0
+      },
+      "0xe7": {
+        "value": "0xE7",
+        "selected": 0
+      },
+      "0xe8": {
+        "value": "0xE8",
+        "selected": 0
+      },
+      "0xe9": {
+        "value": "0xE9",
+        "selected": 0
+      },
+      "0xea": {
+        "value": "0xEA",
+        "selected": 0
+      },
+      "0xeb": {
+        "value": "0xEB",
+        "selected": 0
+      },
+      "0xec": {
+        "value": "0xEC",
+        "selected": 0
+      },
+      "0xed": {
+        "value": "0xED",
+        "selected": 0
+      },
+      "0xee": {
+        "value": "0xEE",
+        "selected": 0
+      },
+      "0xef": {
+        "value": "0xEF",
+        "selected": 0
+      },
+      "0xf0": {
+        "value": "0xF0",
+        "selected": 0
+      },
+      "0xf1": {
+        "value": "0xF1",
+        "selected": 0
+      },
+      "0xf2": {
+        "value": "0xF2",
+        "selected": 0
+      },
+      "0xf3": {
+        "value": "0xF3",
+        "selected": 0
+      },
+      "0xf4": {
+        "value": "0xF4",
+        "selected": 0
+      },
+      "0xf5": {
+        "value": "0xF5",
+        "selected": 0
+      },
+      "0xf6": {
+        "value": "0xF6",
+        "selected": 0
+      },
+      "0xf7": {
+        "value": "0xF7",
+        "selected": 0
+      },
+      "0xf8": {
+        "value": "0xF8",
+        "selected": 0
+      },
+      "0xf9": {
+        "value": "0xF9",
+        "selected": 0
+      },
+      "0xfa": {
+        "value": "0xFA",
+        "selected": 0
+      },
+      "0xfb": {
+        "value": "0xFB",
+        "selected": 0
+      },
+      "0xfc": {
+        "value": "0xFC",
+        "selected": 0
+      },
+      "0xfd": {
+        "value": "0xFD",
+        "selected": 0
+      },
+      "0xfe": {
+        "value": "0xFE",
+        "selected": 0
+      },
+      "0xff": {
+        "value": "0xFF",
+        "selected": 0
+      }
+    },
+    "shaper1": {
+      "": {
+        "value": "None",
+        "selected": 1
+      }
+    },
+    "shaper2": {
+      "": {
+        "value": "None",
+        "selected": 1
+      }
+    },
+    "description": ""
+  }
+}

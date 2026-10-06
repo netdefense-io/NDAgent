@@ -74,8 +74,10 @@ type SetAliasResponse struct {
 	ValidationErrors FlexibleValidation `json:"validations,omitempty"`
 }
 
-// SetAlias creates or updates an alias (upsert operation).
-func (c *Client) SetAlias(ctx context.Context, uuid string, alias Alias) error {
+// SetAlias creates or updates an alias (upsert operation) from a flat body of
+// OPNsense string values. A refusal with field validations is a
+// *ValidationFailedError; only "saved" is success.
+func (c *Client) SetAlias(ctx context.Context, uuid string, alias map[string]string) error {
 	path := fmt.Sprintf("/firewall/alias/setItem/%s", uuid)
 	wrapper := AliasWrapper{Alias: alias}
 
@@ -90,20 +92,47 @@ func (c *Client) SetAlias(ctx context.Context, uuid string, alias Alias) error {
 	}
 
 	if result.Result != "saved" {
-		// Check for validation errors
 		if result.ValidationErrors.HasErrors() {
 			c.log.Debugw("Validation errors", "errors", result.ValidationErrors.String())
-			return fmt.Errorf("validation failed: %s", result.ValidationErrors.String())
+			return &ValidationFailedError{Entity: "alias", Validations: result.ValidationErrors}
 		}
 		return fmt.Errorf("unexpected result: %s (response: %s)", result.Result, string(respBody))
 	}
 
 	c.log.Debugw("SetAlias completed",
 		"uuid", uuid,
-		"name", alias.Name,
+		"name", alias["name"],
 	)
 
 	return nil
+}
+
+// GetAliasModel reads the device's alias model: getItem without a uuid
+// answers every field with its default, and every list field with the
+// options this device offers. Its "content" options are only suggestions
+// (every alias name), not the field's valid values.
+func (c *Client) GetAliasModel(ctx context.Context) (EntityModel, error) {
+	respBody, err := c.doRequest(ctx, "GET", "/firewall/alias/getItem", nil)
+	if err != nil {
+		return EntityModel{}, err
+	}
+
+	var resp map[string]interface{}
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return EntityModel{}, fmt.Errorf("failed to parse alias template: %w", err)
+	}
+	template, ok := resp["alias"].(map[string]interface{})
+	if !ok {
+		return EntityModel{}, fmt.Errorf("alias template has no %q object", "alias")
+	}
+	model := ParseEntityModel(template)
+	if model.Len() == 0 {
+		return EntityModel{}, fmt.Errorf("alias template has no fields")
+	}
+
+	c.log.Debugw("GetAliasModel completed", "fields", model.Len())
+
+	return model, nil
 }
 
 // DeleteAlias deletes an alias by UUID.
