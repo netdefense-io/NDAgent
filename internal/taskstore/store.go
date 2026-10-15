@@ -308,15 +308,58 @@ VALUES (?, ?, ?, ?, ?)
 //
 // Only PLUGIN_INSTALL uses this today; future handler types may extend it.
 func (s *Store) SetTaskMeta(taskID string, meta interface{}) error {
+	_, err := s.execTaskMeta(taskID, meta)
+	return err
+}
+
+// execTaskMeta is the write of SetTaskMeta; the result says how many rows it
+// reached.
+func (s *Store) execTaskMeta(taskID string, meta interface{}) (sql.Result, error) {
 	raw, err := json.Marshal(meta)
 	if err != nil {
-		return fmt.Errorf("marshal task_meta: %w", err)
+		return nil, fmt.Errorf("marshal task_meta: %w", err)
 	}
-	_, err = s.db.Exec(
+	return s.db.Exec(
 		"UPDATE task_states SET task_meta = ? WHERE task_id = ? AND status = ?",
 		string(raw), taskID, StatusInProgress,
 	)
-	return err
+}
+
+// ErrTaskNotInProgress is SetTaskMetaDurable's answer for a task that has no
+// IN_PROGRESS row: the record was not written.
+var ErrTaskNotInProgress = errors.New("the task has no IN_PROGRESS row to record on")
+
+// SetTaskMetaDurable is SetTaskMeta for a record that must be on disk before what
+// follows it: the store runs in WAL mode with synchronous(NORMAL), whose last
+// commits are not durable across a power loss (a checkpoint syncs the WAL and then
+// the database file, a commit does not), so the write is followed by
+// `PRAGMA wal_checkpoint(FULL)`. It returns once the record is in the database file,
+// or an error saying it may not be. Unlike SetTaskMeta, which leaves a row that is
+// missing or already terminal alone without a word, it is an error when the write
+// did not reach exactly one row (ErrTaskNotInProgress): the record is not there.
+// A series upgrade records its run this way before it asks OPNsense for anything it
+// cannot take back: a lost record is a hold, never a false success, and nothing is
+// requested on a record that may be lost.
+func (s *Store) SetTaskMetaDurable(taskID string, meta interface{}) error {
+	res, err := s.execTaskMeta(taskID, meta)
+	if err != nil {
+		return err
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count the rows the task metadata reached: %w", err)
+	}
+	if rows != 1 {
+		return fmt.Errorf("%w (task %s, %d rows updated)", ErrTaskNotInProgress, taskID, rows)
+	}
+	var busy, logFrames, checkpointed int
+	if err := s.db.QueryRow("PRAGMA wal_checkpoint(FULL)").Scan(&busy, &logFrames, &checkpointed); err != nil {
+		return fmt.Errorf("checkpoint the task store: %w", err)
+	}
+	if busy != 0 {
+		return errors.New("checkpoint the task store: the database is busy")
+	}
+	return nil
 }
 
 // GetPluginInstallMeta reads the PluginInstallMeta stored by SetTaskMeta for

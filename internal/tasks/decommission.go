@@ -2,13 +2,17 @@ package tasks
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/firmware/track"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/util"
@@ -73,6 +77,10 @@ const (
 
 	readonlyIdentityName = "netdefense-readonly"
 	agentIdentityName    = "netdefense-agent"
+
+	// releaseFlavourScript takes the firmware pin off the device through the
+	// plugin's PHP (see releaseFirmwarePin).
+	releaseFlavourScript = "/usr/local/opnsense/scripts/OPNsense/NetDefense/release_firmware_flavour.php"
 )
 
 // decommissionBackoffs are the waits between reconcile attempts for one
@@ -199,6 +207,16 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID 
 		Reconcile: func(ctx context.Context) error {
 			return runAuthServerDecommission(deviceUUID, configXMLPath)
 		},
+	})
+
+	// The firmware pin is the other family that never depended on apiClient: it
+	// goes back through the plugin's PHP, which edits the firmware setting the
+	// way OPNsense's own firmware page does. A device in a firmware track is held
+	// at one release by that setting, and left behind it freezes the device below
+	// whatever it updates from next, with no NetDefense left to move it.
+	d.Families = append(d.Families, DecommissionFamily{
+		Name:      "firmware_pin",
+		Reconcile: releaseFirmwarePin,
 	})
 
 	// Always wired, apiClient or not: this is the local removal path and
@@ -482,6 +500,60 @@ func runPluginConfigure(ctx context.Context, mode string) error {
 }
 
 const phpInterpreter = "/usr/local/bin/php"
+
+// releaseFirmwarePin puts the firmware setting back to what the device had
+// before the agent pinned it, if the agent's record says it holds a pin and the
+// setting is still what it wrote. Absent record, absent helper (a plugin build
+// that predates the firmware tracks) and a setting somebody else changed are all
+// success: there is nothing of the agent's to undo.
+//
+// The helper writes config.xml, so it runs under runHelperSubprocess: an
+// independent context and SIGTERM only, never the sequence's own context, whose
+// cancellation would SIGKILL it in the middle of a save.
+var releaseFirmwarePin = func(_ context.Context) error {
+	if _, err := os.Stat(releasePinScript); err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("plugin helper at %s: %w", releasePinScript, err)
+	}
+	stdout, code, err := runHelperSubprocess(releasePinInterpreter,
+		[]string{releasePinScript, "--state-file=" + releasePinStatePath, "--json"},
+		nil, firmwarePinReleaseCeiling, firmwarePinReleaseGrace)
+	if err != nil {
+		return fmt.Errorf("release_firmware_flavour.php: %w", err)
+	}
+	var report struct {
+		Result  string `json:"result"`
+		Message string `json:"message"`
+	}
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	_ = json.Unmarshal([]byte(lines[len(lines)-1]), &report)
+	if code != 0 {
+		return fmt.Errorf("release_firmware_flavour.php exited %d: %s %s", code, report.Result, report.Message)
+	}
+	logging.Named("decommission").Infow("Firmware pin released", "result", report.Result)
+	return nil
+}
+
+// ReleaseFirmwarePin takes the agent's firmware pin off through the plugin's PHP.
+// The firmware tracks' dead-man uses it when the REST API cannot restore the
+// setting.
+func ReleaseFirmwarePin(ctx context.Context) error { return releaseFirmwarePin(ctx) }
+
+// What releaseFirmwarePin runs; variables so tests can stand a script in.
+var (
+	releasePinInterpreter = phpInterpreter
+	releasePinScript      = releaseFlavourScript
+	releasePinStatePath   = track.DefaultStatePath
+)
+
+// The helper takes a second or two; the ceiling is for a config lock that is
+// held.
+const (
+	firmwarePinReleaseCeiling = 60 * time.Second
+	firmwarePinReleaseGrace   = 15 * time.Second
+)
 
 // decommissionHelperCmd builds the uninstall helper invocation.
 func decommissionHelperCmd(packageName string) *exec.Cmd {

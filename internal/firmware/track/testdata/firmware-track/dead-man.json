@@ -1,0 +1,15 @@
+{
+  "days": 30,
+  "seconds": 2592000,
+  "reason": "dead_man",
+  "vectors": [
+    {"description": "contact just now", "silent_seconds": 0, "release": false},
+    {"description": "a day without contact", "silent_seconds": 86400, "release": false},
+    {"description": "29 days without contact", "silent_seconds": 2505600, "release": false},
+    {"description": "one second short of 30 days", "silent_seconds": 2591999, "release": false},
+    {"description": "exactly 30 days: the rule is at least", "silent_seconds": 2592000, "release": true},
+    {"description": "30 days and a second", "silent_seconds": 2592001, "release": true},
+    {"description": "a year without contact", "silent_seconds": 31536000, "release": true},
+    {"description": "a contact stamped in the future by clock skew is not silence", "silent_seconds": -5, "release": false}
+  ]
+}

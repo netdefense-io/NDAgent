@@ -110,10 +110,13 @@ var failedCheckRetries = []time.Duration{10 * time.Minute, 30 * time.Minute, tim
 // Variables so tests do not sit through them: how a check is waited for, and
 // the most a check is put off after an update or upgrade ended, so the devices
 // a scheduled task updated together do not all check in the same seconds.
+// checkGateRecheck is when a check that the start order is still holding back
+// (see SetCheckGate) looks at the gate again.
 var (
 	firmwareCheckPoll    = 3 * time.Second
 	firmwareCheckTimeout = 120 * time.Second
 	firmwareOutcomeDelay = 2 * time.Minute
+	checkGateRecheck     = 5 * time.Second
 )
 
 // HeavyCollector owns the cache. There is one per agent process: lifecycle.go
@@ -148,6 +151,36 @@ type HeavyCollector struct {
 	// noResult: the last firmware status read found no check result on the
 	// device, which is what OPNsense has after a boot until a check runs.
 	noResult bool
+
+	// checkGate, when set, holds back every firmware check until it is closed.
+	checkGate <-chan struct{}
+	gateNoted bool
+}
+
+// SetCheckGate holds back the collector's firmware checks (the first one after a
+// start, and the one an update's outcome brings forward) until gate is closed. A
+// check is a write: when the catalog it reads carries a newer pkg, OPNsense's check
+// upgrades pkg itself (core check.sh), and a device whose firmware pin still names
+// another series than the one it runs (it landed from a series upgrade, or the
+// pin was reset) would do that against a live, unpinned catalog before anything
+// could put the pin right, and the re-pin cannot undo it. So the firmware tracks'
+// supervisor closes the gate once its first round has been able to read the device
+// and decide about the pin, or at a bound after the process started; a process
+// without a supervisor has no gate. The readings of services, certificates and the
+// cached status are not held: reading starts no check. Call it before Run.
+func (h *HeavyCollector) SetCheckGate(gate <-chan struct{}) { h.checkGate = gate }
+
+// gateOpen reports whether the start order lets a firmware check run.
+func (h *HeavyCollector) gateOpen() bool {
+	if h.checkGate == nil {
+		return true
+	}
+	select {
+	case <-h.checkGate:
+		return true
+	default:
+		return false
+	}
 }
 
 // NewHeavyCollector returns a collector reading OPNsense through client and
@@ -235,6 +268,14 @@ func (h *HeavyCollector) Run(ctx context.Context) error {
 			h.sched.gathered(h.now(), h.gather(ctx))
 		}
 		if ctx.Err() == nil && !h.now().Before(h.sched.nextCheck) {
+			if !h.gateOpen() {
+				if !h.gateNoted {
+					h.gateNoted = true
+					h.log.Infow("heavy-telemetry: the firmware check waits for the firmware pin to be reconciled")
+				}
+				h.sched.nextCheck = h.now().Add(checkGateRecheck)
+				continue
+			}
 			h.sched.checked(h.now(), h.check(ctx), h.jitter())
 		}
 	}

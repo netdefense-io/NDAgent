@@ -97,7 +97,7 @@ func handleMinorWithReboot(
 }
 
 // handleMajorWithReboot implements: major + reboot=true
-// REST POST /upgrade, then watch (up to two reboots). See runRESTUpdate.
+// REST POST /upgrade, then watch (three reboots). See runRESTUpdate.
 func handleMajorWithReboot(
 	ctx context.Context,
 	ws *network.WebSocketClient,
@@ -111,7 +111,7 @@ func handleMajorWithReboot(
 		verb:   "upgrade",
 		marker: upgradeRequestMarker,
 		progress: func(string) string {
-			return fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense may reboot up to 2 times...",
+			return fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense will reboot 3 times...",
 				initialStatus.ProductSeries, initialStatus.UpgradeMajorVersion)
 		},
 		trigger: func(ctx context.Context) (string, error) {
@@ -165,6 +165,10 @@ func runRESTUpdate(
 		log.Warnw("Failed to send IN_PROGRESS", "error", err)
 	}
 
+	var (
+		baseline string
+		proven   bool
+	)
 	for attempt := 1; ; attempt++ {
 		if err := waitUntilFirmwareReady(ctx, client, log); err != nil {
 			if ctx.Err() != nil {
@@ -172,7 +176,7 @@ func runRESTUpdate(
 			}
 			return fail("The firmware " + run.verb + " was not started: " + err.Error())
 		}
-		baseline := progressLog(ctx, client)
+		baseline = progressLog(ctx, client)
 
 		if attempt == 1 {
 			markFirmwareTriggered(ws, cmd, log, &meta)
@@ -190,7 +194,8 @@ func runRESTUpdate(
 		log.Infow("Firmware "+run.verb+" triggered; checking that it started",
 			"task_id", cmd.TaskID, "from_version", fromVersion, "attempt", attempt)
 
-		if firmwareRunStarted(ctx, client, baseline, run.marker) {
+		var started bool
+		if started, proven = firmwareRunStarted(ctx, client, baseline, run.marker); started {
 			break
 		}
 		if ctx.Err() != nil {
@@ -207,8 +212,20 @@ func runRESTUpdate(
 
 	pollCtx, stopPolling := context.WithDeadline(ctx, deadline)
 	defer stopPolling()
-	sentinel := pollUpgradeStatus(pollCtx, client, log)
+	sentinel, elsewhere := pollUpgradeRun(pollCtx, client, log, baseline, run.marker, proven)
 	log.Infow("Firmware "+run.verb+" sentinel", "task_id", cmd.TaskID, "sentinel", sentinel)
+
+	if elsewhere {
+		// The end marker is another job's: the run was only believed to have started
+		// (its log could not be read), and judging the device by it would fail a run
+		// that never began. A release that has not moved says nothing was applied;
+		// one that has is judged by the device as for any run that ends without a
+		// marker (the sentinel is empty).
+		if now, err := installedVersion(ctx, client); err == nil && now == fromVersion {
+			return fail("OPNsense accepted the " + run.verb + " request but did not start it (another firmware job " +
+				"held its lock). Nothing was applied.")
+		}
+	}
 
 	if sentinel == "reboot" {
 		// The box is going down, and the agent with it. What is recorded is what
@@ -325,26 +342,34 @@ func progressLog(ctx context.Context, client firmwareOPNAPIClient) string {
 	return prog.Log
 }
 
-// firmwareRunStarted reports whether OPNsense started the request just made. Its
-// launcher takes a lock with `flock -n` and drops a request that finds it held
-// without saying so, while the API still answers "ok", so the answer proves
-// nothing. A run shows it started when the progress log changed and carries the
-// request marker (an unchanged log is the previous run's), or the backend turned
-// busy.
-func firmwareRunStarted(ctx context.Context, client firmwareOPNAPIClient, baseline, marker string) bool {
+// firmwareRunStarted reports whether OPNsense started the request just made, and
+// whether the progress log showed it. Its launcher takes a lock with `flock -n`
+// and drops a request that finds it held without saying so, while the API still
+// answers "ok", so the answer proves nothing, and neither does a busy backend:
+// whoever holds the lock (a check from the GUI or the cron job, an update from a
+// shell) is not this request, and its end marker would be taken for the run's. A
+// run shows it started when the progress log changed and carries the request
+// marker (an unchanged log is the previous run's). Only while the log cannot be
+// read or is empty does a busy backend stand in for the marker, because the API
+// goes away while OPNsense replaces its core package: a log that reads and lacks
+// the marker belongs to another job.
+func firmwareRunStarted(ctx context.Context, client firmwareOPNAPIClient, baseline, marker string) (started, byMarker bool) {
 	deadline := time.Now().Add(firmwareStartWindowVar)
 	for {
-		if log := progressLog(ctx, client); log != baseline && strings.Contains(log, marker) {
-			return true
-		}
-		if running, err := client.GetFirmwareRunning(ctx); err == nil && running != nil && running.Status == "busy" {
-			return true
+		log := progressLog(ctx, client)
+		switch {
+		case log != baseline && strings.Contains(log, marker):
+			return true, true
+		case log == "":
+			if running, err := client.GetFirmwareRunning(ctx); err == nil && running != nil && running.Status == "busy" {
+				return true, false
+			}
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
-			return false
+			return false, false
 		}
 		if err := util.ShutdownAwareSleep(ctx, firmwareStartPollVar); err != nil {
-			return false
+			return false, false
 		}
 	}
 }
@@ -353,9 +378,9 @@ func firmwareRunStarted(ctx context.Context, client firmwareOPNAPIClient, baseli
 // Overridable in tests via setUpgradeStatusPollIntervalForTest.
 var upgradeStatusPollInterval = 5 * time.Second
 
-// pollUpgradeStatus polls GET /upgradestatus until OPNsense's end marker
-// appears or the context ends. It returns "done", "reboot", or "" when the
-// context ended first.
+// pollUpgradeRun polls GET /upgradestatus until OPNsense's end marker appears or
+// the context ends. It returns "done" or "reboot", or "" when the context ended
+// first, or when the end is another job's (elsewhere).
 //
 // It does not give up on anything else. The API disappears while OPNsense
 // replaces its own core package (configd and the web GUI restart, in the first
@@ -364,7 +389,14 @@ var upgradeStatusPollInterval = 5 * time.Second
 // None of that is the end of the run, so errors and "error" are retried until
 // the context ends. A gap is not a verdict either way: the caller asks the
 // device what happened once there is a marker or the deadline.
-func pollUpgradeStatus(ctx context.Context, client firmwareOPNAPIClient, log interface{ Infow(string, ...interface{}) }) string {
+//
+// ours says the log has already shown the request marker. A run that was only
+// believed to have started (its log could not be read when it was asked) is held
+// to it: until the log shows it, an end marker of "done" whose log does not carry
+// the marker, or is the log of the run before (baseline), is another job's, and
+// is reported as elsewhere. A "reboot" is the box going down whoever's job it ends.
+func pollUpgradeRun(ctx context.Context, client firmwareOPNAPIClient, log interface{ Infow(string, ...interface{}) },
+	baseline, marker string, ours bool) (sentinel string, elsewhere bool) {
 	ticker := time.NewTicker(upgradeStatusPollInterval)
 	defer ticker.Stop()
 
@@ -372,7 +404,7 @@ func pollUpgradeStatus(ctx context.Context, client firmwareOPNAPIClient, log int
 	for {
 		select {
 		case <-ctx.Done():
-			return ""
+			return "", false
 		case <-ticker.C:
 			prog, err := client.GetFirmwareUpgradeProgress(ctx)
 			if err != nil || prog == nil {
@@ -382,9 +414,15 @@ func pollUpgradeStatus(ctx context.Context, client firmwareOPNAPIClient, log int
 				continue
 			}
 			failures = 0
+			ours = ours || (prog.Log != baseline && strings.Contains(prog.Log, marker))
 			switch prog.Status {
-			case "done", "reboot":
-				return prog.Status
+			case "done":
+				if !ours {
+					return "", true
+				}
+				return prog.Status, false
+			case "reboot":
+				return prog.Status, false
 			}
 		}
 	}

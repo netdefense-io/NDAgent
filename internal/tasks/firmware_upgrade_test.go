@@ -333,22 +333,22 @@ func TestFirmwarePackageEntry_VersionString(t *testing.T) {
 	}
 }
 
-// ─── pollUpgradeStatus ─────────────────────────────────────────────────────
+// ─── pollUpgradeRun ────────────────────────────────────────────────────────
 
-func TestPollUpgradeStatus_ImmediateDone(t *testing.T) {
+func TestPollUpgradeRun_ImmediateDone(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(1 * time.Millisecond)
 	defer restore()
 
 	client := &stubFirmwareClient{
 		progressResp: &opnapi.FirmwareProgressStatus{Status: "done", Log: "***DONE***"},
 	}
-	sentinel := pollUpgradeStatus(context.Background(), client, noopLogger{})
+	sentinel := pollToTheEnd(context.Background(), client)
 	if sentinel != "done" {
 		t.Errorf("sentinel=%q want done", sentinel)
 	}
 }
 
-func TestPollUpgradeStatus_ContextCancelled(t *testing.T) {
+func TestPollUpgradeRun_ContextCancelled(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(1 * time.Millisecond)
 	defer restore()
 
@@ -358,20 +358,20 @@ func TestPollUpgradeStatus_ContextCancelled(t *testing.T) {
 	client := &stubFirmwareClient{
 		progressResp: &opnapi.FirmwareProgressStatus{Status: "running"},
 	}
-	sentinel := pollUpgradeStatus(ctx, client, noopLogger{})
+	sentinel := pollToTheEnd(ctx, client)
 	if sentinel != "" {
 		t.Errorf("sentinel=%q want empty (context cancelled)", sentinel)
 	}
 }
 
-func TestPollUpgradeStatus_RebootSentinel(t *testing.T) {
+func TestPollUpgradeRun_RebootSentinel(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(1 * time.Millisecond)
 	defer restore()
 
 	client := &stubFirmwareClient{
 		progressResp: &opnapi.FirmwareProgressStatus{Status: "reboot"},
 	}
-	sentinel := pollUpgradeStatus(context.Background(), client, noopLogger{})
+	sentinel := pollToTheEnd(context.Background(), client)
 	if sentinel != "reboot" {
 		t.Errorf("sentinel=%q want reboot", sentinel)
 	}
@@ -442,10 +442,17 @@ func (s *stubFirmwareClient) GetFirmwareRunning(_ context.Context) (*opnapi.Firm
 	return s.runningResp, s.runningErr
 }
 
-// noopLogger satisfies the logger parameter of pollUpgradeStatus.
+// noopLogger satisfies the logger parameter of pollUpgradeRun.
 type noopLogger struct{}
 
 func (noopLogger) Infow(_ string, _ ...interface{}) {}
+
+// pollToTheEnd watches a run that is known to be the caller's, so that every end
+// marker is its end.
+func pollToTheEnd(ctx context.Context, client firmwareOPNAPIClient) string {
+	sentinel, _ := pollUpgradeRun(ctx, client, noopLogger{}, "", "", true)
+	return sentinel
+}
 
 // ─── handleMinorNoReboot: terminal-response coverage (Blocker B) ─────────────
 //

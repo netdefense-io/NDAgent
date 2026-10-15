@@ -64,10 +64,13 @@ func TTL(mode string) time.Duration {
 	return MinorTTL
 }
 
-// isBaseOrKernel reports whether name is one of the two pseudo-packages OPNsense
-// lists for the base system and the kernel, which are installed by a reboot and
-// are not in the package database.
-func isBaseOrKernel(name string) bool { return name == "base" || name == "kernel" }
+// isBaseOrKernel reports whether name is one of the pseudo-packages OPNsense lists
+// for the sets a reboot installs and that are not in the package database: the base
+// system and the kernel, and, in the plan of a series upgrade, the packages set (a
+// tar the third boot installs from, not a package that is installed or missing).
+func isBaseOrKernel(name string) bool {
+	return name == "base" || name == "kernel" || name == "packages"
+}
 
 // PlannedPackages is what an update was going to install: the upgrades and the
 // new packages they pull in.
@@ -138,9 +141,18 @@ func NewMarker(mode string, reboot bool, started, expires time.Time) Meta {
 }
 
 // NewMeta records an update about to be triggered. bootTime is 0 when it could
-// not be read.
+// not be read. A series upgrade ("major") records the three sets of its offer as
+// the plan, beside what the check lists: the packages, kernel and base the upgrade
+// installs, each at the version the offer says.
 func NewMeta(mode string, reboot bool, fromVersion string, st *opnapi.FirmwareUpgradeStatus, bootTime int64, started, expires time.Time) Meta {
 	plan := PlannedPackages(st)
+	if mode == "major" && st != nil {
+		for _, set := range st.UpgradeSets {
+			if set.Name != "" {
+				plan = append(plan, Package{Name: set.Name, Version: set.NewVersion})
+			}
+		}
+	}
 	total := len(plan)
 	if total > MaxPlannedPackages {
 		// Keep what matters most if the plan has to be cut: the release itself,
@@ -187,13 +199,19 @@ func (m Meta) RebootExpected() bool {
 	return m.Reboot && (m.Mode == "major" || m.RebootSeen || HasBaseOrKernel(m.Packages))
 }
 
-// ExpectedReboots is how many restarts the run may cause, for the result.
+// ExpectedReboots is how many restarts the run may cause, for the result. A series
+// upgrade through OPNsense's REST API reboots three times, not the "up to 2" its
+// documentation counts (the two stage hooks): stage 0 installs the kernel before the
+// first reboot, the base is installed at the second boot and the packages at the
+// third. Measured on six complete hops (three kernel banners each); a reset at the
+// very start of stage B, and the shell form of the upgrade, make a fourth, so
+// nothing counts boots and this figure is informational.
 func (m Meta) ExpectedReboots() int {
 	switch {
 	case !m.Reboot:
 		return 0
 	case m.Mode == "major":
-		return 2
+		return 3
 	default:
 		return 1
 	}

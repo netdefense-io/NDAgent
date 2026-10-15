@@ -29,6 +29,9 @@ type TaskResponse struct {
 	TaskID  int64
 	Status  string
 	Message string
+	// Inner is the whole signed response object, for a test that looks at keys
+	// beside status and message (the firmware failure detail, admin_equivalent).
+	Inner map[string]json.RawMessage
 }
 
 // Broker is the fake endpoint. It also plays NDManager: it holds the key that
@@ -138,6 +141,7 @@ func (b *Broker) open(taskID int64, envelope string) TaskResponse {
 		return tr
 	}
 	tr.Status, tr.Message = inner.Status, inner.Message
+	_ = json.Unmarshal(msg.Payload, &tr.Inner)
 	return tr
 }
 

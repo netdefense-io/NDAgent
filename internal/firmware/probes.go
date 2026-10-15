@@ -39,6 +39,10 @@ type Probes struct {
 	// Evidence returns a line proving the run failed part-way, or "" when there is
 	// none. since is when the run started.
 	Evidence func(ctx context.Context, since time.Time) (string, error)
+	// Sets reads the versions of the installed base system and kernel
+	// (`opnsense-update -vb`, `-vk`), which the core package's version file does not
+	// say. Optional: a nil probe is a caller that does not check them.
+	Sets func(ctx context.Context) (base, kernel string, err error)
 }
 
 // Once returns Probes that read Running, Locked, Release, BootTime, Installed
@@ -141,7 +145,77 @@ func NewProbes(api API) Probes {
 		Installed: pkgmgr.InstalledVersions,
 		Updating:  packageToolsRunning,
 		Evidence:  partialFailureEvidence(api),
+		Sets:      installedSets,
 	}
+}
+
+// setVersion runs `opnsense-update` with -vb or -vk, which prints the version of
+// the installed base system or kernel; tests replace it.
+var setVersion = func(ctx context.Context, flag string) (string, error) {
+	cmd := exec.CommandContext(ctx, "/usr/local/sbin/opnsense-update", flag)
+	cmd.Env = util.DeviceExecEnv()
+	out, err := cmd.Output()
+	return strings.TrimSpace(string(out)), err
+}
+
+// installedSets reads the installed base system and kernel. The core package is
+// replaced first and the sets minutes later, so after an update that was
+// interrupted between the two (a power cut) the core's version file reads as done
+// while the sets are still the old ones.
+func installedSets(ctx context.Context) (base, kernel string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if base, err = setVersion(ctx, "-vb"); err != nil {
+		return "", "", err
+	}
+	if kernel, err = setVersion(ctx, "-vk"); err != nil {
+		return "", "", err
+	}
+	if !looksLikeVersion(base) || !looksLikeVersion(kernel) {
+		return "", "", errors.New("opnsense-update did not print a version for the base system and kernel")
+	}
+	return base, kernel, nil
+}
+
+// SetVersion reads the version of one installed set with `opnsense-update`: which
+// is "base" (-vb), "kernel" (-vk) or "pkgs" (-vp, the marker stage P writes only
+// when its `pkg upgrade` succeeded). A series upgrade's landing is judged from the
+// three, and from nothing a log says.
+//
+// The pkgs marker is absent on a box that never ran stage P (an image, a box
+// installed from one), and `opnsense-update -vp` then prints an empty line: that is
+// "", not a failure to read. Base and kernel are always there, so an empty answer
+// for either is an error.
+func SetVersion(ctx context.Context, which string) (string, error) {
+	flag := ""
+	switch which {
+	case "base":
+		flag = "-vb"
+	case "kernel":
+		flag = "-vk"
+	case "pkgs":
+		flag = "-vp"
+	default:
+		return "", errors.New("unknown set " + which)
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	version, err := setVersion(ctx, flag)
+	if err != nil {
+		return "", err
+	}
+	if which == "pkgs" && version == "" {
+		return "", nil
+	}
+	if !looksLikeVersion(version) {
+		return "", errors.New("opnsense-update did not print a version for the " + which + " set")
+	}
+	return version, nil
+}
+
+// looksLikeVersion accepts what a version line starts with: a digit, no spaces.
+func looksLikeVersion(s string) bool {
+	return s != "" && s[0] >= '0' && s[0] <= '9' && !strings.ContainsAny(s, " \t\r\n")
 }
 
 func runStateOf(r *opnapi.FirmwareRunning) RunState {

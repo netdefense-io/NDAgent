@@ -163,7 +163,10 @@ func TestMeta_ExpectedRebootsAndExpiry(t *testing.T) {
 	if got := (Meta{Mode: "minor", Reboot: true}).ExpectedReboots(); got != 1 {
 		t.Errorf("minor reboot=true: %d", got)
 	}
-	if got := (Meta{Mode: "major", Reboot: true}).ExpectedReboots(); got != 2 {
+	// Three kernel banners on every complete hop through the REST API (the proof's six
+	// hops); "up to 2" counted the two stage hooks and missed that stage 0 installs
+	// the kernel before the first reboot.
+	if got := (Meta{Mode: "major", Reboot: true}).ExpectedReboots(); got != 3 {
 		t.Errorf("major: %d", got)
 	}
 

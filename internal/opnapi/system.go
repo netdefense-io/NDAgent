@@ -403,19 +403,110 @@ type FirmwareUpgradeStatus struct {
 	// Minor (point release) indicator
 	UpgradePackages []FirmwarePackageEntry `json:"upgrade_packages"` // non-empty → minor available
 
-	// Major (series upgrade) indicators — non-empty = major available
-	UpgradeSets         []json.RawMessage `json:"upgrade_sets"`
-	UpgradeMajorVersion string            `json:"upgrade_major_version"`
-	UpgradeMajorMessage string            `json:"upgrade_major_message"`
+	// Major (series upgrade) indicators — non-empty = major available. The offer is
+	// UpgradeMajorVersion and UpgradeSets, never Status: a package entry of any
+	// kind, a same-version reinstall included, keeps Status at "update" while the
+	// major is still offered.
+	UpgradeSets         []FirmwareUpgradeSet `json:"upgrade_sets"`
+	UpgradeMajorVersion string               `json:"upgrade_major_version"`
+	UpgradeMajorMessage string               `json:"upgrade_major_message"`
 
 	// New/remove packages (informational, not used for classification)
 	NewPackages       []FirmwarePackageEntry `json:"new_packages"`
 	ReinstallPackages []FirmwarePackageEntry `json:"reinstall_packages"`
 	RemovePackages    []FirmwarePackageEntry `json:"remove_packages"`
 
+	// DowngradePackages is what pkg would downgrade. A pin below the installed
+	// release plans none under a check; one that does is a pin to refuse.
+	DowngradePackages []FirmwarePackageEntry `json:"downgrade_packages"`
+
 	// Connection and repo health
 	Connection string `json:"connection"`
 	Repository string `json:"repository"`
+
+	// LastCheck is when the result was written ("" while there is none: a check
+	// is running, or none has run since the result was flushed). A new result
+	// differs from the one before it, which is how a request OPNsense dropped is
+	// told from one it ran.
+	LastCheck string `json:"last_check"`
+
+	// InstalledVersion is the installed release as the status's `product` block
+	// has it, built from the local version file on every request. ProductVersion
+	// is the top-level one, which is the check's: stale after an update.
+	InstalledVersion string `json:"-"`
+
+	// CheckABI is the ABI the check ran against (the top-level product_abi: the
+	// effective ABI, empty when it is the installed one) and InstalledABI the
+	// installed one. They differ while the repository points at another series'
+	// packages, which a pin never does.
+	CheckABI     string `json:"-"`
+	InstalledABI string `json:"-"`
+}
+
+// Completed reports whether the status is the result of a finished check.
+func (s *FirmwareUpgradeStatus) Completed() bool { return s.LastCheck != "" }
+
+// Clean reports whether the check could use the mirror: it finished and its
+// connection and repository are ok. An empty plan under a check that was not
+// clean is a failure, not "up to date".
+func (s *FirmwareUpgradeStatus) Clean() bool {
+	return s.Completed() && s.Status != "error" && s.Connection == "ok" && s.Repository == "ok"
+}
+
+// Stale reports whether the check ran against another release than the
+// installed one: only a check rewrites its result, so after an update it
+// describes the release that was replaced.
+func (s *FirmwareUpgradeStatus) Stale() bool {
+	return s.ProductVersion != "" && s.InstalledVersion != "" && s.ProductVersion != s.InstalledVersion
+}
+
+// ABICrossing reports whether the check ran against another ABI than the
+// installed one.
+func (s *FirmwareUpgradeStatus) ABICrossing() bool {
+	return s.CheckABI != "" && s.InstalledABI != "" && s.CheckABI != s.InstalledABI
+}
+
+// FirmwareUpgradeSet is one entry of upgrade_sets: a set the offered series upgrade
+// installs. A check lists three of them, "packages", "kernel" and "base", each
+// with the size of its download in bytes (a JSON string on the wire), the version
+// it replaces and the version it brings, the series' name for all three.
+type FirmwareUpgradeSet struct {
+	Name           string
+	Size           int64 // bytes; -1 when the entry carries none that parses
+	CurrentVersion string
+	NewVersion     string
+	Repository     string
+	// Raw is the entry as OPNsense sent it, kept for the log.
+	Raw json.RawMessage `json:"-"`
+}
+
+// parseUpgradeSets reads the entries of upgrade_sets. An entry that is not an
+// object keeps its raw text and nothing else, so a judge that wants three sets
+// by name finds a set it does not know.
+func parseUpgradeSets(msgs []json.RawMessage) []FirmwareUpgradeSet {
+	out := make([]FirmwareUpgradeSet, 0, len(msgs))
+	for _, m := range msgs {
+		set := FirmwareUpgradeSet{Size: -1, Raw: m}
+		var row map[string]interface{}
+		if err := json.Unmarshal(m, &row); err == nil {
+			set.Name = strings.TrimSpace(rowString(row, "name"))
+			set.CurrentVersion = strings.TrimSpace(rowString(row, "current_version"))
+			set.NewVersion = strings.TrimSpace(rowString(row, "new_version"))
+			set.Repository = strings.TrimSpace(rowString(row, "repository"))
+			switch size := row["size"].(type) {
+			case string:
+				if n, err := strconv.ParseInt(strings.TrimSpace(size), 10, 64); err == nil && n >= 0 {
+					set.Size = n
+				}
+			case float64:
+				if size >= 0 && size == float64(int64(size)) {
+					set.Size = int64(size)
+				}
+			}
+		}
+		out = append(out, set)
+	}
+	return out
 }
 
 // FirmwarePackageEntry is one entry from upgrade_packages, new_packages, etc.
@@ -460,8 +551,10 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 		NewPackages         []json.RawMessage `json:"new_packages"`
 		ReinstallPackages   []json.RawMessage `json:"reinstall_packages"`
 		RemovePackages      []json.RawMessage `json:"remove_packages"`
+		DowngradePackages   []json.RawMessage `json:"downgrade_packages"`
 		Connection          string            `json:"connection"`
 		Repository          string            `json:"repository"`
+		LastCheck           string            `json:"last_check"`
 		OSVersion           string            `json:"os_version"`
 		ProductID           string            `json:"product_id"`
 		ProductTarget       string            `json:"product_target"`
@@ -473,6 +566,7 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 			Latest   string `json:"product_latest"`
 			Series   string `json:"CORE_SERIES"`
 			COREABI  string `json:"CORE_ABI"`
+			ABI      string `json:"product_abi"`
 			COREID   string `json:"product_id"`
 			CoreArch string `json:"product_arch"`
 		} `json:"product"`
@@ -514,15 +608,29 @@ func (c *Client) GetFirmwareUpgradeStatus(ctx context.Context) (*FirmwareUpgrade
 		NeedsReboot:         raw.NeedsReboot == "1",
 		UpgradeNeedsReboot:  raw.UpgradeNeedsReboot == "1",
 		UpgradePackages:     parsePackageEntries(raw.UpgradePackages),
-		UpgradeSets:         raw.UpgradeSets,
+		UpgradeSets:         parseUpgradeSets(raw.UpgradeSets),
 		UpgradeMajorVersion: raw.UpgradeMajorVersion,
 		UpgradeMajorMessage: raw.UpgradeMajorMessage,
 		NewPackages:         parsePackageEntries(raw.NewPackages),
 		ReinstallPackages:   parsePackageEntries(raw.ReinstallPackages),
 		RemovePackages:      parsePackageEntries(raw.RemovePackages),
+		DowngradePackages:   parsePackageEntries(raw.DowngradePackages),
 		Connection:          raw.Connection,
 		Repository:          raw.Repository,
+		LastCheck:           raw.LastCheck,
+		InstalledVersion:    raw.Product.Version,
+		CheckABI:            raw.ProductABI,
+		InstalledABI:        firstNonEmpty(raw.Product.ABI, raw.Product.COREABI),
 	}, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // parsePackageEntries decodes a package list, skipping an entry it cannot read.

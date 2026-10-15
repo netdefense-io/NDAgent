@@ -1146,3 +1146,31 @@ func TestIntegration_ConvertHostAliasToAPI(t *testing.T) {
 	t.Logf("Converted host alias: hostname=%s, domain=%s, parent=%s.%s",
 		payload.Hostname, payload.Domain, payload.ParentHostname, payload.ParentDomain)
 }
+
+// Read-only: the firmware settings and the last check's result, parsed from the
+// device's own answers. The settings come back as plain strings and carry the
+// subscription, which the client must never keep; the status carries the check
+// fields the pin code judges a plan by.
+func TestIntegration_FirmwareSettingsAndStatus(t *testing.T) {
+	client := getTestClient(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	settings, err := client.GetFirmwareSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetFirmwareSettings() error = %v", err)
+	}
+	t.Logf("flavour=%q type=%q mirror set=%v aux=%v reboot=%v subscription set=%v",
+		settings.Flavour, settings.Type, settings.Mirror != "", settings.Aux, settings.Reboot, settings.SubscriptionSet)
+
+	status, err := client.GetFirmwareUpgradeStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetFirmwareUpgradeStatus() error = %v", err)
+	}
+	t.Logf("installed=%q checked=%q last_check=%q clean=%v stale=%v upgrades=%d downgrades=%d new=%d remove=%d reinstall=%d",
+		status.InstalledVersion, status.ProductVersion, status.LastCheck, status.Clean(), status.Stale(),
+		len(status.UpgradePackages), len(status.DowngradePackages), len(status.NewPackages), len(status.RemovePackages), len(status.ReinstallPackages))
+	if status.InstalledVersion == "" {
+		t.Error("the status's product block carries no installed version")
+	}
+}

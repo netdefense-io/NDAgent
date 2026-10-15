@@ -42,6 +42,7 @@ const (
 	TaskTypeConnect         = "CONNECT"
 	TaskTypePluginInstall   = "PLUGIN_INSTALL"
 	TaskTypeFirmwareUpgrade = "FIRMWARE_UPGRADE"
+	TaskTypeFirmwareTrack   = "FIRMWARE_TRACK"
 )
 
 // TaskHandler is a function that handles a specific task type.

@@ -209,12 +209,22 @@ func TestHeavyTelemetryStartsOnceAndStopsWithItsSnapshot(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	time.Sleep(100 * time.Millisecond)
+	// The collector publishes the snapshot before it saves it, and the save syncs
+	// the file to disk, so the file is waited for and not assumed.
+	deadline = time.Now().Add(5 * time.Second)
+	for {
+		_, err := os.Stat(cache)
+		if err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the gather saved nothing: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // a second collector, if there were one, would have gathered by now
 	if n := api.services.Load(); n != 1 {
 		t.Fatalf("%d gathers at start, want 1: a second collector is running", n)
-	}
-	if _, err := os.Stat(cache); err != nil {
-		t.Fatalf("the gather saved nothing: %v", err)
 	}
 
 	stopped := make(chan struct{})

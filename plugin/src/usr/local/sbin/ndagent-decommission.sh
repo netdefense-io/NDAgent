@@ -14,21 +14,23 @@
 # would die halfway through removing the package that is killing it.
 #
 # By the time this runs, the agent has already reconciled every managed
-# OPNsense object away, deprovisioned the two NetDefense accounts and cleared
-# the plugin settings. The account deprovision is repeated here as a
-# belt-and-braces pass (it is idempotent) because it is the one piece of
-# cleanup that leaves a live admin credential behind when it does not happen.
-# What is left after that is the irreversible half:
+# OPNsense object away, taken its firmware pin off, deprovisioned the two
+# NetDefense accounts and cleared the plugin settings. The firmware pin release
+# and the account deprovision are repeated here as belt-and-braces passes (both
+# are idempotent): a pin left behind freezes the device, and an account left
+# behind is a live admin credential. What is left after that is the
+# irreversible half:
 #
 #   1. wait (bounded) for the agent process to exit
 #   2. stop ndagent               (idempotent)
-#   3. deprovision the two NetDefense OPNsense accounts, locally — the
+#   3. take the firmware pin off, if the agent still holds one (idempotent)
+#   4. deprovision the two NetDefense OPNsense accounts, locally — the
 #      plugin and its PHP are still installed at this point, and this is
 #      the last moment they are
-#   4. pkg delete -y <this channel's package, plus any sibling channel)
-#   5. remove the NetDefense pkg repo config(s) and fingerprint dir
+#   5. pkg delete -y <this channel's package, plus any sibling channel)
+#   6. remove the NetDefense pkg repo config(s) and fingerprint dir
 #      (mirrors remove_legacy_repo() in ndagent-repo/install.sh)
-#   6. rm -rf /var/db/ndagent   (identity, pinned keys, replay watermarks)
+#   7. rm -rf /var/db/ndagent   (identity, pinned keys, replay watermarks)
 #
 # It NEVER restarts ndagent — that is the one line that separates this helper
 # from its PLUGIN_INSTALL sibling. There is nothing left to start: the device
@@ -54,6 +56,7 @@ STATE_DIR=/var/db/ndagent
 PIDFILE=/var/run/ndagent.pid
 PHP=/usr/local/bin/php
 CONFIGURE_PHP=/usr/local/opnsense/scripts/OPNsense/NetDefense/configure.php
+RELEASE_FLAVOUR_PHP=/usr/local/opnsense/scripts/OPNsense/NetDefense/release_firmware_flavour.php
 RC_SCRIPT=/usr/local/etc/rc.d/ndagent
 
 # Bounded wait for the agent to go away on its own. It requested shutdown
@@ -89,6 +92,27 @@ stop_agent() {
     [ -f "$RC_SCRIPT" ] || return 0
     printf 'Stopping ndagent\n'
     "$RC_SCRIPT" onestop || printf 'WARN: rc.d ndagent onestop returned non-zero\n'
+}
+
+# Take the firmware pin off the device if the agent still holds one.
+#
+# A device in a firmware track is held at one release by OPNsense's firmware
+# flavour setting, which the agent set; left behind, it freezes the device
+# below whatever it updates from next. The agent already ran this same helper
+# before forking us (its firmware_pin family). It is repeated here in case that
+# pass failed (a config lock held, a wedged configd), and the package's own
+# pre-deinstall runs it once more. It goes through the plugin's PHP, not the
+# REST API, so it needs no API user, which the agent removed before we started.
+# Idempotent: the compare-and-swap only changes a setting that is still what
+# the agent wrote. Never fatal.
+release_firmware_pin() {
+    if [ ! -x "$PHP" ] || [ ! -f "$RELEASE_FLAVOUR_PHP" ]; then
+        printf 'WARN: %s or %s missing; skipping the firmware pin release\n' "$PHP" "$RELEASE_FLAVOUR_PHP"
+        return 0
+    fi
+    printf 'Releasing the firmware pin (if the agent holds one)\n'
+    "$PHP" "$RELEASE_FLAVOUR_PHP" --json ||
+        printf 'WARN: release_firmware_flavour.php returned non-zero\n'
 }
 
 # Remove the two NetDefense-owned OPNsense accounts, locally.
@@ -178,6 +202,7 @@ remove_state() {
     wait_for_agent_exit
 
     stop_agent
+    release_firmware_pin
     deprovision_accounts
 
     remove_packages

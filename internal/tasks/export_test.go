@@ -43,7 +43,7 @@ func SetFirmwareCheckTimeoutForTest(d time.Duration) (restore func()) {
 }
 
 // SetUpgradeStatusPollIntervalForTest sets the poll interval for
-// pollUpgradeStatus to a short duration so tests don't have to wait 5s.
+// pollUpgradeRun to a short duration so tests don't have to wait 5s.
 // Returns a restore function.
 func SetUpgradeStatusPollIntervalForTest(d time.Duration) (restore func()) {
 	old := upgradeStatusPollInterval

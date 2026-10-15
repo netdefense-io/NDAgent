@@ -41,6 +41,12 @@ type LifecycleManager struct {
 	heavyStart sync.Once
 	stopHeavy  context.CancelFunc
 	heavyDone  chan struct{}
+
+	// tracks is the firmware tracks' engine and its periodic loop, nil without
+	// OPNsense API credentials. It lives with the process, not with a WebSocket
+	// phase: a device that is disabled waits in the registration phase and still
+	// has to release its pin after 30 days.
+	tracks *trackSupervisor
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -90,6 +96,18 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		heavy.Restore()
 	}
 
+	var tracks *trackSupervisor
+	if cfg.HasAPICreds() {
+		tracks = newTrackSupervisor(cfg)
+		tasks.SetFirmwareTrackEngine(tracks.engine)
+		if heavy != nil {
+			// The collector's first firmware check waits for the first round of the
+			// tracks' engine: a check is a write when its catalog carries a newer pkg,
+			// and a pin that still names another series must be put right first.
+			heavy.SetCheckGate(tracks.Settled())
+		}
+	}
+
 	return &LifecycleManager{
 		cfg:                cfg,
 		configPath:         configPath,
@@ -98,7 +116,28 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		state:              stateStore,
 		status:             statusWriter,
 		heavy:              heavy,
+		tracks:             tracks,
 	}, nil
+}
+
+// startTracks starts the firmware tracks' periodic loop, once, for the life of
+// the process.
+func (l *LifecycleManager) startTracks() {
+	if l.tracks == nil {
+		return
+	}
+	log := logging.Named("lifecycle")
+	l.tracks.start(l.shutdown.Context(), func(format string, args ...interface{}) {
+		log.Infow(fmt.Sprintf(format, args...))
+	})
+}
+
+// stopTracks stops the loop and waits for the round in progress. The
+// decommission calls it before anything else touches the device.
+func (l *LifecycleManager) stopTracks() {
+	if l.tracks != nil {
+		l.tracks.stop()
+	}
 }
 
 // startHeavyTelemetry starts the collector the first time a WebSocket phase
@@ -198,6 +237,10 @@ func (l *LifecycleManager) maybeClearRebindTokenInConfig(ctx context.Context) {
 // It handles both connection phases and automatically restarts on failure.
 func (l *LifecycleManager) Run(ctx context.Context) error {
 	log := logging.Named("lifecycle")
+
+	// Before the registration phase: a device that is never accepted (disabled)
+	// still has a firmware pin to release after 30 days.
+	l.startTracks()
 
 	for {
 		// Check for shutdown at start of each iteration
@@ -369,6 +412,10 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 	wsClient := network.NewWebSocketClient(l.cfg, l.state, taskStoreInst, tasks.LifecycleFor, ndmDispatchKeys)
 	wsClient.SetStatusWriter(l.status)
 	_ = ndmRotationKeys // held for future rotation-directive verify
+	if l.tracks != nil {
+		// The dead-man runs on the contact the broker accepted.
+		wsClient.SetSessionObserver(l.tracks.contact)
+	}
 
 	// Initialize OPNsense API client if credentials are configured
 	if l.cfg.HasAPICreds() {
@@ -410,6 +457,15 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 			func(format string, args ...interface{}) {
 				log.Infow(fmt.Sprintf(format, args...))
 			}, firmwareSweepInterval)
+	}
+
+	// FIRMWARE_TRACK rows are decided the same way, from the device, by a
+	// reconciler of their own that shares the connect-time slot.
+	if taskStoreInst != nil && l.tracks != nil {
+		startTrackRowReconciler(phaseCtx, wsClient, taskStoreInst, l.tracks.engine,
+			func(format string, args ...interface{}) {
+				log.Infow(fmt.Sprintf(format, args...))
+			}, trackSweepInterval)
 	}
 
 	// Run WebSocket client (handles reconnection internally)

@@ -6,7 +6,7 @@ package tasks
 //
 //	minor + reboot=false  → exec opnsense-update -pt (packages only, synchronous)
 //	minor + reboot=true   → REST POST /update (point release + auto-reboot)
-//	major + reboot=true   → REST POST /upgrade (series upgrade + 1-2 reboots)
+//	major + reboot=true   → REST POST /upgrade (series upgrade + 3 reboots)
 //	major + reboot=false  → FAILED (invalid; rejected at payload validation)
 //
 // Lifecycle:

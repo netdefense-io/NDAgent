@@ -1,8 +1,11 @@
 package taskstore
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -570,5 +573,111 @@ func TestGet_ReportsTheRowWhereverItStands(t *testing.T) {
 	_ = s.MarkDelivered("t")
 	if rec, _, _ = s.Get("t"); !rec.Delivered {
 		t.Fatalf("delivered: %+v", rec)
+	}
+}
+
+// The store runs in WAL mode with synchronous(NORMAL): a commit is in the log and
+// not yet in the database file, and a power loss can take the last ones. A record
+// that must be on disk before the request that follows it is written with
+// SetTaskMetaDurable, which checkpoints. The database file alone (the log left
+// behind, as a power loss leaves what was not synced) holds the record when the
+// call returns.
+func TestSetTaskMetaDurable_IsInTheDatabaseFileWhenItReturns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tasks.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if err := s.Begin("101", "FIRMWARE_TRACK", LifecycleSynchronous); err != nil {
+		t.Fatal(err)
+	}
+
+	// metaInTheFile is what a reader of the main database file alone finds.
+	metaInTheFile := func() (string, bool) {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		copyPath := filepath.Join(t.TempDir(), "main-file-only.db")
+		if err := os.WriteFile(copyPath, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		db, err := sql.Open("sqlite", "file:"+copyPath+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var meta sql.NullString
+		if err := db.QueryRow("SELECT task_meta FROM task_states WHERE task_id = ?", "101").Scan(&meta); err != nil {
+			return "", false // the table or the row is not in the file yet
+		}
+		return meta.String, meta.Valid
+	}
+
+	type job struct {
+		Phase string `json:"phase"`
+	}
+	if err := s.SetTaskMeta("101", job{Phase: "started"}); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := metaInTheFile(); ok {
+		t.Fatalf("meta %q is in the database file before any checkpoint: the control of this test is gone", got)
+	}
+
+	if err := s.SetTaskMetaDurable("101", job{Phase: "triggered"}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := metaInTheFile()
+	if !ok || got != `{"phase":"triggered"}` {
+		t.Fatalf("meta %q (present %v) in the database file after SetTaskMetaDurable", got, ok)
+	}
+	var back job
+	if found, err := s.GetTaskMeta("101", &back); err != nil || !found || back.Phase != "triggered" {
+		t.Fatalf("read back %+v found=%v err=%v", back, found, err)
+	}
+}
+
+// A row that is missing or no longer IN_PROGRESS keeps what it has, as it does for
+// SetTaskMeta, but the durable write does not pretend: the record the caller was to
+// have on disk is not there, so it is an error. SetTaskMeta keeps saying nothing.
+func TestSetTaskMetaDurable_ForARowThatIsNotInProgressIsAnErrorAndChangesNothing(t *testing.T) {
+	s := newTestStore(t)
+	if err := s.Begin("7", "FIRMWARE_TRACK", LifecycleSynchronous); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskMeta("7", map[string]string{"phase": "started"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Complete("7", StatusCompleted, "done", nil); err != nil {
+		t.Fatal(err)
+	}
+
+	for name, id := range map[string]string{"a terminal row": "7", "a task that was never begun": "8"} {
+		err := s.SetTaskMetaDurable(id, map[string]string{"phase": "late"})
+		if !errors.Is(err, ErrTaskNotInProgress) {
+			t.Errorf("%s: %v, want ErrTaskNotInProgress", name, err)
+		}
+		if err := s.SetTaskMeta(id, map[string]string{"phase": "late"}); err != nil {
+			t.Errorf("%s: SetTaskMeta says %v, and has always said nothing", name, err)
+		}
+	}
+	var meta map[string]string
+	if found, err := s.GetTaskMeta("7", &meta); err != nil || !found || meta["phase"] != "started" {
+		t.Errorf("a terminal row's meta: found=%v err=%v meta=%v", found, err, meta)
+	}
+	if found, _ := s.GetTaskMeta("8", &meta); found {
+		t.Error("a row appeared for a task that was never begun")
+	}
+
+	// And the row that is in progress is written, once.
+	if err := s.Begin("9", "FIRMWARE_TRACK", LifecycleSynchronous); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetTaskMetaDurable("9", map[string]string{"phase": "triggered"}); err != nil {
+		t.Fatalf("an IN_PROGRESS row: %v", err)
+	}
+	if found, err := s.GetTaskMeta("9", &meta); err != nil || !found || meta["phase"] != "triggered" {
+		t.Errorf("found=%v err=%v meta=%v", found, err, meta)
 	}
 }

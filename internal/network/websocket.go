@@ -19,6 +19,7 @@ import (
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/facts"
+	"github.com/netdefense-io/ndagent/internal/firmware/track"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
@@ -193,6 +194,33 @@ type WebSocketClient struct {
 	// resolved and sent by CompleteInProgressTask mutually exclusive, so a row
 	// that just turned terminal is sent by exactly one of them.
 	drainMu sync.Mutex
+
+	// observer is told when the broker accepts or ends this client's connection.
+	// Guarded by mu.
+	observer SessionObserver
+}
+
+// SessionObserver is told about the authenticated contact with the control
+// plane: the broker accepted the agent's authentication, a heartbeat went out
+// over that connection, the connection ended. The firmware dead-man measures its
+// 30 days of silence from it.
+type SessionObserver interface {
+	SessionStarted(now time.Time)
+	SessionAlive(now time.Time)
+	SessionEnded(now time.Time)
+}
+
+// SetSessionObserver wires the observer. Optional; nil-safe.
+func (w *WebSocketClient) SetSessionObserver(obs SessionObserver) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.observer = obs
+}
+
+func (w *WebSocketClient) sessionObserver() SessionObserver {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.observer
 }
 
 // NewWebSocketClient creates a new WebSocket client.
@@ -339,8 +367,13 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		}
 		w.mu.Lock()
 		w.conn = nil
+		wasAuthenticated := w.authenticated
 		w.authenticated = false
+		obs := w.observer
 		w.mu.Unlock()
+		if obs != nil && wasAuthenticated {
+			obs.SessionEnded(time.Now())
+		}
 		w.markStatus(func(sw *status.Writer) error { return sw.MarkDisconnected(reason) })
 	}()
 
@@ -359,7 +392,11 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 
 	w.mu.Lock()
 	w.authenticated = true
+	obs := w.observer
 	w.mu.Unlock()
+	if obs != nil {
+		obs.SessionStarted(time.Now())
+	}
 
 	log.Infow("Device authenticated successfully",
 		"device_uuid", w.cfg.DeviceUUID,
@@ -427,7 +464,7 @@ func (w *WebSocketClient) reconcileAndDrain(ctx context.Context) {
 		w,
 		logf,
 		pluginInstallPkgChecker,
-		taskstore.WithDeferredTypes(TaskTypeFirmwareUpgrade),
+		taskstore.WithDeferredTypes(TaskTypeFirmwareUpgrade, TaskTypeFirmwareTrack),
 		taskstore.WithLiveness(w.dispatcher.IsTaskLive),
 	)
 	if derr != nil {
@@ -637,6 +674,17 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 	if adminEquivalent, ok := data["admin_equivalent"].(bool); ok {
 		inner["admin_equivalent"] = adminEquivalent
 	}
+	// A FAILED FIRMWARE_TRACK task names the release it was moving to beside its
+	// message. The control plane counts the failure against it, so only a detail
+	// the contract accepts is sent; anything else is dropped and the failure
+	// stays plain text.
+	if detail, ok := data[track.FailureKey]; ok && status == TaskStatusFailed {
+		if clean, valid := track.CleanFailureDetail(detail); valid {
+			inner[track.FailureKey] = clean
+		} else {
+			log.Warnw("Dropping a firmware track failure detail the contract refuses", "detail", detail)
+		}
+	}
 
 	return inner
 }
@@ -681,13 +729,21 @@ func (w *WebSocketClient) SendTaskResponse(taskID, status, message string, data 
 // error is returned as well: the row is terminal and undelivered, and the next
 // connect's drain replays it.
 func (w *WebSocketClient) CompleteInProgressTask(taskID, status, message string) (bool, error) {
+	return w.CompleteInProgressTaskWithData(taskID, status, message, nil)
+}
+
+// CompleteInProgressTaskWithData is CompleteInProgressTask for a task whose
+// signed response carries more than a status and a message: the failure detail
+// of a FIRMWARE_TRACK task. data is recorded with the outcome, so a replay of it
+// carries the same keys.
+func (w *WebSocketClient) CompleteInProgressTaskWithData(taskID, status, message string, data map[string]interface{}) (bool, error) {
 	if w.taskStore == nil {
 		return false, fmt.Errorf("no task store")
 	}
 	w.drainMu.Lock()
 	defer w.drainMu.Unlock()
 
-	inner := buildTaskResponseInner(status, message, nil, logging.Named("websocket"))
+	inner := buildTaskResponseInner(status, message, data, logging.Named("websocket"))
 	resultBytes, err := json.Marshal(inner)
 	if err != nil {
 		return false, fmt.Errorf("marshal inner response: %w", err)
@@ -696,7 +752,7 @@ func (w *WebSocketClient) CompleteInProgressTask(taskID, status, message string)
 	if err != nil || !won {
 		return false, err
 	}
-	return true, w.sendTaskResponse(taskID, status, message, nil, false)
+	return true, w.sendTaskResponse(taskID, status, message, data, false)
 }
 
 // sendTaskResponse is SendTaskResponse with the choice of whether a terminal
@@ -950,6 +1006,19 @@ func (w *WebSocketClient) GetTaskStore() *taskstore.Store {
 // reconciler resolve the rows the drain leaves to it. Set it before Run.
 func (w *WebSocketClient) SetPreDrainHook(fn func(ctx context.Context)) {
 	w.preDrainHook = fn
+}
+
+// AddPreDrainHook runs fn after the hook already set, if any, in the same
+// connect-time slot and under the same bound. Two reconcilers share it: the one
+// for FIRMWARE_UPGRADE rows and the one for FIRMWARE_TRACK rows.
+func (w *WebSocketClient) AddPreDrainHook(fn func(ctx context.Context)) {
+	prev := w.preDrainHook
+	w.preDrainHook = func(ctx context.Context) {
+		if prev != nil {
+			prev(ctx)
+		}
+		fn(ctx)
+	}
 }
 
 // pluginInstallPkgChecker is the PluginInstallChecker wired into the

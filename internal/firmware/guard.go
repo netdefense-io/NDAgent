@@ -24,8 +24,10 @@ var (
 	// triggered: the run holding the slot asked OPNsense to apply an update or
 	// upgrade.
 	triggered bool
-	// watching is how many rows the reconciler is waiting on.
-	watching int
+	// watching is how many FIRMWARE_UPGRADE rows the reconciler is waiting on, and
+	// watchingTracks how many FIRMWARE_TRACK rows the track reconciler is.
+	watching       int
+	watchingTracks int
 	// changed is closed, and replaced, whenever taken or watching changes, so
 	// that a waiter can sleep until they do.
 	changed = make(chan struct{})
@@ -52,7 +54,7 @@ func Acquire(ctx context.Context, onWait func()) (release func(), err error) {
 			return nil, err
 		}
 		guardMu.Lock()
-		if !taken && watching == 0 {
+		if !taken && watching+watchingTracks == 0 {
 			taken = true
 			guardMu.Unlock()
 			return releaser(), nil
@@ -70,6 +72,35 @@ func Acquire(ctx context.Context, onWait func()) (release func(), err error) {
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// TryAcquire is Acquire without the wait: it takes the slot when it is free and
+// reports false when it is not. The periodic work that touches the firmware
+// setting (the pin reconcile, the dead-man) uses it, so it skips a round rather
+// than queue behind an update.
+func TryAcquire() (release func(), ok bool) {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	if taken || watching+watchingTracks > 0 {
+		return nil, false
+	}
+	taken = true
+	return releaser(), true
+}
+
+// TryAcquireResolver is TryAcquire for the reconciler of FIRMWARE_TRACK rows.
+// The rows it waits on keep every other firmware job out (WatchTracks), and that
+// must not keep out the reconciler's own resolution of them: it writes the pin
+// back and reads the outcome, which needs the slot. It still yields to a job that
+// holds the slot, and to the FIRMWARE_UPGRADE reconciler's rows.
+func TryAcquireResolver() (release func(), ok bool) {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	if taken || watching > 0 {
+		return nil, false
+	}
+	taken = true
+	return releaser(), true
 }
 
 func releaser() func() {
@@ -110,6 +141,18 @@ func Watch(rows int) {
 	}
 }
 
+// WatchTracks is Watch for the FIRMWARE_TRACK rows the track reconciler is
+// waiting on. The two counts are kept apart so that neither reconciler's sweep
+// clears the other's.
+func WatchTracks(rows int) {
+	guardMu.Lock()
+	defer guardMu.Unlock()
+	if watchingTracks != rows {
+		watchingTracks = rows
+		wake()
+	}
+}
+
 // Busy reports whether a firmware update is in progress as far as this process
 // knows: a run holds the slot, or the reconciler is waiting for one to end.
 // Anything that would start a firmware check must not while it is true, because
@@ -118,7 +161,7 @@ func Watch(rows int) {
 func Busy() bool {
 	guardMu.Lock()
 	defer guardMu.Unlock()
-	return taken || watching > 0
+	return taken || watching+watchingTracks > 0
 }
 
 // outcomes holds at most one pending "an update or upgrade ended": however many

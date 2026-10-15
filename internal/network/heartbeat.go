@@ -198,6 +198,9 @@ func (h *HeartbeatManager) sendHeartbeat(ws *WebSocketClient) error {
 		"device_uuid", h.deviceUUID,
 	)
 	ws.TouchStatus()
+	if obs := ws.sessionObserver(); obs != nil {
+		obs.SessionAlive(time.Now())
+	}
 
 	return nil
 }

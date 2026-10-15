@@ -1,0 +1,17 @@
+{
+  "v": 1,
+  "pinned": true,
+  "track": "fast",
+  "original_flavour": "",
+  "pinned_flavour": "26.7/MINT/26.7.3/latest",
+  "pinned_version": "26.7.3_11",
+  "enrolled_at": 1791429967,
+  "last_contact": 1791429999,
+  "pending": {
+    "op": "advance",
+    "task_id": "101",
+    "from_flavour": "26.7/MINT/26.7.3/latest",
+    "to_flavour": "26.7/MINT/26.7.5/latest",
+    "started_at": 1791430000
+  }
+}

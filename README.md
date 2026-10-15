@@ -23,7 +23,7 @@ This code is open source specifically so none of the following is a "trust me" c
 
 **The dispatch tier can't forge commands.** The relay service that fans commands out to devices holds no private signing key and independently re-verifies every envelope's signature before forwarding it. Compromising that tier doesn't get you the ability to mint commands — you'd still need the control plane's private key.
 
-**A fixed vocabulary.** NDAgent understands exactly ten operations — `PING`, `SYNC`, `PULL`, `BACKUP`, `CONNECT`, `RESTART`, `REBOOT`, `SHUTDOWN`, `PLUGIN_INSTALL`, `FIRMWARE_UPGRADE` — each with its own typed payload and handler (`internal/tasks/register.go`). The task protocol carries no "run this shell command" operation.
+**A fixed vocabulary.** NDAgent understands exactly eleven operations — `PING`, `SYNC`, `PULL`, `BACKUP`, `CONNECT`, `RESTART`, `REBOOT`, `SHUTDOWN`, `PLUGIN_INSTALL`, `FIRMWARE_UPGRADE`, `FIRMWARE_TRACK` — each with its own typed payload and handler (`internal/tasks/register.go`). The task protocol carries no "run this shell command" operation.
 
 Be clear about what that does and does not buy you, because the distinction is the whole point: **`CONNECT` opens a remote session, and a session reaches a shell.** A fixed vocabulary means the wire protocol can't be coerced into arbitrary instructions — it does not mean a caller holding a write-scoped credential is confined. Everything above protects the *channel*. None of it contains a compromised control plane or a stolen operator credential.
 

@@ -58,6 +58,10 @@ func (l *LifecycleManager) runDecommission(ctx context.Context, req *network.Dec
 	// keep saving its snapshot into the state the helper removes.
 	l.stopHeavyTelemetry()
 
+	// The firmware tracks' loop would pin the device again behind the sequence
+	// that takes its pin off.
+	l.stopTracks()
+
 	var apiClient *opnapi.Client
 	if l.cfg.HasAPICreds() {
 		apiClient = opnapi.NewClient(

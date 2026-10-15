@@ -1,0 +1,29 @@
+{
+ "api_version": "2",
+ "connection": "ok",
+ "downgrade_packages": [],
+ "download_size": "6MiB",
+ "last_check": "Mon Oct 12 11:05:04 UTC 2026",
+ "needs_reboot": "0",
+ "new_packages": [],
+ "product_id": "opnsense",
+ "product_target": "opnsense",
+ "product_version": "26.7.1_1",
+ "product_abi": "26.7",
+ "reinstall_packages": [
+  {
+   "name": "os-netdefense-dev",
+   "version": "1.24_0",
+   "repository": "NetDefense"
+  }
+ ],
+ "remove_packages": [],
+ "repository": "ok",
+ "upgrade_major_message": "",
+ "upgrade_major_version": "",
+ "upgrade_needs_reboot": "0",
+ "upgrade_packages": [],
+ "upgrade_sets": [],
+ "status": "update",
+ "status_msg": "There is 1 update available, total download size is 6.0MiB."
+}

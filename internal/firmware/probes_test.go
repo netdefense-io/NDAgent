@@ -6,7 +6,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -327,4 +329,107 @@ func mustCompileERE(t *testing.T, pattern string) *regexp.Regexp {
 		t.Fatalf("compile %q: %v", pattern, err)
 	}
 	return re
+}
+
+func TestInstalledSets(t *testing.T) {
+	defer func(prev func(context.Context, string) (string, error)) { setVersion = prev }(setVersion)
+
+	versions := map[string]string{"-vb": "26.7.4", "-vk": "26.7.4"}
+	setVersion = func(_ context.Context, flag string) (string, error) { return versions[flag], nil }
+	base, kernel, err := NewProbes(nil).Sets(context.Background())
+	if err != nil || base != "26.7.4" || kernel != "26.7.4" {
+		t.Fatalf("got %q %q, %v", base, kernel, err)
+	}
+
+	// Anything that is not a version is no reading: a usage text, nothing at all.
+	for name, out := range map[string]string{
+		"empty":      "",
+		"usage":      "Usage: opnsense-update [-bdefGgikmnPpRrSsTUuVv] [-A abi]",
+		"with space": "26.7 4",
+	} {
+		versions["-vb"] = out
+		if _, _, err := installedSets(context.Background()); err == nil {
+			t.Errorf("%s: %q was taken for a version", name, out)
+		}
+	}
+
+	versions["-vb"] = "26.7.4"
+	setVersion = func(_ context.Context, flag string) (string, error) {
+		if flag == "-vk" {
+			return "", errors.New("exit status 1")
+		}
+		return versions[flag], nil
+	}
+	if _, _, err := installedSets(context.Background()); err == nil {
+		t.Error("an unreadable kernel version was accepted")
+	}
+}
+
+// A series upgrade's landing is judged from the version of the base, the kernel and
+// the packages. The packages marker is written by stage P only when its pkg upgrade
+// succeeded, so a box that never ran stage P (an image, a box installed from one) has
+// none, and `opnsense-update -vp` prints an empty line: that is no version, and no
+// failure to read. Base and kernel are always there, and an empty answer for either
+// is an error.
+func TestSetVersion_AnAbsentPackagesMarkerReadsEmptyAndTheOtherSetsAreStrict(t *testing.T) {
+	defer func(prev func(context.Context, string) (string, error)) { setVersion = prev }(setVersion)
+	answers := map[string]string{"-vb": "26.1.11", "-vk": "26.1.11", "-vp": ""}
+	var asked []string
+	setVersion = func(_ context.Context, flag string) (string, error) {
+		asked = append(asked, flag)
+		return answers[flag], nil
+	}
+	ctx := context.Background()
+
+	for which, want := range map[string]string{"base": "26.1.11", "kernel": "26.1.11", "pkgs": ""} {
+		got, err := SetVersion(ctx, which)
+		if err != nil || got != want {
+			t.Errorf("%s: %q, %v; want %q", which, got, err, want)
+		}
+	}
+	if !reflect.DeepEqual(sortedStrings(asked), []string{"-vb", "-vk", "-vp"}) {
+		t.Errorf("opnsense-update was run with %v", asked)
+	}
+
+	answers["-vp"] = "26.1.6_2"
+	if got, err := SetVersion(ctx, "pkgs"); err != nil || got != "26.1.6_2" {
+		t.Errorf("a marker that is there: %q, %v", got, err)
+	}
+
+	// Base and kernel are strict: nothing, a usage text, or a line with a space is
+	// no reading.
+	for _, which := range []string{"base", "kernel"} {
+		flag := map[string]string{"base": "-vb", "kernel": "-vk"}[which]
+		for name, out := range map[string]string{
+			"empty": "", "usage": "Usage: opnsense-update [-bdefGgikmnPpRrSsTUuVv] [-A abi]", "with a space": "26.7 4",
+		} {
+			answers[flag] = out
+			if got, err := SetVersion(ctx, which); err == nil {
+				t.Errorf("%s, %s: %q was taken for a version", which, name, got)
+			}
+		}
+		answers[flag] = "26.1.11"
+	}
+
+	// The packages marker is tolerant of an empty line only: a usage text or a line
+	// with a space is still no reading, and a command that fails cannot be read.
+	for name, out := range map[string]string{"usage": "Usage: opnsense-update [-bdefGgikmnPpRrSsTUuVv]", "with a space": "26.7 4"} {
+		answers["-vp"] = out
+		if got, err := SetVersion(ctx, "pkgs"); err == nil {
+			t.Errorf("pkgs, %s: %q was taken for a version", name, got)
+		}
+	}
+	setVersion = func(context.Context, string) (string, error) { return "", errors.New("exit status 1") }
+	if got, err := SetVersion(ctx, "pkgs"); err == nil {
+		t.Errorf("pkgs, a command that failed: %q was taken for a reading", got)
+	}
+	if _, err := SetVersion(ctx, "firmware"); err == nil {
+		t.Error("a set that does not exist was read")
+	}
+}
+
+func sortedStrings(in []string) []string {
+	out := append([]string(nil), in...)
+	sort.Strings(out)
+	return out
 }

@@ -30,6 +30,9 @@ func RegisterHandlers(ws *network.WebSocketClient) {
 
 	// Register firmware upgrade handler
 	dispatcher.RegisterHandler(network.TaskTypeFirmwareUpgrade, HandleFirmwareUpgrade)
+
+	// Register the firmware track handler (staged updates)
+	dispatcher.RegisterHandler(network.TaskTypeFirmwareTrack, HandleFirmwareTrack)
 }
 
 // LifecycleFor returns the taskstore Lifecycle category for a given task
@@ -55,6 +58,13 @@ func LifecycleFor(taskType string) taskstore.Lifecycle {
 		// reboots. This value is what an agent that predates the reconciler does
 		// with such a row (completes it when it returns), which is why it is kept.
 		return taskstore.LifecycleRestartCompletes
+	case network.TaskTypeFirmwareTrack:
+		// Like FIRMWARE_UPGRADE, a row can outlive its handler on any path (the
+		// update is a detached OPNsense process and the box reboots), and the drain
+		// skips the type: the track reconciler decides it from the device. A
+		// synchronous row is what an unexpected leftover would be treated as: failed
+		// for the agent having restarted, never completed for it having come back.
+		return taskstore.LifecycleSynchronous
 	default:
 		return taskstore.LifecycleSynchronous
 	}

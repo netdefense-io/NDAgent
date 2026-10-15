@@ -321,3 +321,87 @@ func TestRelease_NotesAnOutcomeOnlyForARunThatTriggered(t *testing.T) {
 		t.Fatal("a trigger noted without a run holding the slot was kept for the next run")
 	}
 }
+
+func TestTryAcquireTakesTheSlotOnlyWhenItIsFree(t *testing.T) {
+	t.Cleanup(func() { Watch(0); WatchTracks(0) })
+	release, ok := TryAcquire()
+	if !ok {
+		t.Fatal("a free slot was refused")
+	}
+	if _, again := TryAcquire(); again {
+		t.Fatal("a held slot was handed out twice")
+	}
+	if !Busy() {
+		t.Error("a held slot is not busy")
+	}
+	release()
+	release() // safe to call more than once
+	if Busy() {
+		t.Error("busy after the slot was given back")
+	}
+	if r, ok := TryAcquire(); !ok {
+		t.Fatal("the slot was not free after release")
+	} else {
+		r()
+	}
+}
+
+// The rows the reconciler waits on keep other firmware jobs out, for either kind
+// of row; the periodic work must not take the slot from under them.
+func TestRowsBeingWatchedKeepPeriodicWorkOut(t *testing.T) {
+	t.Cleanup(func() { Watch(0); WatchTracks(0) })
+
+	WatchTracks(1)
+	if _, ok := TryAcquire(); ok {
+		t.Fatal("the periodic work took the slot from a FIRMWARE_TRACK row's reconciler")
+	}
+	if !Busy() {
+		t.Error("a watched FIRMWARE_TRACK row is not busy")
+	}
+	// The reconciler itself, though, has to be able to resolve its rows.
+	r, ok := TryAcquireResolver()
+	if !ok {
+		t.Fatal("the track reconciler could not take the slot for its own rows")
+	}
+	r()
+	WatchTracks(0)
+
+	Watch(1)
+	if _, ok := TryAcquireResolver(); ok {
+		t.Fatal("the track reconciler took the slot from a FIRMWARE_UPGRADE row's reconciler")
+	}
+	Watch(0)
+}
+
+// The two reconcilers count separately: one's sweep must not clear the other's.
+func TestTheTwoWatchCountsAreIndependent(t *testing.T) {
+	t.Cleanup(func() { Watch(0); WatchTracks(0) })
+	Watch(2)
+	WatchTracks(1)
+	WatchTracks(0)
+	if !Busy() {
+		t.Error("clearing the track rows cleared the FIRMWARE_UPGRADE rows")
+	}
+	Watch(0)
+	WatchTracks(3)
+	Watch(0)
+	if !Busy() {
+		t.Error("clearing the FIRMWARE_UPGRADE rows cleared the track rows")
+	}
+}
+
+func TestAcquireWaitsForWatchedTrackRows(t *testing.T) {
+	t.Cleanup(func() { Watch(0); WatchTracks(0) })
+	WatchTracks(1)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	if _, err := Acquire(ctx, nil); err == nil {
+		t.Fatal("a FIRMWARE_UPGRADE task started while a FIRMWARE_TRACK row was awaiting its outcome")
+	}
+	WatchTracks(0)
+	r, err := Acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r()
+}

@@ -323,29 +323,220 @@ func TestRESTRun_AStaleLogIsNotProofThatTheRunStarted(t *testing.T) {
 	}
 }
 
-// The backend turning busy right after the request also shows the run started.
-func TestRESTRun_ABusyBackendAfterTheRequestShowsTheRunStarted(t *testing.T) {
-	f := newFirmwareFixture(t)
-	c := newRESTClient(planStatus())
-	c.running = func(_, posts int) (*opnapi.FirmwareRunning, error) {
-		if posts == 0 {
-			return &opnapi.FirmwareRunning{Status: "ready"}, nil
+// The backend turning busy right after the request shows the run started only
+// while the progress log cannot be read: the API goes away as OPNsense replaces
+// its core package, and a request that did start can show nothing else.
+func TestRESTRun_ABusyBackendWhileTheLogCannotBeReadShowsTheRunStarted(t *testing.T) {
+	for name, gap := range map[string]func() (*opnapi.FirmwareProgressStatus, error){
+		"an unreachable API": func() (*opnapi.FirmwareProgressStatus, error) { return nil, errors.New("connection refused") },
+		"an empty log": func() (*opnapi.FirmwareProgressStatus, error) {
+			return &opnapi.FirmwareProgressStatus{Status: "error"}, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			f := newFirmwareFixture(t)
+			c := newRESTClient(planStatus())
+			c.running = func(_, posts int) (*opnapi.FirmwareRunning, error) {
+				if posts == 0 {
+					return &opnapi.FirmwareRunning{Status: "ready"}, nil
+				}
+				return &opnapi.FirmwareRunning{Status: "busy"}, nil
+			}
+			c.progress = func(reads, posts int) (*opnapi.FirmwareProgressStatus, error) {
+				switch {
+				case posts == 0:
+					return &opnapi.FirmwareProgressStatus{Status: "done", Log: "old"}, nil
+				case reads < 4: // the start check, and the first polls
+					return gap()
+				}
+				return &opnapi.FirmwareProgressStatus{Status: "reboot", Log: updateRequestMarker}, nil // ends the watch
+			}
+
+			if err := f.runMinor(context.Background(), "57", c, planStatus()); err != nil {
+				t.Fatalf("run: %v", err)
+			}
+			if c.postCount() != 1 || len(f.terminals) != 0 {
+				t.Fatalf("posts=%d terminals=%+v, want one request and no terminal", c.postCount(), f.terminals)
+			}
+		})
+	}
+}
+
+const foreignCheckLog = "***GOT REQUEST TO CHECK FOR UPDATES***\nCurrently running OPNsense at now\nFetching changelog information... "
+
+// waitForTheBackendAsLongAsItTakes gives the wait for the backend all the time it
+// needs, and leaves the start window short. The backend freeing up is an event the
+// run waits for, so a bound on that wait only makes a slow machine fail the test;
+// the window's end is what the foreign-job runs wait for, and a window that ends
+// early cannot change what they find in it.
+func (f *firmwareFixture) waitForTheBackendAsLongAsItTakes() {
+	f.t.Helper()
+	f.t.Cleanup(SetFirmwareWaitsForTest(10*time.Second, time.Millisecond, 50*time.Millisecond, time.Millisecond, time.Millisecond))
+}
+
+// aForeignCheck makes the first drops update requests find a check (from the GUI,
+// OPNsense's cron job) holding the lock: the launcher drops the request, the API
+// answers ok, the backend reads busy and the progress log is the check's, for as
+// many reads of the backend as it takes to come to the next request.
+func aForeignCheck(c *restClient, drops int) {
+	var mu sync.Mutex
+	dropped, busyLeft := 0, 0
+	c.stubFirmwareClient.onUpdate = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if dropped < drops {
+			dropped++
+			busyLeft = 3
 		}
-		return &opnapi.FirmwareRunning{Status: "busy"}, nil
+	}
+	c.running = func(_, posts int) (*opnapi.FirmwareRunning, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if busyLeft > 0 {
+			busyLeft--
+			return &opnapi.FirmwareRunning{Status: "busy"}, nil
+		}
+		return &opnapi.FirmwareRunning{Status: "ready"}, nil
 	}
 	c.progress = func(_, posts int) (*opnapi.FirmwareProgressStatus, error) {
-		if posts == 0 {
-			return &opnapi.FirmwareProgressStatus{Status: "done", Log: "old"}, nil
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case posts == 0:
+			return &opnapi.FirmwareProgressStatus{Status: "done", Log: "the previous run\n***DONE***"}, nil
+		case posts <= dropped && busyLeft > 0:
+			return &opnapi.FirmwareProgressStatus{Status: "running", Log: foreignCheckLog}, nil
+		case posts <= dropped:
+			return &opnapi.FirmwareProgressStatus{Status: "done", Log: foreignCheckLog + "done\n***DONE***"}, nil
 		}
-		return &opnapi.FirmwareProgressStatus{Status: "reboot", Log: "old"}, nil // ends the watch
+		return &opnapi.FirmwareProgressStatus{Status: "reboot", Log: updateRequestMarker + "\nrunning..."}, nil
 	}
+}
 
-	if err := f.runMinor(context.Background(), "57", c, planStatus()); err != nil {
+// Whoever holds the lock turns the backend busy, and the request is gone: its end
+// marker is not the update's, and the run must not be judged by it.
+func TestRESTRun_AForeignJobHoldingTheLockAtTheRequestIsWaitedOutNotTakenForTheRun(t *testing.T) {
+	f := newFirmwareFixture(t)
+	f.waitForTheBackendAsLongAsItTakes()
+	c := newRESTClient(planStatus())
+	aForeignCheck(c, 1)
+
+	if err := f.runMinor(context.Background(), "72", c, planStatus()); err != nil {
 		t.Fatalf("run: %v", err)
 	}
-	if c.postCount() != 1 || len(f.terminals) != 0 {
-		t.Fatalf("posts=%d terminals=%+v, want one request and no terminal", c.postCount(), f.terminals)
+	if c.postCount() != 2 {
+		t.Fatalf("requested %d times, want 2: the first request was dropped by the foreign job", c.postCount())
 	}
+	if len(f.terminals) != 0 {
+		t.Fatalf("terminal responses = %+v; the update started after the foreign job and rebooted, nothing to say yet", f.terminals)
+	}
+}
+
+func TestRESTRun_ARequestDroppedTwiceByForeignJobsFailsAndSaysWhy(t *testing.T) {
+	f := newFirmwareFixture(t)
+	f.waitForTheBackendAsLongAsItTakes()
+	c := newRESTClient(planStatus())
+	aForeignCheck(c, 2)
+
+	if err := f.runMinor(context.Background(), "73", c, planStatus()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if c.postCount() != 2 {
+		t.Fatalf("requested %d times, want 2", c.postCount())
+	}
+	if len(f.terminals) != 1 || f.terminals[0].success ||
+		!strings.Contains(f.terminals[0].message, "did not start it") ||
+		!strings.Contains(f.terminals[0].message, "Nothing was applied") {
+		t.Fatalf("terminal responses = %+v", f.terminals)
+	}
+}
+
+// A start that the log itself showed stays the run's whatever the log says later:
+// the launcher holds OPNsense's lock for the whole run, so a ***DONE*** that
+// another job's log carries by the time it is read is not a reason to take the end
+// for somebody else's. The run started and applied nothing, and the device says so.
+func TestRESTRun_ARunWhoseStartTheLogShowedIsJudgedByTheDeviceWhateverTheLogSaysLater(t *testing.T) {
+	f := newFirmwareFixture(t)
+	f.withProbes(idleAfterAnUpdate()) // idle, the release unchanged, the boot time unchanged
+	c := newRESTClient(planStatus())
+	var mu sync.Mutex
+	afterTheRequest := 0
+	c.progress = func(_, posts int) (*opnapi.FirmwareProgressStatus, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case posts == 0:
+			return &opnapi.FirmwareProgressStatus{Status: "done", Log: "the previous run\n***DONE***"}, nil
+		case afterTheRequest == 0: // the start check
+			afterTheRequest++
+			return &opnapi.FirmwareProgressStatus{Status: "running", Log: updateRequestMarker + "\nrunning..."}, nil
+		}
+		return &opnapi.FirmwareProgressStatus{Status: "done", Log: foreignCheckLog + "done\n***DONE***"}, nil
+	}
+
+	if err := f.runMinor(context.Background(), "76", c, planStatus()); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if len(f.terminals) != 1 || f.terminals[0].success || strings.Contains(f.terminals[0].message, "did not start it") ||
+		!strings.Contains(f.terminals[0].message, "without the reboot") {
+		t.Fatalf("terminal responses = %+v, want the verdict of a run that started and applied nothing", f.terminals)
+	}
+}
+
+// A run believed started because the log could not be read, which was another
+// job's after all, ends when that job does. Its ***DONE*** is not the update's.
+func TestRESTRun_AnEndMarkerThatIsAnotherJobsIsNotTheRunsEnd(t *testing.T) {
+	believedStarted := func(c *restClient) {
+		c.running = func(_, posts int) (*opnapi.FirmwareRunning, error) {
+			if posts == 0 {
+				return &opnapi.FirmwareRunning{Status: "ready"}, nil
+			}
+			return &opnapi.FirmwareRunning{Status: "busy"}, nil
+		}
+		c.progress = func(reads, posts int) (*opnapi.FirmwareProgressStatus, error) {
+			switch {
+			case posts == 0:
+				return &opnapi.FirmwareProgressStatus{Status: "done", Log: "the previous run\n***DONE***"}, nil
+			case reads < 3: // the start check finds the API gone
+				return nil, errors.New("connection refused")
+			}
+			return &opnapi.FirmwareProgressStatus{Status: "done", Log: foreignCheckLog + "done\n***DONE***"}, nil
+		}
+	}
+
+	t.Run("a release that did not move says nothing was applied", func(t *testing.T) {
+		f := newFirmwareFixture(t)
+		f.withProbes(idleAfterAnUpdate()) // idle, and the boot time unchanged
+		c := newRESTClient(planStatus())
+		believedStarted(c)
+
+		if err := f.runMinor(context.Background(), "74", c, planStatus()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if len(f.terminals) != 1 || f.terminals[0].success ||
+			!strings.Contains(f.terminals[0].message, "did not start it") ||
+			!strings.Contains(f.terminals[0].message, "Nothing was applied") ||
+			strings.Contains(f.terminals[0].message, "without the reboot") {
+			t.Fatalf("terminal responses = %+v, want the not-started failure and not the verdict of a run that never began", f.terminals)
+		}
+	})
+
+	t.Run("a release that moved is judged by the device", func(t *testing.T) {
+		f := newFirmwareFixture(t)
+		d := idleAfterAnUpdate()
+		d.release, d.boot = "26.7.4_1", d.boot+600
+		f.withProbes(d)
+		c := newRESTClient(planStatus())
+		believedStarted(c)
+		c.stubFirmwareClient.onUpdate = func() { c.stubFirmwareClient.release = "26.7.4_1" } // installed meanwhile
+
+		if err := f.runMinor(context.Background(), "75", c, planStatus()); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+		if len(f.terminals) != 1 || !f.terminals[0].success {
+			t.Fatalf("terminal responses = %+v, want one COMPLETED: the device shows the update applied", f.terminals)
+		}
+	})
 }
 
 // ── watching ────────────────────────────────────────────────────────────────
@@ -660,7 +851,7 @@ func TestRESTRun_MajorTriggersTheUpgradeEndpointAndRecordsTheSeriesRun(t *testin
 		t.Fatalf("POST /upgrade made %d times, want 1", upgrades)
 	}
 	m, _ := f.meta("67")
-	if m.Mode != "major" || !m.RebootExpected() || m.ExpectedReboots() != 2 {
+	if m.Mode != "major" || !m.RebootExpected() || m.ExpectedReboots() != 3 {
 		t.Fatalf("meta = %+v", m)
 	}
 	if len(f.progress) != 1 || !strings.Contains(f.progress[0], "major upgrade from series 26.7 to 26.9") {
@@ -710,13 +901,19 @@ func progressStatus(status string) func() (*opnapi.FirmwareProgressStatus, error
 	}
 }
 
+func progressWith(status, log string) func() (*opnapi.FirmwareProgressStatus, error) {
+	return func() (*opnapi.FirmwareProgressStatus, error) {
+		return &opnapi.FirmwareProgressStatus{Status: status, Log: log}, nil
+	}
+}
+
 func progressError() func() (*opnapi.FirmwareProgressStatus, error) {
 	return func() (*opnapi.FirmwareProgressStatus, error) { return nil, errors.New("connection refused") }
 }
 
 // A failed poll is a gap, not the end of the run. On 1.19.4 the first one made
 // the watch return and the handler give up.
-func TestPollUpgradeStatus_SurvivesGapsAndKeepsWatching(t *testing.T) {
+func TestPollUpgradeRun_SurvivesGapsAndKeepsWatching(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(time.Millisecond)
 	defer restore()
 
@@ -727,34 +924,75 @@ func TestPollUpgradeStatus_SurvivesGapsAndKeepsWatching(t *testing.T) {
 	answers = append(answers, progressStatus("running"), progressStatus("done"))
 
 	client := &progressReads{stubFirmwareClient: &stubFirmwareClient{}, answers: answers}
-	if got := pollUpgradeStatus(context.Background(), client, noopLogger{}); got != "done" {
+	if got := pollToTheEnd(context.Background(), client); got != "done" {
 		t.Fatalf("sentinel = %q after a long gap, want done", got)
 	}
 }
 
 // OPNsense answers "error" when its progress log is empty, and nothing else ever
 // means an error: it is retried, not reported.
-func TestPollUpgradeStatus_ErrorStatusIsRetriedNotTerminal(t *testing.T) {
+func TestPollUpgradeRun_ErrorStatusIsRetriedNotTerminal(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(time.Millisecond)
 	defer restore()
 
 	client := &progressReads{stubFirmwareClient: &stubFirmwareClient{}, answers: []func() (*opnapi.FirmwareProgressStatus, error){
 		progressStatus("error"), progressStatus("error"), progressStatus("running"), progressStatus("reboot"),
 	}}
-	if got := pollUpgradeStatus(context.Background(), client, noopLogger{}); got != "reboot" {
+	if got := pollToTheEnd(context.Background(), client); got != "reboot" {
 		t.Fatalf("sentinel = %q, want reboot", got)
 	}
 }
 
-func TestPollUpgradeStatus_ReturnsAtTheContextWhateverItSaw(t *testing.T) {
+func TestPollUpgradeRun_ReturnsAtTheContextWhateverItSaw(t *testing.T) {
 	restore := SetUpgradeStatusPollIntervalForTest(time.Millisecond)
 	defer restore()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
 	client := &progressReads{stubFirmwareClient: &stubFirmwareClient{}, answers: []func() (*opnapi.FirmwareProgressStatus, error){progressError()}}
-	if got := pollUpgradeStatus(ctx, client, noopLogger{}); got != "" {
+	if got := pollToTheEnd(ctx, client); got != "" {
 		t.Fatalf("sentinel = %q, want empty when the context ends", got)
+	}
+}
+
+// A run that was only believed to have started is held to its marker: an end of
+// done that does not carry it is another job's, and a reboot is the box going down
+// whoever's job it ends.
+func TestPollUpgradeRun_AnEndThatIsAnotherJobsIsToldFromTheRuns(t *testing.T) {
+	restore := SetUpgradeStatusPollIntervalForTest(time.Millisecond)
+	defer restore()
+
+	ours := updateRequestMarker + "\nrunning...\n"
+	foreign := foreignCheckLog
+	previous := "the previous run\n" + updateRequestMarker + "\n***DONE***"
+
+	for name, tc := range map[string]struct {
+		baseline  string
+		ours      bool
+		answers   []func() (*opnapi.FirmwareProgressStatus, error)
+		want      string
+		elsewhere bool
+	}{
+		"another job's log that ended": {
+			"before", false, []func() (*opnapi.FirmwareProgressStatus, error){progressWith("running", foreign), progressWith("done", foreign+"***DONE***")}, "", true},
+		"the previous run's log, marker and all": {
+			previous, false, []func() (*opnapi.FirmwareProgressStatus, error){progressError(), progressWith("done", previous)}, "", true},
+		"the run's own log, shown late": {
+			"before", false, []func() (*opnapi.FirmwareProgressStatus, error){progressError(), progressWith("running", ours), progressWith("done", ours+"***DONE***")}, "done", false},
+		"a run already seen to be the run's, whose log another job has replaced": {
+			"before", true, []func() (*opnapi.FirmwareProgressStatus, error){progressWith("done", foreign+"***DONE***")}, "done", false},
+		"a reboot, whatever log it ends": {
+			"before", false, []func() (*opnapi.FirmwareProgressStatus, error){progressWith("reboot", foreign)}, "reboot", false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &progressReads{stubFirmwareClient: &stubFirmwareClient{}, answers: tc.answers}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			got, elsewhere := pollUpgradeRun(ctx, client, noopLogger{}, tc.baseline, updateRequestMarker, tc.ours)
+			if got != tc.want || elsewhere != tc.elsewhere {
+				t.Fatalf("pollUpgradeRun = %q, elsewhere %v; want %q, %v", got, elsewhere, tc.want, tc.elsewhere)
+			}
+		})
 	}
 }
 

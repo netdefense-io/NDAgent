@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
 
 // recorder collects the sequence's steps in execution order, which is
@@ -325,6 +327,8 @@ func TestDecommission_DeprovisionFailureDoesNotStopTheSequence(t *testing.T) {
 // The "auth" family is the one exception to
 // "no API client means no object families": auth servers have no REST API
 // at all, so it is wired unconditionally, placed AFTER the apiClient block.
+// The "firmware_pin" family is the other: it takes a firmware pin off through the
+// plugin's PHP, which needs no API user.
 func TestNewDecommissioner_DeprovisionWiredWithoutAnAPIClient(t *testing.T) {
 	d := NewDecommissioner(nil, "os-netdefense", "device-uuid-1", "", func() {})
 
@@ -334,8 +338,8 @@ func TestNewDecommissioner_DeprovisionWiredWithoutAnAPIClient(t *testing.T) {
 	if d.RemoveAgentIdentity != nil || d.RemoveReadonlyIdentity != nil {
 		t.Error("the API identity removals should stay unwired without an API client")
 	}
-	if len(d.Families) != 1 || d.Families[0].Name != "auth" {
-		t.Fatalf("families = %v, want exactly [auth] without an API client", familyNames(d.Families))
+	if len(d.Families) != 2 || d.Families[0].Name != "auth" || d.Families[1].Name != "firmware_pin" {
+		t.Fatalf("families = %v, want exactly [auth firmware_pin] without an API client", familyNames(d.Families))
 	}
 }
 
@@ -463,5 +467,104 @@ func TestNewDecommissioner_TrustFamilyCarriesAnOwedRestart(t *testing.T) {
 	}
 	if !d.WebGUIRestartOwed || d.StartWebGUIRestart == nil {
 		t.Fatalf("owed = %v, starter set = %v", d.WebGUIRestartOwed, d.StartWebGUIRestart != nil)
+	}
+}
+
+// --- the firmware_pin family ---------------------------------------------------------
+
+// A device in a firmware track is held at one release by a setting the agent
+// wrote; a decommission that left it would leave a frozen device with no
+// NetDefense to move it.
+func TestNewDecommissioner_TheFirmwarePinFamilyIsWiredWithAndWithoutAnAPIClient(t *testing.T) {
+	for _, withClient := range []bool{true, false} {
+		var client *opnapi.Client
+		if withClient {
+			client = opnapi.NewClient("https://127.0.0.1/api", "k", "s", true)
+		}
+		d := NewDecommissioner(client, "os-netdefense", "device-uuid-1", "", func() {})
+		names := familyNames(d.Families)
+		if len(names) == 0 || names[len(names)-1] != "firmware_pin" {
+			t.Errorf("client=%v: families = %v, want firmware_pin last (beside auth)", withClient, names)
+		}
+		var auth, pin int
+		for i, n := range names {
+			switch n {
+			case "auth":
+				auth = i
+			case "firmware_pin":
+				pin = i
+			}
+		}
+		if pin < auth {
+			t.Errorf("client=%v: families = %v, firmware_pin should follow auth", withClient, names)
+		}
+	}
+}
+
+// standInHelper makes releaseFirmwarePin run a shell script in place of the PHP
+// helper, which records its arguments.
+func standInHelper(t *testing.T, script string) (argsFile string) {
+	t.Helper()
+	dir := t.TempDir()
+	argsFile = dir + "/args"
+	path := dir + "/helper.sh"
+	body := "#!/bin/sh\necho \"$@\" > '" + argsFile + "'\n" + script
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prevI, prevS, prevP := releasePinInterpreter, releasePinScript, releasePinStatePath
+	releasePinInterpreter, releasePinScript, releasePinStatePath = "/bin/sh", path, "/var/db/ndagent/firmware-track.json"
+	t.Cleanup(func() { releasePinInterpreter, releasePinScript, releasePinStatePath = prevI, prevS, prevP })
+	return argsFile
+}
+
+func TestReleaseFirmwarePin_RunsTheHelperWithTheRecordAndReportsItsAnswer(t *testing.T) {
+	args := standInHelper(t, `echo '{"result":"released","released":true}'; exit 0`+"\n")
+	if err := releaseFirmwarePin(context.Background()); err != nil {
+		t.Fatalf("error %v", err)
+	}
+	got, _ := os.ReadFile(args)
+	if !strings.Contains(string(got), "--state-file=/var/db/ndagent/firmware-track.json") || !strings.Contains(string(got), "--json") {
+		t.Errorf("helper arguments %q", got)
+	}
+}
+
+func TestReleaseFirmwarePin_AHelperThatFailsIsAFamilyFailure(t *testing.T) {
+	standInHelper(t, `echo '{"result":"failed","message":"config lock unavailable"}'; exit 22`+"\n")
+	err := releaseFirmwarePin(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "exited 22") || !strings.Contains(err.Error(), "config lock unavailable") {
+		t.Fatalf("error %v: a pin that could not be released has to be retried and logged, not passed over", err)
+	}
+}
+
+// A record nothing can be read from is not "no pin": the helper exits 23 and the
+// family fails, so the decommission log says a pin may remain.
+func TestReleaseFirmwarePin_AnUnreadableRecordIsAFailureToo(t *testing.T) {
+	standInHelper(t, `echo '{"result":"failed","message":"format 2"}'; exit 23`+"\n")
+	if err := releaseFirmwarePin(context.Background()); err == nil {
+		t.Fatal("an unreadable record was passed over")
+	}
+}
+
+func TestReleaseFirmwarePin_APluginWithoutTheHelperHasNothingToRelease(t *testing.T) {
+	prev := releasePinScript
+	releasePinScript = "/nonexistent/release_firmware_flavour.php"
+	defer func() { releasePinScript = prev }()
+	if err := releaseFirmwarePin(context.Background()); err != nil {
+		t.Fatalf("error %v", err)
+	}
+}
+
+// The helper writes config.xml: the sequence's own context, which a shutdown
+// cancels, must not reach it.
+func TestReleaseFirmwarePin_IgnoresACancelledContext(t *testing.T) {
+	args := standInHelper(t, `echo '{"result":"released"}'; exit 0`+"\n")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := releaseFirmwarePin(ctx); err != nil {
+		t.Fatalf("error %v", err)
+	}
+	if _, err := os.Stat(args); err != nil {
+		t.Errorf("the helper did not run under a cancelled context: %v", err)
 	}
 }
