@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"strings"
 	"time"
 )
@@ -42,7 +41,7 @@ func InstalledVersions(ctx context.Context) (map[string]string, error) {
 }
 
 func pkgInstalledVersionsFreeBSD(ctx context.Context) (map[string]string, error) {
-	cmd := exec.CommandContext(ctx, "pkg", "query", "%n %v")
+	cmd := pkgCmd(ctx, "query", "%n %v")
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

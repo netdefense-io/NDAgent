@@ -261,30 +261,53 @@ func TestParseAPIAuthContent_IdenticalFacilityDuplicateDeduplicates(t *testing.T
 func TestAuthFamilyShouldRun(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.xml")
+	shouldRun := func(hasContent bool) bool {
+		return authFamilyShouldRun(hasContent, configXMLHasAuthMarkers(context.Background(), path))
+	}
 
 	// No file at all: fails CLOSED (assume markers exist) -- this gates a
 	// live security decision (the reserved-name exclusion recompute and
 	// the blanket-deferral trigger), not a diagnostic, so an unreadable
 	// config.xml must not silently skip the family.
-	if !authFamilyShouldRun(false, path) {
+	if !shouldRun(false) {
 		t.Error("no content, unreadable config.xml: want true (fail closed)")
 	}
 
 	if err := os.WriteFile(path, []byte("<opnsense><system></system></opnsense>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if authFamilyShouldRun(false, path) {
+	if shouldRun(false) {
 		t.Error("no content, no markers: want false")
 	}
-	if !authFamilyShouldRun(true, path) {
+	if !shouldRun(true) {
 		t.Error("content present: want true regardless of markers")
 	}
 
 	if err := os.WriteFile(path, []byte("<opnsense><system><authserver><netdefense_owner>u</netdefense_owner></authserver></system></opnsense>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if !authFamilyShouldRun(false, path) {
+	if !shouldRun(false) {
 		t.Error("no content but a live marker: want true")
+	}
+}
+
+// OPNsense saves config.xml by truncating it and writing it again in place,
+// so a read during a save can be empty or stop early, before a marker. Neither
+// may read as "no markers".
+func TestConfigXMLHasAuthMarkers_EmptyOrCutShortFileFailsClosed(t *testing.T) {
+	for name, content := range map[string]string{
+		"empty":     "",
+		"cut short": "<?xml version=\"1.0\"?>\n<opnsense>\n  <system>\n    <hostname>fw</hostname>\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.xml")
+			if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if !configXMLHasAuthMarkers(context.Background(), path) {
+				t.Error("want true (fail closed): the part not read may hold a marker")
+			}
+		})
 	}
 }
 
@@ -1374,7 +1397,7 @@ func TestComputeReservedNamesDesired_SkipsExternalLiveGroupMembers(t *testing.T)
 // -----------------------------------------------------------------
 
 func TestRunAuthServerDecommission_EmptyUUIDRejected(t *testing.T) {
-	if err := runAuthServerDecommission("", ""); err == nil {
+	if err := runAuthServerDecommission(context.Background(), "", ""); err == nil {
 		t.Fatal("expected an error for an empty device_uuid")
 	}
 }
@@ -1384,7 +1407,7 @@ func TestRunAuthServerDecommission_PostConditionNotClean(t *testing.T) {
 	respJSON, _ := json.Marshal(resp)
 	withFakeAuthHelper(t, func([]byte) ([]byte, int, error) { return respJSON, 0, nil })
 
-	err := runAuthServerDecommission("device-1", "")
+	err := runAuthServerDecommission(context.Background(), "device-1", "")
 	if err == nil {
 		t.Fatal("expected an error when post_condition_clean is false")
 	}
@@ -1403,7 +1426,7 @@ func TestRunAuthServerDecommission_Success(t *testing.T) {
 		return respJSON, 0, nil
 	})
 
-	if err := runAuthServerDecommission("device-1", path); err != nil {
+	if err := runAuthServerDecommission(context.Background(), "device-1", path); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if captured.Mode != "decommission" || captured.DeviceUUID != "device-1" {
@@ -1427,7 +1450,7 @@ func TestRunAuthServerDecommission_LeftoverMarkerFailsEvenWhenHelperReportsClean
 	respJSON, _ := json.Marshal(resp)
 	withFakeAuthHelper(t, func([]byte) ([]byte, int, error) { return respJSON, 0, nil })
 
-	if err := runAuthServerDecommission("device-1", path); err == nil {
+	if err := runAuthServerDecommission(context.Background(), "device-1", path); err == nil {
 		t.Fatal("expected an error: a <netdefense_owner> naming this device's uuid is still in config.xml")
 	}
 }
@@ -1504,7 +1527,7 @@ func TestRunHelperSubprocess_SIGTERMOnlyNeverKillsAfterCeiling(t *testing.T) {
 // TestRunHelperSubprocess_AbandonsWithoutKillingPastGrace is the major-
 // finding regression: a process that ignores SIGTERM and keeps running
 // past ceiling+grace must make runHelperSubprocess RETURN (with
-// errAuthHelperAbandoned) rather than block forever -- and the process
+// errHelperAbandoned) rather than block forever -- and the process
 // itself must still never be killed. Before this fix there was no grace
 // window at all: the call blocked on cmd.Wait() for as long as the
 // process legitimately (or not) kept running, which -- now that the SYNC
@@ -1525,8 +1548,8 @@ func TestRunHelperSubprocess_AbandonsWithoutKillingPastGrace(t *testing.T) {
 	_, exitCode, err := runHelperSubprocess("/bin/sh", []string{"-c", script}, nil, ceiling, grace)
 	elapsed := time.Since(start)
 
-	if !errors.Is(err, errAuthHelperAbandoned) {
-		t.Fatalf("err = %v, want errAuthHelperAbandoned", err)
+	if !errors.Is(err, errHelperAbandoned) {
+		t.Fatalf("err = %v, want errHelperAbandoned", err)
 	}
 	if exitCode != -1 {
 		t.Errorf("exitCode = %d, want -1 (no terminal status -- the process is still running)", exitCode)

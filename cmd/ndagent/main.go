@@ -94,6 +94,12 @@ func init() {
 }
 
 func run(cmd *cobra.Command, args []string) error {
+	// An error from here on is the agent's, not a usage mistake, and daemon(8)
+	// sends stderr to syslog on every restart. Flag and positional errors are
+	// rejected before RunE and keep their usage text.
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+
 	// Determine logging mode
 	logMode := logging.ModeService
 	if foreground {

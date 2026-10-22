@@ -60,8 +60,8 @@ require_once 'auth.inc';
 require_once 'script/load_phalcon.php';
 
 use OPNsense\Core\Backend;
-use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\ConfigTransaction;
 use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
@@ -138,11 +138,9 @@ $json = isset($opts['json']);
  */
 function resetIdentity(bool $json): void
 {
-    $gotLock = false;
     $cleared = [];
     try {
-        Config::getInstance()->lock();
-        $gotLock = true;
+        ConfigTransaction::begin();
 
         $mdl = new Settings();
         $fields = ['deviceId', 'token', 'apiKey', 'apiSecret', 'bootstrapToken'];
@@ -161,14 +159,14 @@ function resetIdentity(bool $json): void
             $cleared[] = 'apiConfigured';
         }
 
-        $mdl->serializeToConfig(false, true);
-        Config::getInstance()->save();
-        Config::getInstance()->unlock();
-        $gotLock = false;
-    } catch (\Exception $e) {
-        if ($gotLock) {
-            Config::getInstance()->unlock();
+        if (!empty($cleared)) {
+            $mdl->serializeToConfig(false, true);
+            ConfigTransaction::commit('NetDefense: device identity cleared');
+        } else {
+            ConfigTransaction::end();
         }
+    } catch (\Exception $e) {
+        ConfigTransaction::end();
         emit(
             ['result' => 'failed', 'message' => $e->getMessage()],
             EXIT_NO_PERSIST,
@@ -221,24 +219,26 @@ function resetIdentity(bool $json): void
  */
 function deprovisionAccounts(bool $json): void
 {
-    $gotLock = false;
     try {
-        Config::getInstance()->lock();
-        $gotLock = true;
+        ConfigTransaction::begin();
 
         $agent = ApiCredsProvisioner::deprovision();
         $readonly = ReadOnlyUserProvisioner::deprovision();
 
-        if ($agent['removed'] || $readonly['removed']) {
-            Config::getInstance()->save();
+        $removed = [];
+        if ($agent['removed']) {
+            $removed[] = ApiCredsProvisioner::NETDEFENSE_USERNAME;
         }
-
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        if ($readonly['removed']) {
+            $removed[] = ReadOnlyUserProvisioner::READONLY_USERNAME;
+        }
+        if (!empty($removed)) {
+            ConfigTransaction::commit('NetDefense: accounts removed (' . implode(', ', $removed) . ')');
+        } else {
+            ConfigTransaction::end();
+        }
     } catch (\Exception $e) {
-        if ($gotLock) {
-            Config::getInstance()->unlock();
-        }
+        ConfigTransaction::end();
         emit(
             ['result' => 'failed', 'message' => $e->getMessage()],
             EXIT_NO_PERSIST,
@@ -250,6 +250,8 @@ function deprovisionAccounts(bool $json): void
     // accounts against config.xml and deletes any whose config entry is
     // gone — these two carry no shell so normally have no local account at
     // all, but a device where one was added by hand must not keep it.
+    // `auth sync group` does the same for the groups, which every OPNsense
+    // group has in the system database.
     $backend = new Backend();
     foreach (
         [
@@ -259,6 +261,7 @@ function deprovisionAccounts(bool $json): void
     ) {
         $backend->configdpRun('auth sync user', [$username]);
     }
+    $backend->configdpRun('auth sync group', [ReadOnlyUserProvisioner::READONLY_GROUPNAME]);
 
     // Re-render ndagent.conf: the API credentials it carried have just
     // been cleared from the model.
@@ -315,10 +318,8 @@ $result = [
     'api_setup' => 'not_requested',
 ];
 
-$gotLock = false;
 try {
-    Config::getInstance()->lock();
-    $gotLock = true;
+    ConfigTransaction::begin();
 
     $mdl = new Settings();
 
@@ -385,8 +386,7 @@ try {
         $errors[] = $msg->getField() . ': ' . $msg->getMessage();
     }
     if (!empty($errors)) {
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        ConfigTransaction::end();
         emit(
             ['result' => 'failed', 'message' => 'model validation failed', 'errors' => $errors],
             EXIT_NO_PERSIST,
@@ -427,13 +427,15 @@ try {
         $result['readonly_password'] = $readonlyResult['password'] ?? LocalAccounts::PASSWORD_KEPT;
     }
 
-    Config::getInstance()->save();
-    Config::getInstance()->unlock();
-    $gotLock = false;
+    $done = array_keys(array_filter([
+        'settings saved' => true,
+        'API credentials set up' => $doSetupApi && $apiSetupResult['result'] === 'ok',
+        ApiCredsProvisioner::NETDEFENSE_USERNAME . ' password set' => $doSetupApi && $passwordResult['changed'],
+        ReadOnlyUserProvisioner::READONLY_USERNAME . ' user and group reconciled' => $doSetupApi && $readonlyResult['result'] === 'ok',
+    ]));
+    ConfigTransaction::commit('NetDefense: ' . implode(', ', $done));
 } catch (\Exception $e) {
-    if ($gotLock) {
-        Config::getInstance()->unlock();
-    }
+    ConfigTransaction::end();
     emit(
         ['result' => 'failed', 'message' => $e->getMessage()],
         EXIT_NO_PERSIST,
@@ -453,6 +455,7 @@ if (
 }
 
 if ($doSetupApi && isset($readonlyResult) && $readonlyResult['result'] === 'ok') {
+    $backend->configdpRun('auth sync group', [ReadOnlyUserProvisioner::READONLY_GROUPNAME]);
     $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
 }
 

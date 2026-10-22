@@ -359,7 +359,7 @@ func (w *WebSocketClient) connect(ctx context.Context) error {
 		// Send clean close frame if context was cancelled (graceful shutdown)
 		reason := ""
 		if ctx.Err() != nil {
-			w.CloseClean()
+			closeClean(conn)
 			reason = "shutdown"
 		} else {
 			conn.Close()
@@ -1119,23 +1119,23 @@ func (w *WebSocketClient) GetWebadminPort() int {
 	return w.cfg.WebadminPort
 }
 
-// CloseClean sends a WebSocket close frame before closing the connection.
-// This signals to the server that the disconnect was intentional.
-func (w *WebSocketClient) CloseClean() {
-	w.mu.Lock()
-	conn := w.conn
-	w.mu.Unlock()
+// closeFrameWait bounds how long the close frame of a graceful shutdown waits
+// to go out; a variable so tests can shorten it.
+var closeFrameWait = 5 * time.Second
 
-	if conn == nil {
-		return
-	}
-
-	log := logging.Named("websocket")
-	log.Debug("Sending WebSocket close frame")
-
-	// Set write deadline for close frame
-	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
-	conn.WriteMessage(websocket.CloseMessage,
-		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+// closeClean sends a WebSocket close frame, which tells the server the
+// disconnect was intentional, then closes the connection.
+//
+// It takes the connection from its caller and never waits for w.mu: SendJSON
+// holds w.mu for the whole write, with no deadline, so a write stuck on a peer
+// that stopped reading would hold the shutdown until TCP gives up. gorilla
+// allows WriteControl and Close beside another writer: the frame waits at most
+// closeFrameWait for that write to give way, and Close then fails the stuck
+// write, which releases w.mu.
+func closeClean(conn *websocket.Conn) {
+	logging.Named("websocket").Debug("Sending WebSocket close frame")
+	_ = conn.WriteControl(websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+		time.Now().Add(closeFrameWait))
 	conn.Close()
 }

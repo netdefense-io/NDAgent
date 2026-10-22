@@ -98,6 +98,7 @@ require_once 'script/load_phalcon.php';
 use OPNsense\Core\Backend;
 use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\ConfigTransaction;
 use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 use OPNsense\NetDefense\Settings;
@@ -137,14 +138,12 @@ function log_ro(int $priority, string $message): void
     syslog($priority, $message);
 }
 
-$gotLock = false;
 $roResult = null;
 $agentPassword = ['result' => 'skipped', 'changed' => false, 'message' => ''];
 $settingsChanged = false;
 
 try {
-    Config::getInstance()->lock();
-    $gotLock = true;
+    ConfigTransaction::begin();
 
     // Fill in an empty password on the agent's own account. Runs before the
     // read-only provisioner so each one builds its User model after the
@@ -210,16 +209,18 @@ try {
         $settingsChanged = true;
     }
 
-    if ($roResult['result'] === 'ok' || $agentPassword['changed'] || $settingsChanged) {
-        Config::getInstance()->save();
+    $done = array_keys(array_filter([
+        ReadOnlyUserProvisioner::READONLY_USERNAME . ' user and group reconciled' => $roResult['result'] === 'ok',
+        ApiCredsProvisioner::NETDEFENSE_USERNAME . ' password set' => $agentPassword['changed'],
+        'settings defaults written' => $settingsChanged,
+    ]));
+    if (!empty($done)) {
+        ConfigTransaction::commit('NetDefense: ' . implode(', ', $done));
+    } else {
+        ConfigTransaction::end();
     }
-
-    Config::getInstance()->unlock();
-    $gotLock = false;
 } catch (\Exception $e) {
-    if ($gotLock) {
-        Config::getInstance()->unlock();
-    }
+    ConfigTransaction::end();
     emit_ro(
         ['result' => 'failed', 'message' => 'Exception: ' . $e->getMessage()],
         1,
@@ -231,6 +232,7 @@ try {
 $backend = new Backend();
 
 if ($roResult['result'] === 'ok') {
+    $backend->configdpRun('auth sync group', [ReadOnlyUserProvisioner::READONLY_GROUPNAME]);
     $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
 }
 

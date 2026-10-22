@@ -579,12 +579,11 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 			//
 			// DISABLED is a reversible, usually billing-driven state:
 			// the operator re-enables the device in the control plane
-			// and expects it to come back. The agent's rc.d script runs
-			// daemon(8) without -r, so exiting here would leave the box
-			// down until someone logged in and restarted the service by
-			// hand — a suspension would silently become a permanent
-			// outage. So: back off and keep asking, forever, and never
-			// touch anything on the device.
+			// and expects it to come back. Exiting here would only have
+			// daemon(8) start the agent again after its restart delay,
+			// into another registration check, which the control plane
+			// rate-limits. So: back off and keep asking, forever, and
+			// never touch anything on the device.
 			log.Warnw("Device is disabled; waiting for it to be re-enabled",
 				"device_uuid", r.cfg.DeviceUUID,
 				"next_check_in", disabledBackoff,

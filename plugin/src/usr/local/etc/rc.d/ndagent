@@ -11,8 +11,15 @@
 #                          Set it to "YES" to enable ndagent.
 # ndagent_config (str):    Configuration file path
 #                          Default: /usr/local/etc/ndagent.conf
-# ndagent_pidfile (str):   PID file path
+# ndagent_pidfile (str):   PID file of the agent
 #                          Default: /var/run/ndagent.pid
+# ndagent_supervisor_pidfile (str):
+#                          PID file of the daemon(8) that supervises the agent
+#                          Default: /var/run/ndagent.daemon.pid
+# ndagent_restart_delay (int):
+#                          Seconds daemon(8) waits before it starts the agent
+#                          again after it exited
+#                          Default: 30
 # ndagent_logfile (str):   Log file path
 #                          Default: /var/log/ndagent.log
 
@@ -22,12 +29,11 @@ name=ndagent
 rcvar=ndagent_enable
 
 # The Go binary only installs handlers for SIGINT/SIGTERM (see
-# internal/core/shutdown.go) -- it does not catch SIGHUP. rc.subr's
-# default reload_cmd sends `kill -HUP $rc_pid`, and daemon(8) is run
-# without -r (no auto-restart on child exit), so an unhandled SIGHUP
-# would simply kill the agent and leave it down instead of reloading
-# its configuration. Override reload to do a full restart instead --
-# config changes always require a fresh process anyway, and the
+# internal/core/shutdown.go) -- it does not catch SIGHUP, and rc.subr's
+# default reload_cmd sends `kill -HUP $rc_pid` to the daemon(8) supervisor,
+# which ignores it, so a reload would change nothing. Override reload to do
+# a full restart instead -- config changes always require a fresh process
+# anyway, and the
 # OPNsense plugin's own "Apply" button already goes through this same
 # restart path via ApiMutableServiceControllerBase::reconfigureAction()
 # (reconfigureForceRestart() is not overridden, so it defaults to a
@@ -40,16 +46,65 @@ load_rc_config $name
 : ${ndagent_enable:="NO"}
 : ${ndagent_config:="/usr/local/etc/ndagent.conf"}
 : ${ndagent_pidfile:="/var/run/ndagent.pid"}
+: ${ndagent_supervisor_pidfile:="/var/run/ndagent.daemon.pid"}
+: ${ndagent_restart_delay:="30"}
 : ${ndagent_logfile:="/var/log/ndagent.log"}
 : ${ndagent_user:="root"}
 : ${ndagent_group:="wheel"}
 
-procname="/usr/local/bin/ndagent"
+# daemon(8) supervises the agent and starts it again ndagent_restart_delay
+# seconds after it exits, whatever the reason (a crash, a panic, an
+# out-of-memory kill). rc.subr signals the supervisor, never the agent: a
+# SIGTERM to the supervisor is forwarded to the agent and ends both, while one
+# to the agent would only have it started again. The delay keeps an agent that
+# fails at start from hammering the control plane's rate-limited registration
+# check. The agent finds the supervisor through NDAGENT_SUPERVISOR_PIDFILE, so
+# the exits it makes on purpose (a restart, a plugin install, a decommission, a
+# deleted device) end the supervision first. -R alone sets both the restart and
+# its delay; older daemon(8) releases let a later -r reset the delay to 1 s.
+# -S -T ndagent sends what the agent writes to stdout and stderr (a panic, a
+# configuration error before its logging starts) to syslog under its own
+# name; without it daemon(8) drops that output, and a restart hides the crash.
+procname="/usr/sbin/daemon"
 command="/usr/sbin/daemon"
-pidfile="${ndagent_pidfile}"
+pidfile="${ndagent_supervisor_pidfile}"
+command_args="-f -S -T ndagent -R ${ndagent_restart_delay} -P ${ndagent_supervisor_pidfile} -p ${ndagent_pidfile} /usr/local/bin/ndagent --config ${ndagent_config}"
+ndagent_env="${ndagent_env:+${ndagent_env} }NDAGENT_SUPERVISOR_PIDFILE=${ndagent_supervisor_pidfile}"
 
-# Use FreeBSD daemon utility for backgrounding
-command_args="-f -p ${ndagent_pidfile} ${procname} --config ${ndagent_config}"
+# The pid a pidfile holds, or nothing.
+ndagent_pidfile_pid()
+{
+    local _pid _junk
+    [ -s "$1" ] || return 0
+    read _pid _junk < "$1"
+    echo "${_pid}"
+}
+
+# The pid of the daemon(8) that supervises this agent, or nothing. A pidfile
+# left by a daemon(8) that was killed names a dead process, or one whose pid
+# another program now holds, another service's daemon(8) included: only a
+# daemon(8) whose command shows this agent counts, before its first fork
+# (its arguments) or after it (its title, "daemon: <agent>[<pid>]").
+ndagent_supervisor_pid()
+{
+    local _pid
+    _pid=$(ndagent_pidfile_pid "${ndagent_supervisor_pidfile}")
+    [ -n "${_pid}" ] || return 0
+    case "$(ps -ww -o command= -p "${_pid}" 2>/dev/null)" in
+    "daemon: /usr/local/bin/ndagent["*|"/usr/sbin/daemon "*" /usr/local/bin/ndagent "*)
+        echo "${_pid}"
+        ;;
+    esac
+}
+
+# Without a supervisor of ours, rc.subr works on the agent's own pidfile, as
+# packages before the supervisor did. That reaches an agent an earlier package
+# started, and one whose daemon(8) was killed alone and which runs on under
+# init: status reports it, stop ends it and start refuses to run a second one.
+if [ -z "$(ndagent_supervisor_pid)" ]; then
+    procname="/usr/local/bin/ndagent"
+    pidfile="${ndagent_pidfile}"
+fi
 
 # Check if service is enabled via configuration
 ndagent_prestart()
@@ -74,19 +129,20 @@ ndagent_prestart()
     ndagent_wait_gone ""
 }
 
-# daemon(8) locks the pidfile before it starts the agent and releases it only
-# on its way out, after it has reaped the agent; until then a new daemon(8)
-# will not start. rc.subr's stop does not wait for that. Its wait_for_pids
-# returns as soon as pwait(1) sees the agent begin to exit (on FreeBSD 15 it
-# asks pwait once and does not check again), while ps(1) still lists the
-# exiting agent under its own name, so the start of a restart that follows at
-# once can find it "already running" and leave nothing running. Wait for the
-# pid to be gone, then for the pidfile to be released. Only a lock still held
-# fails the wait: a lockf that cannot run says nothing about the lock, and
-# daemon(8) refuses a second instance by itself, so the agent still starts.
+# daemon(8) locks its pidfiles before it starts the agent and releases them
+# only on its way out, after it has reaped the agent; until then a new
+# daemon(8) will not start. rc.subr's stop does not wait for that. Its
+# wait_for_pids returns as soon as pwait(1) sees the process begin to exit (on
+# FreeBSD 15 it asks pwait once and does not check again), while ps(1) still
+# lists the exiting process, so the start of a restart that follows at once can
+# find it "already running" and leave nothing running. Wait for the pid to be
+# gone, then for both pidfiles to be released (an earlier package's daemon(8)
+# holds only the agent's). Only a lock still held fails the wait: a lockf that
+# cannot run says nothing about the lock, and daemon(8) refuses a second
+# instance by itself, so the agent still starts.
 ndagent_wait_gone()
 {
-    local _pid _n _rc
+    local _pid _n _rc _file
     _pid=$1
     _n=0
     while [ -n "${_pid}" ] && kill -0 "${_pid}" 2>/dev/null; do
@@ -95,18 +151,21 @@ ndagent_wait_gone()
         _n=$((_n + 1))
     done
 
-    lockf -k -n -s -t 30 "${pidfile}" true
-    _rc=$?
-    case ${_rc} in
-    0|69)   # released, or no pidfile left (EX_UNAVAILABLE)
-        return 0
-        ;;
-    75)     # EX_TEMPFAIL: still locked after 30 s
-        warn "the previous ${name} instance still holds ${pidfile}"
-        return 1
-        ;;
-    esac
-    warn "could not wait for ${pidfile} to be released (lockf exited ${_rc}); going on"
+    for _file in "${ndagent_supervisor_pidfile}" "${ndagent_pidfile}"; do
+        lockf -k -n -s -t 30 "${_file}" true
+        _rc=$?
+        case ${_rc} in
+        0|69)   # released, or no pidfile left (EX_UNAVAILABLE)
+            ;;
+        75)     # EX_TEMPFAIL: still locked after 30 s
+            warn "the previous ${name} instance still holds ${_file}"
+            return 1
+            ;;
+        *)
+            warn "could not wait for ${_file} to be released (lockf exited ${_rc}); going on"
+            ;;
+        esac
+    done
     return 0
 }
 
@@ -115,21 +174,27 @@ ndagent_poststop()
     ndagent_wait_gone "${rc_pid}"
 }
 
+# OPNsense's service status reads this output for "is running" and "not
+# running". Between an agent's exit and its restart the supervisor still runs:
+# the service is up (status 0) while the agent is not.
 ndagent_status()
 {
-    if [ -f "${pidfile}" ]; then
-        pid=$(cat "${pidfile}")
-        if kill -0 "${pid}" 2>/dev/null; then
-            echo "NetDefense Agent is running (pid: ${pid})"
-            return 0
-        else
-            echo "NetDefense Agent is not running (stale pid file)"
-            return 1
-        fi
-    else
+    local _agent
+    if [ -z "${rc_pid}" ]; then
         echo "NetDefense Agent is not running"
         return 1
     fi
+    if [ "${pidfile}" = "${ndagent_pidfile}" ]; then
+        echo "NetDefense Agent is running (pid: ${rc_pid})"
+        return 0
+    fi
+    _agent=$(cat "${ndagent_pidfile}" 2>/dev/null)
+    if [ -n "${_agent}" ] && kill -0 "${_agent}" 2>/dev/null; then
+        echo "NetDefense Agent is running (pid: ${_agent}, supervisor pid: ${rc_pid})"
+    else
+        echo "NetDefense Agent is not running; its supervisor (pid: ${rc_pid}) starts it again"
+    fi
+    return 0
 }
 
 ndagent_reload()

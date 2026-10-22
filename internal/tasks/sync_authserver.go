@@ -46,6 +46,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/util"
@@ -107,7 +108,7 @@ const (
 	// behind this one — eventually filling the queue and answering every
 	// new SYNC with SYNC_QUEUE_FULL — and stalls the auth family inside
 	// decommission the same way. Past ceiling+authHelperAbandonGrace,
-	// runHelperSubprocess stops waiting and returns errAuthHelperAbandoned
+	// runHelperSubprocess stops waiting and returns errHelperAbandoned
 	// (mapped to AUTH_HELPER_TIMEOUT with the usual blanket deferral when
 	// markers exist) — but the process itself is left completely alone to
 	// finish whatever save() it may legitimately still be in the middle
@@ -131,11 +132,11 @@ const (
 	authHelperMaxResponseBytes = 1024 * 1024
 )
 
-// errAuthHelperAbandoned is runHelperSubprocess's sentinel for "gave up
-// waiting after ceiling+authHelperAbandonGrace" — checked with errors.Is
-// so callers can map it to a distinct, actionable code (AUTH_HELPER_TIMEOUT)
-// instead of the generic AUTH_HELPER_FAULT.
-var errAuthHelperAbandoned = errors.New("auth helper subprocess abandoned: still running past ceiling+grace, never killed")
+// errHelperAbandoned is runHelperSubprocess's sentinel for "gave up
+// waiting after ceiling+grace" — checked with errors.Is so the AUTH family
+// can map it to a distinct, actionable code (AUTH_HELPER_TIMEOUT) instead
+// of the generic AUTH_HELPER_FAULT.
+var errHelperAbandoned = errors.New("helper subprocess abandoned: still running past ceiling+grace, never killed")
 
 // -----------------------------------------------------------------
 // Strict parsing
@@ -400,12 +401,13 @@ func parseAPIAuthContent(payload map[string]interface{}) authParseOutcome {
 
 // authFamilyShouldRun implements "when the family runs": the
 // payload carries AUTH content, OR a raw substring scan of config.xml finds
-// an existing marker. The second half is what lets facility "absent means
-// untouched" and server sweep-on-detach work even after every AUTH
-// snippet has been removed from every template — that decision lives in
-// device state, not in this pass's payload.
-func authFamilyShouldRun(hasContent bool, configXMLPath string) bool {
-	return hasContent || configXMLHasAuthMarkers(configXMLPath)
+// an existing marker (markersExist, from configXMLHasAuthMarkers). The second
+// half is what lets facility "absent means untouched" and server
+// sweep-on-detach work even after every AUTH snippet has been removed from
+// every template — that decision lives in device state, not in this pass's
+// payload.
+func authFamilyShouldRun(hasContent, markersExist bool) bool {
+	return hasContent || markersExist
 }
 
 // configXMLHasAuthMarkers is a cheap raw scan — never a full XML parse —
@@ -424,9 +426,12 @@ func authFamilyShouldRun(hasContent bool, configXMLPath string) bool {
 // with no exclusion recomputed and no blanket deferral to catch it. Failing
 // closed instead just means the family runs (and PHP's own read will
 // legitimately fault if the file really is unreadable, which correctly
-// produces the blanket deferral through the normal fault() path).
-func configXMLHasAuthMarkers(configXMLPath string) bool {
-	data, err := os.ReadFile(configXMLPath)
+// produces the blanket deferral through the normal fault() path). A file
+// that is empty or cut short (read while OPNsense saves it in place) or that
+// a writer keeps locked past the wait is a read error here too: the part not
+// read may hold a marker.
+func configXMLHasAuthMarkers(ctx context.Context, configXMLPath string) bool {
+	data, err := config.ReadConfigXML(ctx, configXMLPath)
 	if err != nil {
 		logging.Named("SYNC_API").Warnw("AUTH: could not scan config.xml for existing markers; assuming markers exist (fail closed on this security gate)",
 			"path", configXMLPath, "error", err)
@@ -561,7 +566,8 @@ func runAuthServersHelperDefault(requestJSON []byte) (stdout []byte, exitCode in
 // on `php`/auth_servers.php being present on the test host, and without a
 // real test having to wait out the full production grace window.
 // runAuthServersHelperDefault is this function applied to the production
-// binary/script/timing.
+// binary/script/timing, and every other plugin PHP script that writes
+// config.xml runs under it too (runPHPHelper).
 func runHelperSubprocess(binary string, args []string, requestJSON []byte, ceiling, grace time.Duration) (stdout []byte, exitCode int, err error) {
 	// Deliberately NOT the task's own context: the helper can hold
 	// the OPNsense config lock across a single save() and must run to
@@ -605,7 +611,7 @@ func runHelperSubprocess(binary string, args []string, requestJSON []byte, ceili
 	// process itself is never killed. Once ceiling has elapsed, cmd.Cancel
 	// has already sent SIGTERM; authHelperAbandonGrace is how much LONGER
 	// we wait for it to actually exit on its own before giving up on
-	// THIS call and reporting errAuthHelperAbandoned — the process keeps
+	// THIS call and reporting errHelperAbandoned — the process keeps
 	// running untouched, and a later helper invocation simply serializes
 	// behind it on the PHP-side config lock.
 	waitDone := make(chan error, 1)
@@ -637,7 +643,7 @@ func runHelperSubprocess(binary string, args []string, requestJSON []byte, ceili
 		// returned, so nothing guarantees that copy has finished) — this
 		// avoids handing the caller a half-written buffer, not a data
 		// race (nothing else ever reads `out` again in this function).
-		return nil, -1, fmt.Errorf("%w (ceiling %s + grace %s)", errAuthHelperAbandoned, ceiling, grace)
+		return nil, -1, fmt.Errorf("%w (ceiling %s + grace %s)", errHelperAbandoned, ceiling, grace)
 	}
 }
 
@@ -719,10 +725,10 @@ func executeSyncAuth(
 ) authFamilyOutcome {
 	log := logging.Named("SYNC_API")
 
-	if !authFamilyShouldRun(parsed.HasContent, configXMLPath) {
+	markersExist := configXMLHasAuthMarkers(ctx, configXMLPath)
+	if !authFamilyShouldRun(parsed.HasContent, markersExist) {
 		return authFamilyOutcome{Result: SyncAPIResult{Success: true}}
 	}
-	markersExist := configXMLHasAuthMarkers(configXMLPath)
 
 	fault := func(code, detail string) authFamilyOutcome {
 		msg := fmt.Sprintf("%s: %s", code, detail)
@@ -798,7 +804,7 @@ func executeSyncAuth(
 
 	stdout, exitCode, runErr := runAuthServersHelperFunc(requestJSON)
 	if runErr != nil {
-		if errors.Is(runErr, errAuthHelperAbandoned) {
+		if errors.Is(runErr, errHelperAbandoned) {
 			// The helper is still running, untouched — we simply stopped
 			// waiting for it. Distinct code from AUTH_HELPER_FAULT so this
 			// is diagnosable as "still in progress, not dead", but the
@@ -1332,7 +1338,7 @@ func filterDeferredGroupMembers(payload opnapi.APIGroupPayload, liveMembers map[
 // OPNsense API client — auth servers have no REST API at all, so this
 // family runs identically with or without one, unlike every other
 // decommission family in decommission.go.
-func runAuthServerDecommission(deviceUUID, configXMLPath string) error {
+func runAuthServerDecommission(ctx context.Context, deviceUUID, configXMLPath string) error {
 	if deviceUUID == "" {
 		return fmt.Errorf("empty device_uuid")
 	}
@@ -1377,7 +1383,7 @@ func runAuthServerDecommission(deviceUUID, configXMLPath string) error {
 	// does not block) on a read error, since decommission already
 	// tolerates a step failing and retries with backoff; this is
 	// verification, not the primary mechanism.
-	if configXMLMarkerRemains(configXMLPath, deviceUUID) {
+	if configXMLMarkerRemains(ctx, configXMLPath, deviceUUID) {
 		return fmt.Errorf("auth_servers.php decommission: a marker naming this device's uuid still remains in config.xml (found by NDAgent's own rescan, independent of the helper's post_condition_clean)")
 	}
 	return nil
@@ -1388,15 +1394,16 @@ func runAuthServerDecommission(deviceUUID, configXMLPath string) error {
 // (`<netdefense_owner>UUID</netdefense_owner>`) or a facility marker
 // (`<netdefense_authmode_owner>UUID:...</netdefense_authmode_owner>`
 // — the value is `<uuid>:<sha256>`, so the uuid is always the prefix up to
-// the colon). Fails open (returns false, logs a WARN) on a read error —
+// the colon). Fails open (returns false, logs a WARN) on a read error,
+// a file that is empty or cut short included —
 // this is a defense-in-depth verification on top of the helper's own
 // PostConditionClean, not the primary safety mechanism, and decommission's
 // own retry-with-backoff already tolerates a step that cannot complete.
-func configXMLMarkerRemains(configXMLPath, deviceUUID string) bool {
+func configXMLMarkerRemains(ctx context.Context, configXMLPath, deviceUUID string) bool {
 	if deviceUUID == "" {
 		return false
 	}
-	data, err := os.ReadFile(configXMLPath)
+	data, err := config.ReadConfigXML(ctx, configXMLPath)
 	if err != nil {
 		logging.Named("SYNC_API").Warnw("AUTH decommission: could not rescan config.xml for leftover markers",
 			"path", configXMLPath, "error", err)

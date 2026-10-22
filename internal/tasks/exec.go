@@ -17,8 +17,14 @@ package tasks
 // package.
 
 import (
+	"context"
+	"encoding/json"
+	"fmt"
 	"os/exec"
+	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/netdefense-io/ndagent/internal/util"
 )
@@ -47,4 +53,51 @@ func newDetachedHelperCmd(path string, args ...string) *exec.Cmd {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
 	return cmd
+}
+
+// The plugin's PHP scripts that write config.xml wait at most 30 s for the
+// config lock (ConfigTransaction.php), save in a second or two, then start
+// configd actions.
+const (
+	phpConfigHelperCeiling = 2 * time.Minute
+	phpConfigHelperGrace   = 30 * time.Second
+)
+
+// phpConfigHelperInterpreter runs them; a variable so tests can stand a
+// shell script in.
+var phpConfigHelperInterpreter = phpInterpreter
+
+// RunPHPConfigHelper runs one of the plugin's PHP scripts that write
+// config.xml and returns the result its --json report names. A context that
+// is already done keeps it from starting; one that ends while it runs does
+// not reach it: a cancelled context would kill it with SIGKILL, and a kill
+// during Config::save() leaves config.xml cut short. It is asked to stop with
+// SIGTERM only, after phpConfigHelperCeiling, which the script ignores while
+// it holds the config lock.
+func RunPHPConfigHelper(ctx context.Context, script string, args ...string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("%s not started: %w", filepath.Base(script), err)
+	}
+	return runPHPHelper(phpConfigHelperInterpreter, script, args, phpConfigHelperCeiling, phpConfigHelperGrace)
+}
+
+// runPHPHelper runs a plugin PHP script under runHelperSubprocess and returns
+// the result its --json report names. A non-zero exit is an error that
+// carries the report's result and message.
+func runPHPHelper(interpreter, script string, args []string, ceiling, grace time.Duration) (string, error) {
+	name := filepath.Base(script)
+	stdout, code, err := runHelperSubprocess(interpreter, append([]string{script}, args...), nil, ceiling, grace)
+	if err != nil {
+		return "", fmt.Errorf("%s: %w", name, err)
+	}
+	var report struct {
+		Result  string `json:"result"`
+		Message string `json:"message"`
+	}
+	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
+	_ = json.Unmarshal([]byte(lines[len(lines)-1]), &report)
+	if code != 0 {
+		return report.Result, fmt.Errorf("%s exited %d: %s %s", name, code, report.Result, report.Message)
+	}
+	return report.Result, nil
 }

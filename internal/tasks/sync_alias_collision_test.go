@@ -154,18 +154,24 @@ func TestAliasCollisionWithUnmanagedObject(t *testing.T) {
 	}
 }
 
-// TestAliasCollisionWithAnotherManagedSnippet covers two snippets claiming
-// the same alias name. The remedy differs — neither object is the user's to
-// delete on the device — so the message must differ too.
+// TestAliasCollisionWithAnotherManagedSnippet covers two snippets of one sync
+// claiming the same alias name. The remedy differs — neither object is the
+// user's to delete on the device — so the message must differ too. A managed
+// alias that no snippet carries any more, and one new uuid with its name, is
+// one alias moving instead (sync_alias_move_test.go).
 func TestAliasCollisionWithAnotherManagedSnippet(t *testing.T) {
+	const otherUUID = "221f3268-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
 	mock := &aliasCollisionMock{
 		deviceAliases: map[string]string{
-			"nd_shared": "221f3268-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+			"nd_shared": otherUUID,
 		},
 	}
 	client := mock.client(t)
 
-	result := executeSyncAPI(context.Background(), client, []APIAliasPayload{aliasPayload("nd_shared")}, nil)
+	other := aliasPayload("nd_shared")
+	other.UUID = otherUUID
+	other.Content["uuid"] = otherUUID
+	result := executeSyncAPI(context.Background(), client, []APIAliasPayload{other, aliasPayload("nd_shared")}, nil)
 
 	if result.Success {
 		t.Error("expected the sync to fail on a managed-vs-managed collision")
@@ -185,6 +191,16 @@ func TestAliasCollisionWithAnotherManagedSnippet(t *testing.T) {
 	}
 	if strings.Contains(blocked, "delete it on the device") {
 		t.Errorf("message %q must not tell the user to delete a NetDefense-managed object from the device", blocked)
+	}
+	for _, uuid := range mock.aliasSetCalls {
+		if uuid == managedAliasUUID {
+			t.Error("the colliding alias was written")
+		}
+	}
+	for _, uuid := range mock.aliasDeleteCalls {
+		if uuid == otherUUID {
+			t.Error("the other snippet's alias was deleted")
+		}
 	}
 }
 

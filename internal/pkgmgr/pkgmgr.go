@@ -25,6 +25,8 @@ import (
 	"errors"
 	"os/exec"
 	"strings"
+
+	"github.com/netdefense-io/ndagent/internal/util"
 )
 
 // Status describes the installed and repository-available versions of
@@ -110,8 +112,18 @@ func availableVersion(ctx context.Context, name string) (string, error) {
 	return "", nil
 }
 
-func runPkg(ctx context.Context, args ...string) (string, error) {
+// pkgCmd builds every pkg(8) command this package runs. pkg hands its own
+// environment to the package scripts it runs, and OPNsense's hooks call tools
+// in /usr/local by bare name, which the agent's rc.d PATH does not reach
+// (`syslog-ng: not found`), so the command carries the device PATH.
+func pkgCmd(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "pkg", args...)
+	cmd.Env = util.DeviceExecEnv()
+	return cmd
+}
+
+func runPkg(ctx context.Context, args ...string) (string, error) {
+	cmd := pkgCmd(ctx, args...)
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = nil

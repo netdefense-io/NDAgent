@@ -13,6 +13,9 @@ const (
 	codeAliasValueInvalid     = "ALIAS_VALUE_INVALID"
 	codeAliasRejectedByDevice = "ALIAS_REJECTED_BY_DEVICE"
 	codeAliasModelUnavailable = "ALIAS_MODEL_UNAVAILABLE"
+	// codeAliasKeptUnderEarlierUUID is the warning of an alias whose new uuid
+	// OPNsense could not take yet (see aliasMove).
+	codeAliasKeptUnderEarlierUUID = "ALIAS_KEPT_UNDER_EARLIER_UUID"
 )
 
 // aliasContract is the ALIAS family's field contract: any field of the

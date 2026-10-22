@@ -26,9 +26,13 @@ type ShutdownCoordinator struct {
 	// shutdownOnce ensures shutdown logic runs only once
 	shutdownOnce sync.Once
 
-	// shutdownRequested tracks if first signal was received
+	// shutdownRequested tracks whether a shutdown was requested, by a signal
+	// or by the agent itself.
 	shutdownRequested bool
-	mu                sync.Mutex
+	// signalled tracks whether a signal was received: a second one forces
+	// the exit.
+	signalled bool
+	mu        sync.Mutex
 
 	// wg tracks active goroutines for graceful shutdown
 	wg sync.WaitGroup
@@ -64,33 +68,49 @@ func (s *ShutdownCoordinator) Done() {
 
 // SetupSignalHandlers registers signal handlers for SIGINT and SIGTERM.
 func (s *ShutdownCoordinator) SetupSignalHandlers() {
-	log := logging.Named("shutdown")
-
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
 	go func() {
 		for sig := range sigChan {
-			s.mu.Lock()
-			if s.shutdownRequested {
-				// Second signal - force exit
-				s.mu.Unlock()
-				log.Warnw("Force shutdown - terminating process immediately",
-					"signal", sig.String())
-				os.Exit(1)
-			}
-
-			// First signal - graceful shutdown
-			s.shutdownRequested = true
-			s.mu.Unlock()
-
-			log.Infow("Shutdown requested. Gracefully stopping agent. Press Ctrl+C again to force exit.",
-				"signal", sig.String())
-
-			// Cancel the context to signal all goroutines to stop
-			s.cancel()
+			s.onSignal(sig)
 		}
 	}()
+}
+
+// forceExit ends the process; tests replace it.
+var forceExit = os.Exit
+
+// onSignal handles one SIGINT or SIGTERM. The first starts a graceful
+// shutdown, or lets the one the agent already started go on: the SIGTERM the
+// supervisor forwards when Stop ends the supervision arrives during it. A
+// second signal forces the exit.
+func (s *ShutdownCoordinator) onSignal(sig os.Signal) {
+	log := logging.Named("shutdown")
+
+	s.mu.Lock()
+	if s.signalled {
+		s.mu.Unlock()
+		log.Warnw("Force shutdown - terminating process immediately",
+			"signal", sig.String())
+		forceExit(1)
+		return
+	}
+	s.signalled = true
+	already := s.shutdownRequested
+	s.shutdownRequested = true
+	s.mu.Unlock()
+
+	if already {
+		log.Infow("Shutdown already in progress. Press Ctrl+C again to force exit.",
+			"signal", sig.String())
+		return
+	}
+	log.Infow("Shutdown requested. Gracefully stopping agent. Press Ctrl+C again to force exit.",
+		"signal", sig.String())
+
+	// Cancel the context to signal all goroutines to stop
+	s.cancel()
 }
 
 // RequestShutdown initiates a graceful shutdown programmatically.
@@ -107,6 +127,29 @@ func (s *ShutdownCoordinator) RequestShutdown() {
 
 	log.Info("Shutdown requested programmatically")
 	s.cancel()
+}
+
+// Stop shuts the agent down for good: unlike RequestShutdown, the daemon(8)
+// that supervises the agent does not start it again. For the exits the agent
+// makes on purpose (a restart through rc.d, a plugin install, a
+// decommission), where something else decides whether it comes back.
+func (s *ShutdownCoordinator) Stop() {
+	s.EndSupervision()
+	s.RequestShutdown()
+}
+
+// EndSupervision asks the daemon(8) that supervises the agent not to start it
+// again once it exits. Without a supervisor it does nothing.
+func (s *ShutdownCoordinator) EndSupervision() {
+	log := logging.Named("shutdown")
+	asked, err := endSupervision()
+	switch {
+	case err != nil:
+		log.Warnw("Could not ask the supervisor to stop; it starts the agent again after its restart delay",
+			"error", err)
+	case asked:
+		log.Info("Asked the supervisor not to start the agent again")
+	}
 }
 
 // IsShutdownRequested returns whether shutdown has been requested.

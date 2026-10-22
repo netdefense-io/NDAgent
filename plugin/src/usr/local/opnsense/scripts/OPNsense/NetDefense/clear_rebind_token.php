@@ -53,7 +53,7 @@ require_once 'auth.inc';
 require_once 'script/load_phalcon.php';
 
 use OPNsense\Core\Backend;
-use OPNsense\Core\Config;
+use OPNsense\NetDefense\ConfigTransaction;
 use OPNsense\NetDefense\Settings;
 
 const EXIT_OK = 0;
@@ -84,7 +84,6 @@ function emit(array $payload, int $code, bool $json): void
 $opts = getopt('', ['json']);
 $json = isset($opts['json']);
 
-$gotLock = false;
 try {
     $mdl = new Settings();
     $existing = (string)$mdl->bootstrapToken;
@@ -97,14 +96,12 @@ try {
         );
     }
 
-    Config::getInstance()->lock();
-    $gotLock = true;
+    ConfigTransaction::begin();
 
     $mdl = new Settings();
     if ((string)$mdl->bootstrapToken === '') {
         // Lost the race with a concurrent writer; nothing to do.
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        ConfigTransaction::end();
         emit(
             ['result' => 'already_empty', 'cleared' => false, 'reloaded' => false],
             EXIT_OK,
@@ -120,8 +117,7 @@ try {
         $errors[] = $msg->getField() . ': ' . $msg->getMessage();
     }
     if (!empty($errors)) {
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        ConfigTransaction::end();
         emit(
             ['result' => 'failed', 'message' => 'model validation failed', 'errors' => $errors],
             EXIT_NO_PERSIST,
@@ -130,13 +126,9 @@ try {
     }
 
     $mdl->serializeToConfig(false, true);
-    Config::getInstance()->save();
-    Config::getInstance()->unlock();
-    $gotLock = false;
+    ConfigTransaction::commit('NetDefense: consumed rebind token cleared');
 } catch (\Exception $e) {
-    if ($gotLock) {
-        Config::getInstance()->unlock();
-    }
+    ConfigTransaction::end();
     emit(
         ['result' => 'failed', 'message' => $e->getMessage()],
         EXIT_NO_PERSIST,

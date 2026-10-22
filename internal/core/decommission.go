@@ -75,7 +75,7 @@ func (l *LifecycleManager) runDecommission(ctx context.Context, req *network.Dec
 	}
 
 	started := time.Now()
-	if err := decommissionRunner(ctx, apiClient, version.PackageName, l.cfg.DeviceUUID, l.cfg.ConfigXMLPath, l.shutdown.RequestShutdown, deletedAt, kid); err != nil {
+	if err := decommissionRunner(ctx, apiClient, version.PackageName, l.cfg.DeviceUUID, l.cfg.ConfigXMLPath, l.shutdown.Stop, deletedAt, kid); err != nil {
 		log.Errorw("Self-decommission could not complete the uninstall step",
 			"error", err,
 			"log", tasks.DecommissionLogPath,

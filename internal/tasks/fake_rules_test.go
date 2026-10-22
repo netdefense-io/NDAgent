@@ -116,6 +116,17 @@ type fakeRuleDevice struct {
 	aliasTemplate     map[string]interface{}
 	aliasTemplateFail bool
 	aliases           []map[string]interface{}
+	// refuseAliasesInUse makes delItem refuse an alias a rule or another alias
+	// names, as OPNsense does (Alias::whereUsed); refusedAliasDeletes records
+	// the uuids it refused.
+	refuseAliasesInUse  bool
+	refusedAliasDeletes []string
+	// aliasDelete, when set, runs with the lock held at the start of every
+	// delItem: it may change the device and answer the call itself, with this
+	// status code and JSON body (nil: no body); ok=false deletes as usual.
+	aliasDelete func(uuid string) (status int, response interface{}, ok bool)
+	// aliasSearchFail makes the alias search answer HTTP 500.
+	aliasSearchFail bool
 
 	// groups are the interface groups the group search lists; an interface
 	// option whose key is a group is listed as one. interfaceListFail and
@@ -159,6 +170,10 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 	mux.HandleFunc("/firewall/alias/searchItem", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
+		if f.aliasSearchFail {
+			http.Error(w, `{"errorMessage":"Unexpected error, check log for details"}`, http.StatusInternalServerError)
+			return
+		}
 		var req map[string]interface{}
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		phrase, _ := req["searchPhrase"].(string)
@@ -218,6 +233,28 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 		f.mu.Lock()
 		defer f.mu.Unlock()
 		uuid := strings.TrimPrefix(r.URL.Path, "/firewall/alias/delItem/")
+		if f.aliasDelete != nil {
+			if status, response, ok := f.aliasDelete(uuid); ok {
+				w.WriteHeader(status)
+				if response != nil {
+					_ = json.NewEncoder(w).Encode(response)
+				}
+				return
+			}
+		}
+		if f.refuseAliasesInUse {
+			if name, users := f.aliasUsers(uuid); len(users) > 0 {
+				// OPNsense 26.7.5's answer, as measured on a device.
+				f.refusedAliasDeletes = append(f.refusedAliasDeletes, uuid)
+				w.WriteHeader(http.StatusInternalServerError)
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"errorMessage": fmt.Sprintf("Cannot delete alias %s. Currently in use by \n%s", name, strings.Join(users, "\n")),
+					"errorTitle":   "Alias in use",
+					"errorLevel":   "error",
+				})
+				return
+			}
+		}
 		f.writes = append(f.writes, "aliasdel "+uuid)
 		for i, row := range f.aliases {
 			if row["uuid"] == uuid {
@@ -258,6 +295,42 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 	t.Cleanup(server.Close)
 	f.client = opnapi.NewClient(server.URL, "key", "secret", true)
 	return f
+}
+
+// aliasUsers names the alias with this uuid and what refers to it: rules
+// whose source or destination names it, and other aliases whose content does.
+// The caller holds the lock.
+func (f *fakeRuleDevice) aliasUsers(uuid string) (string, []string) {
+	var name string
+	for _, row := range f.aliases {
+		if row["uuid"] == uuid {
+			name, _ = row["name"].(string)
+		}
+	}
+	if name == "" {
+		return "", nil
+	}
+	names := func(value interface{}, separators string) bool {
+		text, _ := value.(string)
+		for _, token := range strings.FieldsFunc(text, func(r rune) bool { return strings.ContainsRune(separators, r) }) {
+			if strings.TrimSpace(token) == name {
+				return true
+			}
+		}
+		return false
+	}
+	var users []string
+	for _, row := range f.rows {
+		if names(row["source_net"], ",") || names(row["destination_net"], ",") {
+			users = append(users, fmt.Sprintf("[filter.rules.rule.%v] %v", row["uuid"], row["description"]))
+		}
+	}
+	for _, row := range f.aliases {
+		if row["uuid"] != uuid && names(row["content"], ",\n") {
+			users = append(users, fmt.Sprintf("[aliases.alias.%v] %v", row["uuid"], row["description"]))
+		}
+	}
+	return name, users
 }
 
 func (f *fakeRuleDevice) getRule(w http.ResponseWriter, r *http.Request) {

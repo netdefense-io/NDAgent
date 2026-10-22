@@ -153,7 +153,7 @@ func pkgRemoveFreeBSD(ctx context.Context, name string) MutateOutcome {
 }
 
 func pkgUpdateFreeBSD(ctx context.Context) error {
-	cmd := exec.CommandContext(ctx, "pkg", "update", "-q")
+	cmd := pkgCmd(ctx, "update", "-q")
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -165,7 +165,7 @@ func pkgUpdateFreeBSD(ctx context.Context) error {
 // runPkgCaptureStderr is the mutate-side analogue of runPkg — keeps stderr
 // for error classification rather than discarding it.
 func runPkgCaptureStderr(ctx context.Context, args ...string) (string, error) {
-	cmd := exec.CommandContext(ctx, "pkg", args...)
+	cmd := pkgCmd(ctx, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

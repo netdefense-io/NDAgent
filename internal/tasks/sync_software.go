@@ -218,11 +218,13 @@ func parseExternal(raw interface{}) ([]externalPackage, error) {
 //     shadow-check, then `pkg install -y`.
 //  6. For each `external` entry: if the declared name+version is installed
 //     and force is unset, ALREADY_PRESENT with no download. Else `pkg add`.
+//  7. OPNsense's plugin list follows the os-* packages of the pass
+//     (syncPluginRegistry).
 //
 // Per-package failure types: INVALID_NAME (didn't pass the regex),
 // NOT_FOUND (pkg's "no packages matching" message), ERROR (any other
 // non-zero pkg exit).
-func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult {
+func executeSyncSoftware(ctx context.Context, sp *softwarePayload, configXMLPath string) SyncAPIResult {
 	log := logging.Named("SYNC_SOFTWARE")
 	result := SyncAPIResult{Success: true}
 
@@ -402,6 +404,8 @@ func executeSyncSoftware(ctx context.Context, sp *softwarePayload) SyncAPIResult
 
 	// Phase 6: external URL packages, after everything the catalog can serve.
 	installExternal(ctx, sp, &result)
+
+	syncPluginRegistry(ctx, configXMLPath, &result)
 
 	return result
 }

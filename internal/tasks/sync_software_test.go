@@ -116,10 +116,11 @@ func TestValidSoftwareName(t *testing.T) {
 // ----------------------------------------------------------------------------
 
 type callLog struct {
-	updates  int
-	infos    []string
-	installs []string
-	removes  []string
+	updates   int
+	infos     []string
+	installs  []string
+	removes   []string
+	registers []string
 }
 
 // swapPkgmgr installs in-memory stubs for pkgmgr's call paths.
@@ -170,8 +171,15 @@ func swapPkgmgr(t *testing.T,
 	prevOfferedBy := pkgmgr.SetOfferedByFunc(func(_ context.Context, name string) ([]string, error) {
 		return []string{"OPNsense"}, nil
 	})
+	// OPNsense's plugin list: recorded, never the real register.php.
+	prevRegister := registerPluginFunc
+	registerPluginFunc = func(action, name string) error {
+		cl.registers = append(cl.registers, action+" "+name)
+		return nil
+	}
 
 	t.Cleanup(func() {
+		registerPluginFunc = prevRegister
 		pkgmgr.SetInstallFunc(prevInstall)
 		pkgmgr.SetRemoveFunc(prevRemove)
 		pkgmgr.SetUpdateFunc(prevUpdate)
@@ -182,7 +190,7 @@ func swapPkgmgr(t *testing.T,
 }
 
 func TestExecuteSyncSoftware_NilPayloadNoop(t *testing.T) {
-	r := executeSyncSoftware(context.Background(), nil)
+	r := executeSyncSoftware(context.Background(), nil, "")
 	if !r.Success || len(r.Results) != 0 {
 		t.Fatalf("nil payload should be a clean no-op: %+v", r)
 	}
@@ -195,7 +203,7 @@ func TestExecuteSyncSoftware_AlreadyPresentAndAbsent(t *testing.T) {
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"bash"},
 		Absent:  []string{"os-zabbix6-agent"},
-	})
+	}, "")
 
 	if !r.Success {
 		t.Fatalf("expected success, errors=%v", r.Errors)
@@ -223,7 +231,7 @@ func TestExecuteSyncSoftware_InstallThenRemove(t *testing.T) {
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"new-pkg"},
 		Absent:  []string{"old-pkg"},
-	})
+	}, "")
 	if !r.Success {
 		t.Fatalf("expected success, errors=%v", r.Errors)
 	}
@@ -245,7 +253,7 @@ func TestExecuteSyncSoftware_NotFoundFailsTask(t *testing.T) {
 
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"bogus-pkg"},
-	})
+	}, "")
 	if r.Success {
 		t.Fatal("NOT_FOUND must fail overall task")
 	}
@@ -259,7 +267,7 @@ func TestExecuteSyncSoftware_InvalidNameFailsTask(t *testing.T) {
 
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"bad name"},
-	})
+	}, "")
 	if r.Success {
 		t.Fatal("INVALID_NAME must fail overall task")
 	}
@@ -274,7 +282,7 @@ func TestExecuteSyncSoftware_PkgErrorFailsTask(t *testing.T) {
 
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"flaky-pkg"},
-	})
+	}, "")
 	if r.Success {
 		t.Fatal("pkg ERROR must fail overall task")
 	}
@@ -291,7 +299,7 @@ func TestExecuteSyncSoftware_PkgUpdateFailureIsTolerated(t *testing.T) {
 
 	r := executeSyncSoftware(context.Background(), &softwarePayload{
 		Present: []string{"bash"},
-	})
+	}, "")
 	if !r.Success {
 		t.Fatalf("update failure alone must not flip Success=false; errors=%v", r.Errors)
 	}

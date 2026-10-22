@@ -2,7 +2,6 @@ package tasks
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -184,7 +183,7 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID 
 				// repository file (netdefense-*.conf). It cannot remove
 				// packages NDManager installed: "absent" is what drives
 				// removal and an empty policy names none. Those stay.
-				return syncResultError(executeSyncSoftware(ctx, &softwarePayload{}))
+				return syncResultError(executeSyncSoftware(ctx, &softwarePayload{}, configXMLPath))
 			}},
 		}
 		d.RemoveReadonlyIdentity = func(ctx context.Context) error {
@@ -205,7 +204,7 @@ func NewDecommissioner(apiClient *opnapi.Client, packageName string, deviceUUID 
 	d.Families = append(d.Families, DecommissionFamily{
 		Name: "auth",
 		Reconcile: func(ctx context.Context) error {
-			return runAuthServerDecommission(deviceUUID, configXMLPath)
+			return runAuthServerDecommission(ctx, deviceUUID, configXMLPath)
 		},
 	})
 
@@ -486,18 +485,19 @@ var deprovisionLocalAccounts = func(ctx context.Context) error {
 	return runPluginConfigure(ctx, "--deprovision-accounts")
 }
 
+// runPluginConfigure runs configure.php in one of its decommission modes. The
+// sequence's context is the agent's shutdown context: a stop keeps the step
+// from starting, and never ends a run in the middle of a save.
 func runPluginConfigure(ctx context.Context, mode string) error {
-	if _, err := os.Stat(pluginConfigureScript); err != nil {
-		return fmt.Errorf("plugin helper not present at %s: %w", pluginConfigureScript, err)
+	if _, err := os.Stat(configureScript); err != nil {
+		return fmt.Errorf("plugin helper not present at %s: %w", configureScript, err)
 	}
-	cmd := exec.CommandContext(ctx, phpInterpreter, pluginConfigureScript, mode, "--json")
-	cmd.Env = util.DeviceExecEnv()
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("configure.php %s failed: %w; output: %s", mode, err, string(out))
-	}
-	return nil
+	_, err := RunPHPConfigHelper(ctx, configureScript, mode, "--json")
+	return err
 }
+
+// What runPluginConfigure runs; a variable so tests can stand a script in.
+var configureScript = pluginConfigureScript
 
 const phpInterpreter = "/usr/local/bin/php"
 
@@ -517,22 +517,13 @@ var releaseFirmwarePin = func(_ context.Context) error {
 		}
 		return fmt.Errorf("plugin helper at %s: %w", releasePinScript, err)
 	}
-	stdout, code, err := runHelperSubprocess(releasePinInterpreter,
-		[]string{releasePinScript, "--state-file=" + releasePinStatePath, "--json"},
-		nil, firmwarePinReleaseCeiling, firmwarePinReleaseGrace)
+	result, err := runPHPHelper(releasePinInterpreter, releasePinScript,
+		[]string{"--state-file=" + releasePinStatePath, "--json"},
+		firmwarePinReleaseCeiling, firmwarePinReleaseGrace)
 	if err != nil {
-		return fmt.Errorf("release_firmware_flavour.php: %w", err)
+		return err
 	}
-	var report struct {
-		Result  string `json:"result"`
-		Message string `json:"message"`
-	}
-	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
-	_ = json.Unmarshal([]byte(lines[len(lines)-1]), &report)
-	if code != 0 {
-		return fmt.Errorf("release_firmware_flavour.php exited %d: %s %s", code, report.Result, report.Message)
-	}
-	logging.Named("decommission").Infow("Firmware pin released", "result", report.Result)
+	logging.Named("decommission").Infow("Firmware pin released", "result", result)
 	return nil
 }
 

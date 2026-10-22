@@ -530,10 +530,10 @@ func NewJob(p Payload, started, expires time.Time) Job {
 // panicMessage is what the engine logs when it contains a panic.
 const panicMessage = "The firmware track engine panicked; the pin is repaired by the next round"
 
-// logPanic records a panic the engine contained, with the stack. The agent runs
-// under daemon(8) without -r: a panic that reaches the top of a goroutine ends the
-// process for good, and the pin this engine holds is something it has to go on
-// repairing.
+// logPanic records a panic the engine contained, with the stack. A panic that
+// reaches the top of a goroutine ends the process, which daemon(8) starts again
+// only after its restart delay and with the task in hand lost, and the pin this
+// engine holds is something it has to go on repairing.
 func (e *Engine) logPanic(what string, recovered interface{}) {
 	e.log.Errorw(panicMessage, "in", what, "panic", fmt.Sprint(recovered), "stack", string(debug.Stack()))
 }

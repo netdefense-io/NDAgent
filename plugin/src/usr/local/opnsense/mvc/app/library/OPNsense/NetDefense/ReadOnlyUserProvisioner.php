@@ -40,7 +40,8 @@ use OPNsense\Core\ACL;
  * internal/pathfinder/session.go (CreateSession).
  *
  * Mirrors ApiCredsProvisioner's idempotency contract: the caller owns the
- * Config lock + save + Backend triggers (`configdpRun 'auth sync user'` and
+ * config transaction (ConfigTransaction) and the Backend triggers
+ * (`configdpRun 'auth sync group'`, then `'auth sync user'`, and
  * `configdRun 'template reload OPNsense/NetDefense'`). This method only
  * mutates the in-memory Config tree via the User/Group models.
  */
@@ -549,8 +550,8 @@ class ReadOnlyUserProvisioner
     /**
      * Provision the netdefense-readonly group + user idempotently.
      *
-     * Caller is responsible for Config::getInstance()->lock()/unlock(),
-     * save(), and Backend triggers. This method only mutates the in-memory
+     * Caller is responsible for the config transaction (ConfigTransaction)
+     * and the Backend triggers. This method only mutates the in-memory
      * Config tree via the User/Group models.
      *
      * Idempotency: if the group exists with the curated priv set (the

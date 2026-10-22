@@ -283,14 +283,16 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 				return err
 			}
 
-			// Handle device deleted without a usable tombstone. DISABLED
-			// no longer reaches here: WaitForRegistration waits it out
-			// rather than returning, because exiting would leave a
-			// suspended device down with nothing to restart it.
+			// A device deleted without a usable tombstone stops and stays
+			// down. DISABLED no longer reaches here: WaitForRegistration
+			// waits it out rather than returning.
 			if errors.Is(err, network.ErrDeviceDeleted) || errors.Is(err, network.ErrDeviceDisabled) {
 				log.Errorw("Device status prevents registration",
 					"error", err,
 				)
+				if errors.Is(err, network.ErrDeviceDeleted) {
+					l.shutdown.EndSupervision()
+				}
 				return err
 			}
 
@@ -441,10 +443,11 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 	// Register task handlers
 	tasks.RegisterHandlers(wsClient)
 
-	// Set shutdown callback for RESTART task
+	// RESTART and PLUGIN_INSTALL hand the agent over to a helper that starts
+	// it again, so its supervisor must not.
 	wsClient.SetShutdownCallback(func() {
-		log.Info("Shutdown requested by RESTART task")
-		l.shutdown.RequestShutdown()
+		log.Info("Shutdown requested by a task")
+		l.shutdown.Stop()
 	})
 
 	// FIRMWARE_UPGRADE rows are resolved by a reconciler, not by the drain's

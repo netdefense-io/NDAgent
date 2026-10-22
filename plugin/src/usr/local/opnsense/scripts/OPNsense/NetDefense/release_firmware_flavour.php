@@ -61,8 +61,8 @@ require_once 'auth.inc';
 require_once 'script/load_phalcon.php';
 
 use OPNsense\Core\Backend;
-use OPNsense\Core\Config;
 use OPNsense\Core\Firmware;
+use OPNsense\NetDefense\ConfigTransaction;
 use OPNsense\NetDefense\FirmwareFlavourRelease;
 
 const EXIT_OK = 0;
@@ -71,9 +71,6 @@ const EXIT_STATE_UNREADABLE = 23;
 const EXIT_BAD_ARGS = 30;
 
 const DEFAULT_STATE_FILE = '/var/db/ndagent/firmware-track.json';
-
-/** How long to wait for the config lock: a pkg hook must not hang on a stuck lock. */
-const LOCK_WAIT_SECONDS = 30;
 
 /**
  * Print a result block (--json) or human-readable lines and exit.
@@ -97,38 +94,6 @@ function emit(array $payload, int $code, bool $json): void
     exit($code);
 }
 
-/**
- * Take the config lock, waiting at most LOCK_WAIT_SECONDS, and from then on
- * ignore SIGTERM and SIGINT until the caller unlocks: a kill during
- * Config::save() truncates config.xml. (Whoever runs this must not wrap it in
- * timeout(1) or kill it either; this is the backstop.) Without pcntl the lock is
- * plain and the signals are left alone.
- */
-function lock_config(): void
-{
-    $bounded = function_exists('pcntl_signal') && function_exists('pcntl_alarm') && defined('SIGALRM');
-    if ($bounded) {
-        pcntl_async_signals(true);
-        pcntl_signal(SIGALRM, function () {
-            throw new \RuntimeException('the config lock was not available in ' . LOCK_WAIT_SECONDS . ' seconds');
-        });
-        pcntl_alarm(LOCK_WAIT_SECONDS);
-    }
-    try {
-        Config::getInstance()->lock();
-    } finally {
-        if ($bounded) {
-            pcntl_alarm(0);
-            pcntl_signal(SIGALRM, SIG_DFL);
-        }
-    }
-    if (function_exists('pcntl_signal') && defined('SIGTERM')) {
-        pcntl_async_signals(true);
-        pcntl_signal(SIGTERM, SIG_IGN);
-        pcntl_signal(SIGINT, SIG_IGN);
-    }
-}
-
 $opts = getopt('', ['state-file::', 'json']);
 $json = isset($opts['json']);
 $stateFile = DEFAULT_STATE_FILE;
@@ -146,7 +111,6 @@ try {
     emit(['result' => 'failed', 'message' => $e->getMessage()], EXIT_STATE_UNREADABLE, $json);
 }
 
-$gotLock = false;
 try {
     $current = (string)(new Firmware())->flavour;
     $decision = FirmwareFlavourRelease::decide($state, $current);
@@ -154,8 +118,9 @@ try {
         emit(['result' => $decision['result'], 'released' => false, 'flavour' => $current], EXIT_OK, $json);
     }
 
-    lock_config();
-    $gotLock = true;
+    // A bounded wait for the lock: a pkg hook must not hang on a stuck one.
+    // Whoever runs this must not wrap it in timeout(1) or kill it either.
+    ConfigTransaction::begin();
 
     // Compare again under the lock: a GUI save between the read and the lock
     // must not be overwritten.
@@ -163,8 +128,7 @@ try {
     $current = (string)$mdl->flavour;
     $decision = FirmwareFlavourRelease::decide($state, $current);
     if ($decision['result'] !== FirmwareFlavourRelease::RESULT_RELEASED) {
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        ConfigTransaction::end();
         emit(['result' => $decision['result'], 'released' => false, 'flavour' => $current], EXIT_OK, $json);
     }
 
@@ -176,19 +140,17 @@ try {
         $errors[] = $msg->getField() . ': ' . $msg->getMessage();
     }
     if (!empty($errors)) {
-        Config::getInstance()->unlock();
-        $gotLock = false;
+        ConfigTransaction::end();
         emit(['result' => 'failed', 'message' => 'model validation failed', 'errors' => $errors], EXIT_NO_PERSIST, $json);
     }
 
     $mdl->serializeToConfig(false, true);
-    Config::getInstance()->save();
-    Config::getInstance()->unlock();
-    $gotLock = false;
+    ConfigTransaction::commit(sprintf(
+        'NetDefense: firmware pin released, flavour restored to %s',
+        $restoreTo === '' ? 'the default' : $restoreTo
+    ));
 } catch (\Throwable $e) {
-    if ($gotLock) {
-        Config::getInstance()->unlock();
-    }
+    ConfigTransaction::end();
     emit(['result' => 'failed', 'message' => $e->getMessage()], EXIT_NO_PERSIST, $json);
 }
 

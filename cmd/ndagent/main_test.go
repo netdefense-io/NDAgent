@@ -12,6 +12,7 @@ package main
 
 import (
 	"bytes"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -50,12 +51,17 @@ func resetFlags(t *testing.T) {
 	for _, c := range rootCmd.Commands() {
 		reset(c.Flags())
 	}
+
+	// run silences cobra on the command it runs; a later case expects usage.
+	rootCmd.SilenceUsage = false
+	rootCmd.SilenceErrors = false
 }
 
 // execute runs the real root command with the given args, capturing output
-// and returning it with any error. It never reaches `run` in these tests:
-// every case either resolves to the version subcommand or is rejected during
-// argument validation, which is exactly the property under test.
+// and returning it with any error. Only TestARunErrorPrintsNoUsage reaches
+// `run`, which stops there at a missing configuration file; every other case
+// resolves to the version subcommand or is rejected during argument
+// validation, which is exactly the property under test.
 func execute(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 
@@ -128,6 +134,19 @@ func TestUnknownPositionalIsRejected(t *testing.T) {
 	}
 }
 
+// TestARunErrorPrintsNoUsage: an error inside run is the agent's, not a usage
+// mistake. daemon(8) sends stderr to syslog, so cobra's error line and usage
+// text would land in the agent's log on every restart.
+func TestARunErrorPrintsNoUsage(t *testing.T) {
+	out, err := execute(t, "--config", filepath.Join(t.TempDir(), "missing.conf"))
+	if err == nil {
+		t.Fatal("a missing configuration file was accepted")
+	}
+	if strings.Contains(out, "Usage:") || strings.Contains(out, "Error:") {
+		t.Errorf("output %q carries cobra's usage or error line", out)
+	}
+}
+
 // TestVersionSubcommandRejectsExtraArgs keeps the subcommand from becoming a
 // new way in: `ndagent version --foreground extra` must not start anything.
 func TestVersionSubcommandRejectsExtraArgs(t *testing.T) {
@@ -138,7 +157,7 @@ func TestVersionSubcommandRejectsExtraArgs(t *testing.T) {
 
 // TestRootRejectsArgsButKeepsFlags pins that the guard is on POSITIONALS
 // only. The rc.d script runs the daemon as `ndagent --config <path>` (the
-// `-f -p` in command_args belong to daemon(8), not to us), so flags must
+// `-f -S -T -R -P -p` in command_args belong to daemon(8), not to us), so flags must
 // keep working or the service will not start.
 func TestRootRejectsArgsButKeepsFlags(t *testing.T) {
 	if rootCmd.Args == nil {

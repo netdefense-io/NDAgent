@@ -31,8 +31,8 @@ namespace OPNsense\NetDefense\Api;
 use OPNsense\Base\ApiMutableModelControllerBase;
 use OPNsense\Core\ACL;
 use OPNsense\Core\Backend;
-use OPNsense\Core\Config;
 use OPNsense\NetDefense\ApiCredsProvisioner;
+use OPNsense\NetDefense\ConfigTransaction;
 use OPNsense\NetDefense\LocalAccounts;
 use OPNsense\NetDefense\ReadOnlyUserProvisioner;
 
@@ -93,12 +93,12 @@ class SettingsController extends ApiMutableModelControllerBase
 
         // Explicit read-only guard, on top of the ACL split: mirrors the
         // same check ApiMutableModelControllerBase::save() uses so a
-        // future manual ACL misgrant can't reach Config::save() below.
+        // future manual ACL misgrant can't reach the config save below.
         if ((new ACL())->hasPrivilege($this->getUserName(), 'user-config-readonly')) {
             return ["result" => "failed", "message" => "Read-only session: write denied"];
         }
 
-        Config::getInstance()->lock();
+        ConfigTransaction::begin();
         $readonlyResult = ['result' => 'skipped'];
         $passwordResult = ['result' => 'skipped', 'changed' => false];
         try {
@@ -115,21 +115,24 @@ class SettingsController extends ApiMutableModelControllerBase
             // scrambled password nobody knows. A failure here is non-fatal
             // to API setup.
             $readonlyResult = ReadOnlyUserProvisioner::provision();
-            if (
-                $result['result'] === 'ok'
-                || $readonlyResult['result'] === 'ok'
-                || $passwordResult['changed']
-            ) {
-                Config::getInstance()->save();
+            $done = array_keys(array_filter([
+                'API credentials set up' => $result['result'] === 'ok',
+                ApiCredsProvisioner::NETDEFENSE_USERNAME . ' password set' => $passwordResult['changed'],
+                ReadOnlyUserProvisioner::READONLY_USERNAME . ' user and group reconciled' => $readonlyResult['result'] === 'ok',
+            ]));
+            if (!empty($done)) {
+                ConfigTransaction::commit('NetDefense: ' . implode(', ', $done));
+            } else {
+                ConfigTransaction::end();
             }
         } catch (\Exception $e) {
-            Config::getInstance()->unlock();
+            ConfigTransaction::end();
             return ["result" => "failed", "message" => $e->getMessage()];
         }
-        Config::getInstance()->unlock();
 
         $backend = new Backend();
         if ($readonlyResult['result'] === 'ok') {
+            $backend->configdpRun('auth sync group', [ReadOnlyUserProvisioner::READONLY_GROUPNAME]);
             $backend->configdpRun('auth sync user', [ReadOnlyUserProvisioner::READONLY_USERNAME]);
         }
 
@@ -200,22 +203,23 @@ class SettingsController extends ApiMutableModelControllerBase
 
         // Explicit read-only guard, on top of the ACL split: mirrors the
         // same check ApiMutableModelControllerBase::save() uses so a
-        // future manual ACL misgrant can't reach Config::save() below.
+        // future manual ACL misgrant can't reach the config save below.
         if ((new ACL())->hasPrivilege($this->getUserName(), 'user-config-readonly')) {
             return ["result" => "failed", "message" => "Read-only session: write denied"];
         }
 
-        Config::getInstance()->lock();
+        ConfigTransaction::begin();
         try {
             $result = ApiCredsProvisioner::provision(true);
             if ($result['result'] === 'ok') {
-                Config::getInstance()->save();
+                ConfigTransaction::commit('NetDefense: API credentials regenerated');
+            } else {
+                ConfigTransaction::end();
             }
         } catch (\Exception $e) {
-            Config::getInstance()->unlock();
+            ConfigTransaction::end();
             return ["result" => "failed", "message" => $e->getMessage()];
         }
-        Config::getInstance()->unlock();
 
         if ($result['result'] === 'ok') {
             $backend = new Backend();

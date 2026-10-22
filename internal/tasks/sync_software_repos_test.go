@@ -116,7 +116,7 @@ func TestExecutionOrderIsScanReconcileUpdateAbsentPresentExternal(t *testing.T) 
 		"external":[{"name":"ext","version":"1.0","url":"https://x.example/ext-1.0.pkg","force":false}],
 		"allow_unverified":false}}`)
 
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if !res.Success {
 		t.Fatalf("expected success, errors=%v", res.Errors)
 	}
@@ -167,7 +167,7 @@ func TestForeignConflictFailsBeforeAnyMutation(t *testing.T) {
 		"repositories":[`+repoJSON+`],
 		"allow_unverified":false}}`)
 
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if res.Success {
 		t.Fatal("a foreign duplicate must fail the task")
 	}
@@ -191,7 +191,7 @@ func TestAbsentStillRunsBeforePresent(t *testing.T) {
 	stubPkg(t, log, map[string]bool{"old-pkg": true})
 
 	sp := payloadWith(t, `{"software":{"present":["new-pkg"],"absent":["old-pkg"]}}`)
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
@@ -206,7 +206,7 @@ func TestPayloadWithoutNewKeysIsUnchanged(t *testing.T) {
 	stubPkg(t, log, nil)
 
 	sp := payloadWith(t, `{"software":{"present":["p"],"absent":[]}}`)
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
@@ -231,7 +231,7 @@ func TestFullySatisfiedPolicyPerformsNoMutations(t *testing.T) {
 		"external":[{"name":"ext","version":"1.0","url":"https://x.example/ext-1.0.pkg","force":false}],
 		"allow_unverified":false}}`)
 
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
@@ -249,7 +249,7 @@ func TestExternalAlreadyAtVersionSkipsDownload(t *testing.T) {
 	sp := payloadWith(t, `{"software":{"present":[],"absent":[],
 		"external":[{"name":"ext","version":"1.0","url":"https://x.example/ext-1.0.pkg","force":false}]}}`)
 
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
@@ -268,7 +268,7 @@ func TestExternalForceReinstallsEvenWhenPresent(t *testing.T) {
 	sp := payloadWith(t, `{"software":{"present":[],"absent":[],
 		"external":[{"name":"ext","version":"1.0","url":"https://x.example/ext-1.0.pkg","force":true}]}}`)
 
-	if res := executeSyncSoftware(context.Background(), sp); !res.Success {
+	if res := executeSyncSoftware(context.Background(), sp, ""); !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
 	if log.indexOf("addurl:") < 0 {
@@ -286,7 +286,7 @@ func TestShadowedPackageFailsRatherThanInstalling(t *testing.T) {
 	t.Cleanup(func() { pkgmgr.SetOfferedByFunc(prev) })
 
 	sp := payloadWith(t, `{"software":{"present":["os-haproxy"],"absent":[]}}`)
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 
 	if res.Success {
 		t.Fatal("an ambiguous install must fail the task")
@@ -311,7 +311,7 @@ func TestShadowCheckOnlyRunsForPackagesBeingInstalled(t *testing.T) {
 	stubPkg(t, log, map[string]bool{"already": true})
 
 	sp := payloadWith(t, `{"software":{"present":["already"],"absent":[]}}`)
-	if res := executeSyncSoftware(context.Background(), sp); !res.Success {
+	if res := executeSyncSoftware(context.Background(), sp, ""); !res.Success {
 		t.Fatalf("errors=%v", res.Errors)
 	}
 	if log.indexOf("offeredby:already") >= 0 {
@@ -328,7 +328,7 @@ func TestUnsignedRepoRefusedWhenOrgDidNotOptIn(t *testing.T) {
 		                 "signature":{"type":"none"}}],
 		"allow_unverified":false}}`)
 
-	res := executeSyncSoftware(context.Background(), sp)
+	res := executeSyncSoftware(context.Background(), sp, "")
 	if res.Success {
 		t.Fatal("unsigned repository must be refused without the org opt-in")
 	}
@@ -346,7 +346,7 @@ func TestUnsignedRepoAllowedWhenOrgOptedIn(t *testing.T) {
 		                 "signature":{"type":"none"}}],
 		"allow_unverified":true}}`)
 
-	if res := executeSyncSoftware(context.Background(), sp); !res.Success {
+	if res := executeSyncSoftware(context.Background(), sp, ""); !res.Success {
 		t.Fatalf("should be permitted when the org opted in: %v", res.Errors)
 	}
 }

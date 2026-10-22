@@ -768,9 +768,9 @@ func TestEnroll_AnUnenrollFinishedByTheReconcileIsNotAnEnrollmentThatHolds(t *te
 	}
 }
 
-// The agent runs under daemon(8) without -r: a panic that reaches the top of a
-// goroutine ends it for good. Whatever the engine hits, the task is answered and
-// the rounds go on.
+// A panic that reaches the top of a goroutine ends the agent, which daemon(8)
+// starts again only after its restart delay. Whatever the engine hits, the task
+// is answered and the rounds go on.
 func TestEngine_APanicIsContainedAndAnswered(t *testing.T) {
 	logs := captureLogs(t)
 	r := enrolledRig(t)

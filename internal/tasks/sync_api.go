@@ -468,7 +468,7 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 	// pkg(8) directly. nil softwarePayload (no SoftwarePolicy attached)
 	// short-circuits to a no-op.
 	if softwarePayload != nil {
-		softwareResult := executeSyncSoftware(ctx, softwarePayload)
+		softwareResult := executeSyncSoftware(ctx, softwarePayload, ws.GetConfigXMLPath())
 		syncResult.Results = append(syncResult.Results, softwareResult.Results...)
 		syncResult.Errors = append(syncResult.Errors, softwareResult.Errors...)
 		if !softwareResult.Success {
@@ -872,10 +872,16 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		desiredRuleUUIDs[r.UUID] = r
 	}
 
-	// Phase 1.5: Pre-flight validation - check if orphan aliases can be deleted
+	// Phase 1.5: Pre-flight validation - check if orphan aliases can be deleted.
+	// The old object of a moved alias keeps its name on the device, so it is
+	// neither an orphan here nor swept in Phase 5.
+	moves := findAliasMoves(aliases, currentAliases, desiredAliasUUIDs)
 	desiredAliasUUIDSet := make(map[string]bool)
 	for uuid := range desiredAliasUUIDs {
 		desiredAliasUUIDSet[uuid] = true
+	}
+	for _, move := range moves {
+		desiredAliasUUIDSet[move.oldUUID] = true
 	}
 
 	validationErrors := checkOrphanAliasUsage(ctx, client, desiredAliasUUIDSet, currentAliases, rules)
@@ -950,6 +956,14 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 				continue
 			}
 
+			if move := moves[alias.UUID]; move != nil {
+				if item, msg := move.adopt(ctx, client, body); item != nil {
+					results = append(results, *item)
+					errors = append(errors, msg)
+				}
+				continue
+			}
+
 			// Pre-flight the device-side unique-name constraint, so a collision
 			// reports what is wrong and what to do rather than OPNsense's raw
 			// "An alias with this name already exists."
@@ -982,33 +996,11 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 				continue
 			}
 
-			err := client.SetAlias(ctx, alias.UUID, body)
-
-			itemResult := SyncAPIItemResult{
-				Type:   "alias",
-				UUID:   alias.UUID,
-				Name:   alias.Name,
-				Action: action,
-			}
-
-			refused, isRefusal := validationFailure(err)
-			switch {
-			case err == nil:
-				itemResult.Status = "success"
-			case isRefusal:
-				msg := fmt.Sprintf("%s: %s", aliasLabel(alias), strings.Join(refused.Messages(), "; "))
-				itemResult.Status = "error"
-				itemResult.Error = msg
-				itemResult.Code = codeAliasRejectedByDevice
-				errors = append(errors, msg)
-			default:
-				msg := fmt.Sprintf("%s: %v", aliasLabel(alias), err)
-				itemResult.Status = "error"
-				itemResult.Error = msg
+			item, msg := aliasWriteResult(alias, action, client.SetAlias(ctx, alias.UUID, body))
+			results = append(results, item)
+			if msg != "" {
 				errors = append(errors, msg)
 			}
-
-			results = append(results, itemResult)
 		}
 	}
 
@@ -1152,7 +1144,7 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 
 	// Phase 5: Delete aliases no longer in desired state
 	for uuid := range currentAliasUUIDs {
-		if _, exists := desiredAliasUUIDs[uuid]; !exists {
+		if !desiredAliasUUIDSet[uuid] {
 			err := client.DeleteAlias(ctx, uuid)
 
 			itemResult := SyncAPIItemResult{
@@ -1170,6 +1162,17 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 			}
 
 			results = append(results, itemResult)
+		}
+	}
+
+	// Finish the alias moves once the rules and aliases no longer wanted are
+	// gone, so the SYNC that drops the last thing naming an alias also gives it
+	// its new uuid.
+	for _, alias := range aliases {
+		if move := moves[alias.UUID]; move != nil && move.body != nil {
+			items, errs := move.finish(ctx, client)
+			results = append(results, items...)
+			errors = append(errors, errs...)
 		}
 	}
 

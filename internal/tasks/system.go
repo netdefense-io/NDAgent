@@ -11,11 +11,11 @@ import (
 )
 
 // restartHelperScript runs in a detached subprocess so it survives the
-// current agent's graceful shutdown. The sleep gives the running daemon(8)
-// supervisor time to exit cleanly (releasing the pidfile) before rc.d's
-// stop/start pair runs. `service ndagent restart` then brings up a fresh
-// rc.d-supervised agent with a real pidfile, so `service ndagent status`
-// stays accurate.
+// current agent's graceful shutdown. The shutdown asks the running daemon(8)
+// supervisor not to start the agent again, and the sleep gives it time to
+// exit cleanly (releasing its pidfiles) before rc.d's stop/start pair runs.
+// `service ndagent restart` then brings up a fresh rc.d-supervised agent with
+// real pidfiles, so `service ndagent status` stays accurate.
 const restartHelperScript = "sleep 2 && exec service ndagent restart"
 
 // HandleShutdown handles the SHUTDOWN task.
@@ -118,8 +118,9 @@ func HandleReboot(ctx context.Context, ws *network.WebSocketClient, cmd network.
 //
 // A detached `sh -c "sleep 2 && exec service ndagent restart"` is launched
 // as a session leader so it survives our exit, then graceful shutdown is
-// triggered. After the current daemon(8) supervisor reaps us and exits,
-// rc.d's restart spawns a fresh daemon-wrapped agent — same pidfile, same
+// triggered through the shutdown callback, which first asks the daemon(8)
+// supervisor not to restart us itself. After it reaps us and exits, rc.d's
+// restart spawns a fresh daemon-wrapped agent — same pidfiles, same
 // supervision as the original boot.
 //
 // On platforms without `service` (developer macOS), the spawn still

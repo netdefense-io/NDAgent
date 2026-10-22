@@ -42,9 +42,9 @@ use OPNsense\Auth\User;
  * so the password is a random hash whose plaintext is discarded, produced
  * the way OPNsense's add_user.php produces it.
  *
- * Caller contract, identical to the provisioners': the caller owns
- * Config::getInstance()->lock(), save(), unlock() and the Backend
- * triggers. These methods only mutate the in-memory Config tree.
+ * Caller contract, identical to the provisioners': the caller owns the
+ * config transaction (ConfigTransaction) and the Backend triggers. These
+ * methods only mutate the in-memory Config tree.
  *
  * Everything here is idempotent. An absent user or group is success, not
  * an error: the decommission sequence is re-runnable by design, and the

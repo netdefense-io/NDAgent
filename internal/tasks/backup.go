@@ -4,9 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
-	"os"
 
 	"github.com/netdefense-io/ndagent/internal/backup"
+	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 )
@@ -52,18 +52,25 @@ func HandleBackup(ctx context.Context, ws *network.WebSocketClient, cmd network.
 		return SendTaskResponse(ws, cmd.TaskID, result)
 	}
 
-	// Get config.xml path
-	configPath := ws.GetConfigXMLPath()
+	return SendTaskResponse(ws, cmd.TaskID, backupConfig(ctx, ws.GetConfigXMLPath(), encryptionKey))
+}
 
-	// Read config.xml
-	configData, err := os.ReadFile(configPath)
+// backupConfig reads config.xml whole and returns it encrypted. A file that is
+// empty, cut short or kept locked by a save fails the task: a backup is never
+// taken of a partial file.
+func backupConfig(ctx context.Context, configPath, encryptionKey string) TaskResult {
+	log := logging.Named("BACKUP")
+
+	configData, err := config.ReadConfigXML(ctx, configPath)
 	if err != nil {
+		if ctx.Err() != nil {
+			return NewFailureResult("BACKUP task was cancelled")
+		}
 		log.Errorw("Failed to read config.xml",
 			"path", configPath,
 			"error", err,
 		)
-		result := NewFailureResult(fmt.Sprintf("Failed to read config.xml: %v", err))
-		return SendTaskResponse(ws, cmd.TaskID, result)
+		return NewFailureResult(fmt.Sprintf("Failed to read config.xml: %v", err))
 	}
 
 	log.Infow("Read config.xml",
@@ -74,8 +81,7 @@ func HandleBackup(ctx context.Context, ws *network.WebSocketClient, cmd network.
 	// Check for context cancellation before encryption
 	select {
 	case <-ctx.Done():
-		result := NewFailureResult("BACKUP task was cancelled")
-		return SendTaskResponse(ws, cmd.TaskID, result)
+		return NewFailureResult("BACKUP task was cancelled")
 	default:
 	}
 
@@ -85,8 +91,7 @@ func HandleBackup(ctx context.Context, ws *network.WebSocketClient, cmd network.
 		log.Errorw("Failed to encrypt config",
 			"error", err,
 		)
-		result := NewFailureResult(fmt.Sprintf("Failed to encrypt config: %v", err))
-		return SendTaskResponse(ws, cmd.TaskID, result)
+		return NewFailureResult(fmt.Sprintf("Failed to encrypt config: %v", err))
 	}
 
 	// Base64 encode the encrypted content to avoid JSON escaping issues
@@ -99,10 +104,8 @@ func HandleBackup(ctx context.Context, ws *network.WebSocketClient, cmd network.
 	)
 
 	// Return base64-encoded encrypted config in response
-	result := NewSuccessResultWithData("Backup completed successfully", map[string]interface{}{
+	return NewSuccessResultWithData("Backup completed successfully", map[string]interface{}{
 		"content":     encodedContent,
 		"config_size": len(configData),
 	})
-
-	return SendTaskResponse(ws, cmd.TaskID, result)
 }

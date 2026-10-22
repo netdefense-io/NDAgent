@@ -26,8 +26,9 @@ use OPNsense\Auth\User;
  * Used by both the web UI controller (Api\SettingsController) and the
  * unattended-install CLI helper (scripts/OPNsense/NetDefense/configure.php).
  *
- * The caller owns the Config lock + save + Backend triggers (configdpRun
- * 'auth sync user' and configdRun 'template reload OPNsense/NetDefense').
+ * The caller owns the config transaction (ConfigTransaction) and the Backend
+ * triggers (configdpRun 'auth sync user' and configdRun 'template reload
+ * OPNsense/NetDefense').
  * That separation lets the CLI persist token + deviceId + API creds in a
  * single Config save, while the web controller keeps its own transaction.
  */
@@ -83,9 +84,9 @@ class ApiCredsProvisioner
     /**
      * Provision (or rotate) the netdefense-agent user + API key.
      *
-     * Caller is responsible for: Config::getInstance()->lock(), the matching
-     * unlock(), save(), and Backend triggers. This method only mutates the
-     * in-memory Config tree and the User model.
+     * Caller is responsible for the config transaction (ConfigTransaction)
+     * and the Backend triggers. This method only mutates the in-memory
+     * Config tree and the User model.
      *
      * Idempotency: when $rotateExisting=false and the user already has at
      * least one API key, returns ['result'=>'skipped',...] without touching

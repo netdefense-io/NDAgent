@@ -116,7 +116,7 @@ class AuthServerHelper
 
             $configWritten = ($beforeXml !== $afterXml);
             if ($configWritten) {
-                Config::getInstance()->save();
+                Config::getInstance()->save(['description' => 'NetDefense: authentication servers and login order synced']);
             }
 
             Config::getInstance()->unlock();
@@ -256,7 +256,7 @@ class AuthServerHelper
 
             $configWritten = ($beforeXml !== $afterXml);
             if ($configWritten) {
-                Config::getInstance()->save();
+                Config::getInstance()->save(['description' => 'NetDefense: managed authentication servers removed']);
             }
 
             Config::getInstance()->unlock();

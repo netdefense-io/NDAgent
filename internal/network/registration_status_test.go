@@ -56,9 +56,9 @@ func TestWaitForRegistration_EnabledProceeds(t *testing.T) {
 	}
 }
 
-// A disabled device must never exit the lifecycle: the rc.d script runs
-// daemon(8) without -r, so an exit is permanent until a human intervenes,
-// and DISABLED is a reversible state.
+// A disabled device must never exit the lifecycle: DISABLED is a reversible
+// state, and an exit would only be restarted, after the supervisor's delay,
+// into another rate-limited registration check.
 func TestWaitForRegistration_DisabledWaitsAndNeverExits(t *testing.T) {
 	var calls int64
 	srv := statusServer(t, []CheckRegistrationResponse{{Status: StatusDisabled}}, &calls)
