@@ -25,6 +25,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/netdefense-io/ndagent/internal/util"
 )
@@ -83,7 +84,8 @@ func RunPHPConfigHelper(ctx context.Context, script string, args ...string) (str
 
 // runPHPHelper runs a plugin PHP script under runHelperSubprocess and returns
 // the result its --json report names. A non-zero exit is an error that
-// carries the report's result and message.
+// carries the report's result and message, or, when the script printed no
+// report (a PHP fatal error, which goes to stdout on OPNsense), what it said.
 func runPHPHelper(interpreter, script string, args []string, ceiling, grace time.Duration) (string, error) {
 	name := filepath.Base(script)
 	stdout, code, err := runHelperSubprocess(interpreter, append([]string{script}, args...), nil, ceiling, grace)
@@ -95,9 +97,42 @@ func runPHPHelper(interpreter, script string, args []string, ceiling, grace time
 		Message string `json:"message"`
 	}
 	lines := strings.Split(strings.TrimSpace(string(stdout)), "\n")
-	_ = json.Unmarshal([]byte(lines[len(lines)-1]), &report)
+	reported := json.Unmarshal([]byte(lines[len(lines)-1]), &report) == nil && report.Result != ""
 	if code != 0 {
+		if !reported {
+			return "", fmt.Errorf("%s exited %d without a report: %s", name, code, helperOutputReason(stdout))
+		}
 		return report.Result, fmt.Errorf("%s exited %d: %s %s", name, code, report.Result, report.Message)
 	}
 	return report.Result, nil
+}
+
+// helperReasonMax bounds what helperOutputReason keeps.
+const helperReasonMax = 300
+
+// helperOutputReason is what a helper that printed no report said, on one
+// line: its output up to a stack trace, whose frames can carry call arguments,
+// and the last helperReasonMax bytes of that.
+func helperOutputReason(out []byte) string {
+	text := string(out)
+	if i := strings.Index(text, "Stack trace:"); i >= 0 {
+		text = text[:i]
+	}
+	text = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(text, "?"))), " ")
+	if text == "" {
+		return "no output"
+	}
+	if len(text) > helperReasonMax {
+		cut := len(text) - helperReasonMax
+		for cut < len(text) && !utf8.RuneStart(text[cut]) {
+			cut++
+		}
+		text = "..." + text[cut:]
+	}
+	return text
 }

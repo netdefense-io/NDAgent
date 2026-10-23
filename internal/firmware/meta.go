@@ -51,6 +51,10 @@ type Meta struct {
 	TriggeredAt int64 `json:"triggered_at,omitempty"`
 	// RebootSeen is set once the handler has seen OPNsense announce the reboot.
 	RebootSeen bool `json:"reboot_seen,omitempty"`
+	// CheckFirstIgnored is set for a series upgrade whose payload asked for no
+	// check (check_first=false): a series upgrade is judged only by a check of
+	// its own, so it checked anyway, and its result says so.
+	CheckFirstIgnored bool `json:"check_first_ignored,omitempty"`
 }
 
 // Triggered reports whether the update was requested.

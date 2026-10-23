@@ -47,6 +47,12 @@ type LifecycleManager struct {
 	// phase: a device that is disabled waits in the registration phase and still
 	// has to release its pin after 30 days.
 	tracks *trackSupervisor
+
+	// rebindTokenInConf records that ndagent.conf carried a bootstrap token
+	// when this run read it. Registration zeroes the in-memory copy as soon as
+	// it has sent it (single use), so the cleanup after registration cannot
+	// tell from that copy that config.xml still holds the token.
+	rebindTokenInConf bool
 }
 
 // NewLifecycleManager creates a new lifecycle manager.
@@ -190,6 +196,7 @@ func (l *LifecycleManager) maybeRotateForRebindToken() error {
 	if token == "" {
 		return nil
 	}
+	l.rebindTokenInConf = true
 	sum := sha256.Sum256([]byte(token))
 	currentHash := hex.EncodeToString(sum[:])
 	if l.state.LastRebindTokenHash() == currentHash {
@@ -211,16 +218,18 @@ func (l *LifecycleManager) maybeRotateForRebindToken() error {
 
 // maybeClearRebindTokenInConfig invokes the OPNsense plugin helper to
 // strip the consumed bootstrapToken from /conf/config.xml so the next
-// template render of ndagent.conf does not carry it. Best-effort: a
-// helper failure is logged at WARN and does not abort the lifecycle —
-// the token is internally inert at this point because the agent's
-// state.LastRebindTokenHash already matches it.
+// template render of ndagent.conf does not carry it. It runs in the run
+// that used the token (rebindTokenInConf: registration has already zeroed
+// the in-memory copy) as much as in a later one. Best-effort: a helper
+// failure is logged at WARN and does not abort the lifecycle — the token
+// is internally inert at this point because the agent's
+// state.LastRebindTokenHash already matches it — and the next lifecycle
+// round tries again.
 //
 // Reflects the cleared value in-process so any subsequent iteration of
-// the lifecycle loop in this run sees the field as empty and does not
-// retry the helper unnecessarily.
+// the lifecycle loop in this run does not retry the helper unnecessarily.
 func (l *LifecycleManager) maybeClearRebindTokenInConfig(ctx context.Context) {
-	if l.cfg.BootstrapToken == "" {
+	if !l.rebindTokenInConf && l.cfg.BootstrapToken == "" {
 		return
 	}
 	log := logging.Named("lifecycle")
@@ -231,6 +240,7 @@ func (l *LifecycleManager) maybeClearRebindTokenInConfig(ctx context.Context) {
 	}
 	log.Info("Cleared consumed rebind token from OPNsense config; ndagent.conf will not carry it after the next template render")
 	l.cfg.BootstrapToken = ""
+	l.rebindTokenInConf = false
 }
 
 // Run executes the complete agent lifecycle.

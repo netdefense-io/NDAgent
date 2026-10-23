@@ -184,6 +184,13 @@ func (d *CommandDispatcher) ReceiveCommands(ctx context.Context, ws *WebSocketCl
 		// Read message
 		_, message, err := ws.ReadMessage()
 		if err != nil {
+			// The connection is closed under this read only once its loop has
+			// ended (a shutdown, or another goroutine of the loop failing), so
+			// the error is that close, not a fault.
+			if ctx.Err() != nil {
+				log.Debugw("WebSocket read ended with the connection's loop", "error", err)
+				return err
+			}
 			log.Errorw("Error reading WebSocket message",
 				"error", err,
 			)

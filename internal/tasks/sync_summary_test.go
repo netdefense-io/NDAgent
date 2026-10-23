@@ -140,3 +140,43 @@ func TestBuildSyncSummary_LocalRenumbersAreChanges(t *testing.T) {
 		t.Errorf("got %q, want %q", got, want)
 	}
 }
+
+// TestBuildSyncSummary_SoftwareChanges: a package installed or removed and a
+// repository file written or removed are changes to the device, counted like
+// any other family's; what pkg found already as wanted is not.
+func TestBuildSyncSummary_SoftwareChanges(t *testing.T) {
+	results := []SyncAPIItemResult{
+		{Type: "SOFTWARE", Name: "os-helloworld", Action: "INSTALLED", Status: "success"},
+		{Type: "SOFTWARE", Name: "os-acme-client", Action: "REMOVED", Status: "success"},
+		{Type: "SOFTWARE", Name: "curl", Action: "ALREADY_PRESENT", Status: "success"},
+		{Type: "SOFTWARE", Name: "telnet", Action: "ALREADY_ABSENT", Status: "success"},
+		{Type: "SOFTWARE", Name: "broken", Action: "ERROR", Status: "error"},
+		{Type: "SOFTWARE", Name: "os-helloworld", Action: "warning", Status: "warning"},
+		{Type: "REPOSITORY", Name: "custom", Action: "REPO_CONFIGURED", Status: "success"},
+		{Type: "REPOSITORY", Name: "steady", Action: "REPO_UNCHANGED", Status: "success"},
+		{Type: "REPOSITORY", Name: "old", Action: "REPO_REMOVED", Status: "success"},
+		{Type: "alias", Action: "created", Status: "success"},
+	}
+	got := buildSyncSummary(results, 1)
+	want := "Aliases +1; Package repositories ~1 -1; Software +1 -1 (1 errors)"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// TestBuildSyncSummary_SoftwareOnly: the sync that only installs a package
+// used to read "No changes applied".
+func TestBuildSyncSummary_SoftwareOnly(t *testing.T) {
+	for _, tc := range []struct {
+		action, want string
+	}{
+		{"INSTALLED", "Software +1"},
+		{"REMOVED", "Software -1"},
+		{"ALREADY_PRESENT", "No changes applied"},
+	} {
+		results := []SyncAPIItemResult{{Type: "SOFTWARE", Name: "os-helloworld", Action: tc.action, Status: "success"}}
+		if got := buildSyncSummary(results, 0); got != tc.want {
+			t.Errorf("%s: got %q, want %q", tc.action, got, tc.want)
+		}
+	}
+}

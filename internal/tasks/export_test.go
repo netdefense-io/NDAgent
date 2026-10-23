@@ -42,6 +42,22 @@ func SetFirmwareCheckTimeoutForTest(d time.Duration) (restore func()) {
 	return func() { firmwareCheckTimeoutVar = old }
 }
 
+// SetMajorCheckTimeoutForTest sets how long a series upgrade waits for its
+// check. Returns a restore function.
+func SetMajorCheckTimeoutForTest(d time.Duration) (restore func()) {
+	old := majorCheckTimeoutVar
+	majorCheckTimeoutVar = d
+	return func() { majorCheckTimeoutVar = old }
+}
+
+// SetFirmwareCheckIdleDropForTest sets how long a series upgrade's check may
+// find the backend idle before it counts as dropped. Returns a restore function.
+func SetFirmwareCheckIdleDropForTest(d time.Duration) (restore func()) {
+	old := firmwareCheckIdleDropVar
+	firmwareCheckIdleDropVar = d
+	return func() { firmwareCheckIdleDropVar = old }
+}
+
 // SetUpgradeStatusPollIntervalForTest sets the poll interval for
 // pollUpgradeRun to a short duration so tests don't have to wait 5s.
 // Returns a restore function.

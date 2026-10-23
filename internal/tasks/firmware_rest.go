@@ -66,6 +66,13 @@ type restRun struct {
 	progress func(fromVersion string) string
 	// trigger asks OPNsense to start the run and returns the status it answered.
 	trigger func(ctx context.Context) (status string, err error)
+	// recheck, when set, runs right before every request; an error stops the
+	// run with nothing requested.
+	recheck func(ctx context.Context) error
+	// checkFirstIgnored: the payload asked for no check and the run checked
+	// anyway (a series upgrade). The run's record carries it, so the result says
+	// so whoever settles the row, and a failure says it too.
+	checkFirstIgnored bool
 }
 
 // handleMinorWithReboot implements: minor + reboot=true
@@ -96,23 +103,23 @@ func handleMinorWithReboot(
 	})
 }
 
-// handleMajorWithReboot implements: major + reboot=true
-// REST POST /upgrade, then watch (three reboots). See runRESTUpdate.
+// handleMajorWithReboot implements: major + reboot=true, on the offer of this
+// task's check (firmware_major.go). REST POST /upgrade, then watch (three
+// reboots). Right before each request the offer is read again. See runRESTUpdate.
 func handleMajorWithReboot(
 	ctx context.Context,
 	ws *network.WebSocketClient,
 	cmd network.Command,
 	client firmwareOPNAPIClient,
-	payload *firmwareUpgradePayload,
-	initialStatus *opnapi.FirmwareUpgradeStatus,
+	offer majorOffer,
 ) error {
-	return runRESTUpdate(ctx, ws, cmd, client, initialStatus, restRun{
+	return runRESTUpdate(ctx, ws, cmd, client, offer.checked, restRun{
 		mode:   "major",
 		verb:   "upgrade",
 		marker: upgradeRequestMarker,
 		progress: func(string) string {
 			return fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense will reboot 3 times...",
-				initialStatus.ProductSeries, initialStatus.UpgradeMajorVersion)
+				offer.series, offer.target)
 		},
 		trigger: func(ctx context.Context) (string, error) {
 			resp, err := client.TriggerFirmwareUpgrade(ctx)
@@ -121,6 +128,8 @@ func handleMajorWithReboot(
 			}
 			return resp.Status, nil
 		},
+		recheck:           func(ctx context.Context) error { return offer.stillStands(ctx, client) },
+		checkFirstIgnored: offer.checkFirstIgnored,
 	})
 }
 
@@ -151,6 +160,9 @@ func runRESTUpdate(
 ) error {
 	log := logging.Named("FIRMWARE_UPGRADE")
 	fail := func(message string) error {
+		if run.checkFirstIgnored {
+			message += " " + firmware.CheckFirstIgnoredNote
+		}
 		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(message))
 	}
 
@@ -159,6 +171,12 @@ func runRESTUpdate(
 		return fail("Could not read the installed OPNsense release: " + err.Error())
 	}
 	meta := recordFirmwareRun(ws, cmd, log, run.mode, true, fromVersion, status)
+	if run.checkFirstIgnored {
+		// On the row at once, so that whoever settles it, a row never triggered
+		// included, says so.
+		meta.CheckFirstIgnored = true
+		persistFirmwareMeta(ws, cmd, log, meta)
+	}
 	deadline := firmwareDeadline(meta.Expiry())
 
 	if err := firmwareSendInProgress(ws, cmd.TaskID, run.progress(fromVersion)); err != nil {
@@ -175,6 +193,14 @@ func runRESTUpdate(
 				return ctx.Err() // nothing was triggered: the dispatcher records the cancellation
 			}
 			return fail("The firmware " + run.verb + " was not started: " + err.Error())
+		}
+		if run.recheck != nil {
+			if err := run.recheck(ctx); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				return fail("The firmware " + run.verb + " was not started: " + err.Error() + ". Nothing was applied.")
+			}
 		}
 		baseline = progressLog(ctx, client)
 

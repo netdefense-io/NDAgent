@@ -369,9 +369,10 @@ func (r *RegistrationClient) StartRegistration(ctx context.Context) error {
 	)
 
 	// Single-use semantics: zero the in-memory copy after a successful
-	// StartRegistration. The OPNsense plugin's GUI field is the source of
-	// truth — operators clear it manually after confirming the rebind on
-	// the broker side.
+	// StartRegistration, so a later start of this run (the device waits
+	// UNREGISTERED for approval) does not send it again. The field in
+	// config.xml is cleared by the lifecycle once the device is enabled
+	// (core.LifecycleManager.maybeClearRebindTokenInConfig).
 	if r.cfg.BootstrapToken != "" {
 		r.cfg.BootstrapToken = ""
 		log.Info("Bootstrap token cleared from in-memory config (single-use)")

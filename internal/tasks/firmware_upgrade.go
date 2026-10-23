@@ -6,7 +6,8 @@ package tasks
 //
 //	minor + reboot=false  → exec opnsense-update -pt (packages only, synchronous)
 //	minor + reboot=true   → REST POST /update (point release + auto-reboot)
-//	major + reboot=true   → REST POST /upgrade (series upgrade + 3 reboots)
+//	major + reboot=true   → REST POST /upgrade (series upgrade + 3 reboots), only
+//	                        on an offer this task's own check made (firmware_major.go)
 //	major + reboot=false  → FAILED (invalid; rejected at payload validation)
 //
 // Lifecycle:
@@ -329,6 +330,11 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		log.Warnw("Failed to send IN_PROGRESS", "error", err)
 	}
 
+	// A series upgrade is judged by its own rules (firmware_major.go).
+	if payload.Mode == "major" {
+		return handleMajor(ctx, ws, cmd, client, payload, marked)
+	}
+
 	// ── Optional fresh check ─────────────────────────────────────────────────
 	if payload.CheckFirst {
 		log.Infow("Triggering firmware check", "task_id", cmd.TaskID)
@@ -370,65 +376,31 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		"needs_reboot", status.NeedsReboot,
 	)
 
-	// ── Classify available update ─────────────────────────────────────────────
-	// Classification from plan:
-	//   major signals: upgrade_sets non-empty OR upgrade_major_version/upgrade_major_message non-empty
-	//   minor signals: upgrade_packages non-empty (no major signals)
-	//   CORE_NEXT is informational; ignored.
-	hasMajor := len(status.UpgradeSets) > 0 ||
-		status.UpgradeMajorVersion != "" ||
-		status.UpgradeMajorMessage != ""
-	hasMinor := len(status.UpgradePackages) > 0
-
 	// ── No-op short-circuit ──────────────────────────────────────────────────
-	// Nothing to apply in the requested mode → COMPLETED with no_update=true.
-	// Never FAILED for absence of work.
-	switch payload.Mode {
-	case "minor":
-		if !hasMinor {
-			log.Infow("No minor updates available; no-op", "task_id", cmd.TaskID)
-			d := map[string]interface{}{
-				"resolved_mode":    payload.Mode,
-				"from_version":     fromVersion,
-				"no_update":        true,
-				"applied":          false,
-				"reboot_performed": false,
-				"opnsense_status":  status.Status,
-			}
-			return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
-				Success: true,
-				Message: firmwareSuccessJSON(d),
-			})
+	// A point release is pending when upgrade_packages lists something (CORE_NEXT
+	// is informational and ignored). Nothing to apply → COMPLETED with
+	// no_update=true. Never FAILED for absence of work.
+	if len(status.UpgradePackages) == 0 {
+		log.Infow("No minor updates available; no-op", "task_id", cmd.TaskID)
+		d := map[string]interface{}{
+			"resolved_mode":    payload.Mode,
+			"from_version":     fromVersion,
+			"no_update":        true,
+			"applied":          false,
+			"reboot_performed": false,
+			"opnsense_status":  status.Status,
 		}
-	case "major":
-		if !hasMajor {
-			log.Infow("No major updates available; no-op", "task_id", cmd.TaskID)
-			d := map[string]interface{}{
-				"resolved_mode":    payload.Mode,
-				"from_version":     fromVersion,
-				"no_update":        true,
-				"applied":          false,
-				"reboot_performed": false,
-				"opnsense_status":  status.Status,
-			}
-			return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
-				Success: true,
-				Message: firmwareSuccessJSON(d),
-			})
-		}
+		return firmwareSendResponse(ws, cmd.TaskID, TaskResult{
+			Success: true,
+			Message: firmwareSuccessJSON(d),
+		})
 	}
 
 	// ── Dry-run: report plan and exit ────────────────────────────────────────
 	if payload.DryRun {
-		toVersion := ""
-		reboots := 0
-		if payload.Reboot {
-			reboots = 1
-		}
-		if payload.Mode == "major" {
-			reboots = 2 // major can reboot twice
-			toVersion = status.UpgradeMajorVersion
-		} else if toVersion = firmware.CoreVersion(plan); toVersion == "" {
+		reboots := firmware.Meta{Mode: payload.Mode, Reboot: payload.Reboot}.ExpectedReboots()
+		toVersion := firmware.CoreVersion(plan)
+		if toVersion == "" {
 			// A plan that leaves the core package alone leaves the release alone.
 			toVersion = fromVersion
 		}
@@ -456,20 +428,11 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		})
 	}
 
-	// ── Dispatch by mode × reboot ────────────────────────────────────────────
-	switch {
-	case payload.Mode == "minor" && !payload.Reboot:
+	// ── Dispatch by reboot ───────────────────────────────────────────────────
+	if !payload.Reboot {
 		return handleMinorNoReboot(ctx, ws, cmd, client, payload, status)
-	case payload.Mode == "minor" && payload.Reboot:
-		return handleMinorWithReboot(ctx, ws, cmd, client, payload, status)
-	case payload.Mode == "major" && payload.Reboot:
-		return handleMajorWithReboot(ctx, ws, cmd, client, payload, status)
-	default:
-		// Unreachable: parseFirmwareUpgradePayload already rejected major+reboot=false.
-		return firmwareSendResponse(ws, cmd.TaskID,
-			NewFailureResult(fmt.Sprintf("unsupported mode/reboot combination: mode=%s reboot=%v",
-				payload.Mode, payload.Reboot)))
 	}
+	return handleMinorWithReboot(ctx, ws, cmd, client, payload, status)
 }
 
 // taskExpiredWhileWaiting is what a task is failed with when its own lifetime

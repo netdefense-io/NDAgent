@@ -105,7 +105,23 @@ const NotStartedMessage = "The firmware task was not started: the agent stopped 
 //
 // A row with no metadata (an older agent wrote it) completes once the backend is
 // idle and no package tool runs, unless there is proof it failed.
+//
+// A failure of a series upgrade whose payload asked for no check ends with
+// CheckFirstIgnoredNote, as its COMPLETED result carries "check_first_ignored".
 func Evaluate(ctx context.Context, in Input, p Probes) Verdict {
+	v := evaluate(ctx, in, p)
+	if v.Action == Fail && in.Meta != nil && in.Meta.CheckFirstIgnored {
+		v.Message += " " + CheckFirstIgnoredNote
+	}
+	return v
+}
+
+// CheckFirstIgnoredNote ends the failure of a series upgrade whose payload
+// asked for no check (check_first=false), which a series upgrade does not
+// honour.
+const CheckFirstIgnoredNote = "A series upgrade always checks first; check_first=false was ignored."
+
+func evaluate(ctx context.Context, in Input, p Probes) Verdict {
 	meta := in.Meta
 	if meta != nil && !meta.Triggered() {
 		return Verdict{Action: Fail, Reason: "not-started", Message: NotStartedMessage}
@@ -324,6 +340,9 @@ func completed(in Input, meta Meta, toVersion string, rebooted bool, reason stri
 		data["status_sentinel"] = in.Sentinel
 	} else {
 		data["reconciled"] = true
+	}
+	if meta.CheckFirstIgnored {
+		data["check_first_ignored"] = true
 	}
 	message, err := json.Marshal(data)
 	if err != nil { // unreachable for these value types

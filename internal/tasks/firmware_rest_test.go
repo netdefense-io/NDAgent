@@ -827,8 +827,7 @@ func TestRESTRun_TheBoundSeesTheProcessGrowUp(t *testing.T) {
 
 func TestRESTRun_MajorTriggersTheUpgradeEndpointAndRecordsTheSeriesRun(t *testing.T) {
 	f := newFirmwareFixture(t)
-	st := planStatus()
-	st.UpgradeMajorVersion = "26.9"
+	st := majorOfferStatus("check-1")
 	c := newRESTClient(st)
 	upgrades := 0
 	c.stubFirmwareClient.onUpgrade = func() { upgrades++ }
@@ -843,8 +842,7 @@ func TestRESTRun_MajorTriggersTheUpgradeEndpointAndRecordsTheSeriesRun(t *testin
 	defer stop()
 	c.stopAgentOnReboot(stop)
 
-	if err := handleMajorWithReboot(ctx, nil, rebootCmd("67", "major", 0), c,
-		&firmwareUpgradePayload{Mode: "major", Reboot: true}, st); err != nil {
+	if err := handleMajorWithReboot(ctx, nil, rebootCmd("67", "major", 0), c, offerOf(st)); err != nil {
 		t.Fatalf("run: %v", err)
 	}
 	if upgrades != 1 {
@@ -854,7 +852,7 @@ func TestRESTRun_MajorTriggersTheUpgradeEndpointAndRecordsTheSeriesRun(t *testin
 	if m.Mode != "major" || !m.RebootExpected() || m.ExpectedReboots() != 3 {
 		t.Fatalf("meta = %+v", m)
 	}
-	if len(f.progress) != 1 || !strings.Contains(f.progress[0], "major upgrade from series 26.7 to 26.9") {
+	if len(f.progress) != 1 || !strings.Contains(f.progress[0], "major upgrade from series 26.1 to 26.7") {
 		t.Fatalf("IN_PROGRESS messages = %v", f.progress)
 	}
 }

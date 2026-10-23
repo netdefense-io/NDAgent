@@ -60,6 +60,8 @@ func newFirmwareFixture(t *testing.T) *firmwareFixture {
 		SetUpgradeStatusPollIntervalForTest(time.Millisecond),
 		SetFirmwareWaitsForTest(50*time.Millisecond, time.Millisecond, 50*time.Millisecond, time.Millisecond, time.Millisecond),
 		SetFirmwareGetSuffixFuncForTest(func(context.Context) (string, error) { return "", nil }),
+		SetFirmwareCheckPollIntervalForTest(time.Millisecond),
+		SetFirmwareCheckIdleDropForTest(20 * time.Millisecond),
 	} {
 		t.Cleanup(restore)
 	}
@@ -170,21 +172,25 @@ func TestHandleMinorWithReboot_WithoutASignedExpiryUsesTheModeTTL(t *testing.T) 
 			f := newFirmwareFixture(t)
 			f.begin("42")
 			st := planStatus()
-			st.UpgradeMajorVersion = "26.9"
+			if mode == "major" {
+				st = majorOfferStatus("check-1")
+			}
 			client := &stubFirmwareClient{
 				statusResp:   st,
-				release:      "26.7.3_8",
+				release:      st.ProductVersion,
 				updateResp:   &opnapi.FirmwareUpdateResponse{Status: "ok"},
 				upgradeResp:  &opnapi.FirmwareUpgradeResponse{Status: "ok"},
 				runningResp:  &opnapi.FirmwareRunning{Status: "ready"},
 				progressResp: &opnapi.FirmwareProgressStatus{Status: "reboot", Log: updateRequestMarker + upgradeRequestMarker},
 			}
-			handler := handleMinorWithReboot
+			var err error
 			if mode == "major" {
-				handler = handleMajorWithReboot
+				err = handleMajorWithReboot(context.Background(), nil, rebootCmd("42", mode, 0), client, offerOf(st))
+			} else {
+				err = handleMinorWithReboot(context.Background(), nil, rebootCmd("42", mode, 0), client,
+					&firmwareUpgradePayload{Mode: mode, Reboot: true}, st)
 			}
-			if err := handler(context.Background(), nil, rebootCmd("42", mode, 0), client,
-				&firmwareUpgradePayload{Mode: mode, Reboot: true}, st); err != nil {
+			if err != nil {
 				t.Fatalf("handler: %v", err)
 			}
 			m, found := f.meta("42")
@@ -199,20 +205,18 @@ func TestHandleMajorWithReboot_RecordsTheRunBeforeThePost(t *testing.T) {
 	f := newFirmwareFixture(t)
 	f.begin("43")
 
-	st := planStatus()
-	st.UpgradeMajorVersion = "26.9"
+	st := majorOfferStatus("check-1")
 	var recorded bool
 	client := &stubFirmwareClient{
 		statusResp:   st,
-		release:      "26.7.3_8",
+		release:      st.ProductVersion,
 		upgradeResp:  &opnapi.FirmwareUpgradeResponse{Status: "ok"},
 		runningResp:  &opnapi.FirmwareRunning{Status: "ready"},
 		progressResp: &opnapi.FirmwareProgressStatus{Status: "reboot", Log: upgradeRequestMarker},
 	}
 	client.onUpgrade = func() { _, recorded = f.meta("43") }
 
-	if err := handleMajorWithReboot(stoppedByTheReboot(t), nil, rebootCmd("43", "major", 0), client,
-		&firmwareUpgradePayload{Mode: "major", Reboot: true}, st); err != nil {
+	if err := handleMajorWithReboot(stoppedByTheReboot(t), nil, rebootCmd("43", "major", 0), client, offerOf(st)); err != nil {
 		t.Fatalf("handleMajorWithReboot: %v", err)
 	}
 	if !recorded {
@@ -229,8 +233,7 @@ func TestRebootPaths_RefuseToStartWhenTheInstalledReleaseCannotBeRead(t *testing
 				&firmwareUpgradePayload{Mode: "minor", Reboot: true}, st)
 		},
 		"major": func(c *stubFirmwareClient, st *opnapi.FirmwareUpgradeStatus) error {
-			return handleMajorWithReboot(context.Background(), nil, rebootCmd("44", "major", 0), c,
-				&firmwareUpgradePayload{Mode: "major", Reboot: true}, st)
+			return handleMajorWithReboot(context.Background(), nil, rebootCmd("44", "major", 0), c, offerOf(st))
 		},
 		"minor without reboot": func(c *stubFirmwareClient, st *opnapi.FirmwareUpgradeStatus) error {
 			return handleMinorNoReboot(context.Background(), nil, minorNoRebootCmd("44"), c,

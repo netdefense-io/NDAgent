@@ -3,6 +3,7 @@ package tasks
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -338,6 +339,7 @@ type rebootFlowClient struct {
 	mu       sync.Mutex
 	phase    string // idle, updating, rebooting, down
 	checks   int
+	ran      int // checks that ran, each leaving a result of its own
 	statuses int
 	posted   chan struct{}
 	postOnce sync.Once
@@ -385,10 +387,15 @@ func (c *rebootFlowClient) TriggerFirmwareCheck(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	if phase == "down" {
+	switch phase {
+	case "down":
 		return errBoxDown
+	case "idle":
+		c.mu.Lock()
+		c.ran++
+		c.mu.Unlock()
 	}
-	return nil // accepted, and dropped by the launcher while the lock is held
+	return nil // accepted; dropped by the launcher while the lock is held
 }
 
 func (c *rebootFlowClient) GetFirmwareRunning(context.Context) (*opnapi.FirmwareRunning, error) {
@@ -411,7 +418,12 @@ func (c *rebootFlowClient) GetFirmwareUpgradeStatus(context.Context) (*opnapi.Fi
 	if c.phase == "down" {
 		return nil, errBoxDown
 	}
-	return planStatus(), nil
+	st := planStatus()
+	st.Connection, st.Repository = "ok", "ok"
+	if c.ran > 0 {
+		st.LastCheck = fmt.Sprintf("check %d", c.ran)
+	}
+	return st, nil
 }
 
 func (c *rebootFlowClient) TriggerFirmwareUpdate(context.Context) (*opnapi.FirmwareUpdateResponse, error) {

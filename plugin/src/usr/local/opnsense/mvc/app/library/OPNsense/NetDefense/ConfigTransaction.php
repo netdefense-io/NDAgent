@@ -26,10 +26,11 @@ use OPNsense\Core\Config;
  * Config::save() truncates config.xml and writes it again in place, so a
  * process killed during it leaves the file cut short. In a CLI run with pcntl,
  * begin() therefore waits a bounded time for the lock (a lock held elsewhere
- * throws instead of hanging a pkg hook or the agent) and ignores SIGTERM and
- * SIGINT until end(). Whoever starts a script that uses it stops it with
- * SIGTERM only, never SIGKILL. In the web GUI, or without pcntl, begin() is
- * Config::lock() as it is.
+ * throws instead of hanging a pkg hook or the agent) and ignores SIGTERM,
+ * SIGINT, SIGHUP and SIGQUIT until end(): the last two reach a pkg hook run
+ * from a terminal, when the session drops or someone presses Ctrl-\. Whoever
+ * starts a script that uses it stops it with SIGTERM only, never SIGKILL. In
+ * the web GUI, or without pcntl, begin() is Config::lock() as it is.
  *
  * begin(), then commit($description) to save, or end() to leave config.xml as
  * it is. end() is also what an error path calls: it does nothing when no
@@ -41,7 +42,10 @@ final class ConfigTransaction
 
     private static $open = false;
 
-    /** The SIGTERM and SIGINT handlers begin() replaced, for end() to put back. */
+    /** The signals ignored while the lock is held. */
+    private const IGNORED_SIGNALS = ['SIGTERM', 'SIGINT', 'SIGHUP', 'SIGQUIT'];
+
+    /** The handlers begin() replaced, for end() to put back. */
     private static $savedHandlers = null;
 
     public static function begin(int $waitSeconds = self::LOCK_WAIT_SECONDS): void
@@ -79,12 +83,12 @@ final class ConfigTransaction
         }
         self::$open = true;
         if ($signals) {
-            self::$savedHandlers = [
-                SIGTERM => pcntl_signal_get_handler(SIGTERM),
-                SIGINT => pcntl_signal_get_handler(SIGINT),
-            ];
-            pcntl_signal(SIGTERM, SIG_IGN);
-            pcntl_signal(SIGINT, SIG_IGN);
+            self::$savedHandlers = [];
+            foreach (self::IGNORED_SIGNALS as $name) {
+                $signal = constant($name);
+                self::$savedHandlers[$signal] = pcntl_signal_get_handler($signal);
+                pcntl_signal($signal, SIG_IGN);
+            }
         }
     }
 

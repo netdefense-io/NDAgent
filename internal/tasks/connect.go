@@ -13,16 +13,9 @@ import (
 	"github.com/netdefense-io/ndagent/internal/pathfinder"
 )
 
-// Default timeout for waiting for client to pair
-const defaultPairingTimeout = 5 * time.Minute
-
-// peerOfflineGraceWindow bounds how soon after a peer_offline signal a
-// session end (without a clean close frame) is still treated as a natural
-// consequence of the peer having already departed, rather than a genuine
-// transport failure. Short enough that it can't paper over an unrelated
-// later failure; comfortably inside the ping/pong keepalive window
-// (pingInterval 30s / pongWait 60s in internal/pathfinder/client.go).
-const peerOfflineGraceWindow = 10 * time.Second
+// pairingTimeout bounds the wait for a client to pair; a variable so tests
+// can shorten it.
+var pairingTimeout = 5 * time.Minute
 
 // connectSendResponse is the terminal-response sender used by HandleConnect's
 // policy refusal path. Indirected so tests can assert the refusal without a
@@ -74,28 +67,27 @@ func classifyPathfinderSessionEnd(ctxErr, err error) pathfinderSessionOutcome {
 	// case (returns nil), so err doesn't carry useful information here.
 	if ctxErr != nil {
 		return pathfinderSessionOutcome{
-			result:    NewSuccessResult("Pathfinder session ended (cancelled)"),
+			result:    NewSuccessResult("Relay session ended (cancelled)"),
 			cancelled: true,
 		}
 	}
 
-	// A clean close from the relay (session TTL expiry, idle timeout — see
-	// NDPathFinder's "Cleaner-driven WebSocket close frames" contract) is a
-	// natural session end, not a failure. Branch on the sentinel type
-	// (which itself only ever gets constructed from close code 1000/1001),
-	// not on the reason text, so a future relay reason doesn't regress to
-	// FAILED.
+	// A natural end — a clean close from the relay (session TTL expiry, idle
+	// timeout — see NDPathFinder's "Cleaner-driven WebSocket close frames"
+	// contract), the client leaving, or no client pairing at all — is not a
+	// failure. Branch on the sentinel type, not on the reason text, so a
+	// future relay reason doesn't regress to FAILED.
 	var cleanClose *pathfinder.ErrSessionEndedCleanly
 	if errors.As(err, &cleanClose) {
 		return pathfinderSessionOutcome{
-			result:           NewSuccessResult(fmt.Sprintf("Pathfinder session ended: %v", cleanClose)),
+			result:           NewSuccessResult(fmt.Sprintf("Relay session ended: %v", cleanClose)),
 			naturalEnd:       true,
 			cleanCloseReason: cleanClose.Reason,
 		}
 	}
 
 	return pathfinderSessionOutcome{
-		result: NewFailureResult(fmt.Sprintf("Pathfinder session ended: %v", err)),
+		result: NewFailureResult(fmt.Sprintf("Relay session ended: %v", err)),
 	}
 }
 
@@ -220,7 +212,7 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 	}
 
 	// Send initial response that we're connecting
-	if err := SendInProgressResponse(ws, cmd.TaskID, "Connecting to Pathfinder..."); err != nil {
+	if err := SendInProgressResponse(ws, cmd.TaskID, "Connecting to the relay..."); err != nil {
 		log.Warnw("Failed to send in-progress response", "error", err)
 	}
 
@@ -251,7 +243,7 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"session_id", sessionID,
 	)
 
-	result := NewSuccessResult("Pathfinder session completed")
+	result := NewSuccessResult("Relay session completed")
 	return SendTaskResponse(ws, cmd.TaskID, result)
 }
 
@@ -298,8 +290,9 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 
 	log.Debugw("Connected to Pathfinder, waiting for client to pair")
 
-	// Wait for pairing
-	if err := client.WaitForPairing(ctx, defaultPairingTimeout); err != nil {
+	// Wait for pairing. No client within the wait, or the relay ending the
+	// session first, comes back as a natural end.
+	if err := client.WaitForPairing(ctx, pairingTimeout); err != nil {
 		return fmt.Errorf("pairing failed: %w", err)
 	}
 
@@ -319,20 +312,20 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 	// use it for command timeouts and cancellation.
 	proxy.SetContext(ctx)
 
-	// Session lifetime is tied to the PathFinder relay connection, NOT to the
+	// Session lifetime is tied to the client's relay connection, NOT to the
 	// open-stream count. We deliberately do NOT cancel when streams drop to
 	// zero: webadmin rides one short-lived stream per HTTP request (the
 	// browser/CLI opens and closes a stream per request), so the count
 	// legitimately returns to zero between requests and after a terminal
 	// stream closes. Tearing down on all-streams-closed would kill the
 	// webadmin tunnel mid-session (and made read-only/terminal-less sessions
-	// unusable). The session instead ends naturally when client.RunFrameLoop
-	// returns — i.e. the relay/WS disconnects (bounded by the ping/pong
-	// keepalive: pingInterval 30s / pongWait 60s in internal/pathfinder/
-	// client.go) or the parent context is cancelled (broker PathFinder
-	// session TTL / agent shutdown). CloseAll() + proxy.CloseAll() below
-	// still run on return, destroying the forged PHP session, so abandoned
-	// clients are reclaimed within the pong-wait window.
+	// unusable). The session instead ends when client.RunFrameLoop returns:
+	// the relay reports the client gone (peer_offline), the relay/WS
+	// disconnects (bounded by the ping/pong keepalive: pingInterval 30s /
+	// pongWait 60s in internal/pathfinder/client.go), or the parent context
+	// is cancelled (the agent's own connection ending, agent shutdown).
+	// CloseAll() + proxy.CloseAll() below still run on return, destroying
+	// the forged PHP session.
 
 	// Register the proxied services. Read-only sessions get webadmin only —
 	// the ssh service is not even advertised. The proxy's ProxyStreamToLocal
@@ -375,22 +368,6 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 	if ctx.Err() != nil {
 		log.Debugw("Pathfinder session cancelled")
 		return nil
-	}
-
-	// RunFrameLoop already classifies a clean close (1000/1001) as
-	// ErrSessionEndedCleanly. When it instead returns a plain error but the
-	// relay told us the peer departed shortly before, treat that as the same
-	// natural end — the agent's own read failing right after the peer left
-	// is an expected consequence, not an independent transport failure.
-	if err != nil {
-		var cleanClose *pathfinder.ErrSessionEndedCleanly
-		if !errors.As(err, &cleanClose) && client.PeerOfflineRecently(peerOfflineGraceWindow) {
-			log.Debugw("Session ended without a clean close, but peer_offline preceded it",
-				"session_id", sessionID,
-				"underlying_error", err,
-			)
-			return &pathfinder.ErrSessionEndedCleanly{Reason: "peer disconnected"}
-		}
 	}
 
 	return err

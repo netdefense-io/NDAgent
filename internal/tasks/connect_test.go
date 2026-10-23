@@ -276,7 +276,8 @@ func TestHandleConnectAllowsWhenPolicyFull(t *testing.T) {
 // a genuine transport failure (1005/1006, network error) must still FAIL.
 
 // TestClassifyPathfinderSessionEnd_CleanCloseReasons pins the SUCCESS path
-// for every reason string in the NDPathFinder contract. The classification
+// for every reason string in the NDPathFinder contract, and the two the agent
+// gives itself (the client left, no client paired). The classification
 // must key off the *pathfinder.ErrSessionEndedCleanly sentinel type (itself
 // only ever constructed from close code 1000/1001), not off matching these
 // exact strings, so a future relay reason not in this list still succeeds —
@@ -288,6 +289,8 @@ func TestClassifyPathfinderSessionEnd_CleanCloseReasons(t *testing.T) {
 		"TTL expired (agent never connected)",
 		"TTL expired",
 		"idle timeout (15m0s)",
+		"client disconnected",
+		"client never connected",
 	}
 
 	for _, reason := range reasons {
@@ -305,7 +308,7 @@ func TestClassifyPathfinderSessionEnd_CleanCloseReasons(t *testing.T) {
 			if !outcome.naturalEnd {
 				t.Error("clean close must set naturalEnd")
 			}
-			want := fmt.Sprintf("Pathfinder session ended: %s", reason)
+			want := fmt.Sprintf("Relay session ended: %s", reason)
 			if outcome.result.Message != want {
 				t.Errorf("message = %q, want %q", outcome.result.Message, want)
 			}
@@ -358,7 +361,7 @@ func TestClassifyPathfinderSessionEnd_TransportFailure(t *testing.T) {
 			if outcome.cancelled {
 				t.Error("transport failure must not be reported as cancelled")
 			}
-			want := fmt.Sprintf("Pathfinder session ended: %v", tt.err)
+			want := fmt.Sprintf("Relay session ended: %v", tt.err)
 			if outcome.result.Message != want {
 				t.Errorf("message = %q, want %q", outcome.result.Message, want)
 			}
@@ -382,7 +385,7 @@ func TestClassifyPathfinderSessionEnd_Cancellation(t *testing.T) {
 	if outcome.naturalEnd {
 		t.Error("cancellation must not also set naturalEnd")
 	}
-	want := "Pathfinder session ended (cancelled)"
+	want := "Relay session ended (cancelled)"
 	if outcome.result.Message != want {
 		t.Errorf("message = %q, want %q", outcome.result.Message, want)
 	}

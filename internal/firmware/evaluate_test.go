@@ -594,6 +594,64 @@ func TestEvaluate_CompletedResultShape(t *testing.T) {
 	}
 }
 
+// A series upgrade whose payload asked for no check checked anyway, and its
+// result says so, whoever settles the row; no other result carries the key.
+func TestEvaluate_CompletedResultNotesAnIgnoredCheckFirst(t *testing.T) {
+	for _, ignored := range []bool{true, false} {
+		meta := weeklyMeta()
+		meta.CheckFirstIgnored = ignored
+		v := Evaluate(context.Background(), inputAt(metaPtr(meta), 2*time.Minute), idleDevice().probes())
+		if v.Action != Complete {
+			t.Fatalf("Evaluate = %+v", v)
+		}
+		var got map[string]interface{}
+		if err := json.Unmarshal([]byte(v.Message), &got); err != nil {
+			t.Fatalf("not JSON: %v", err)
+		}
+		note, present := got["check_first_ignored"]
+		if ignored && note != true {
+			t.Errorf("check_first_ignored = %v (present %v), want true", note, present)
+		}
+		if !ignored && present {
+			t.Errorf("a run that honoured check_first carries check_first_ignored = %v", note)
+		}
+	}
+}
+
+// So does every failure of such a run, whoever settles the row: the handler
+// after its end marker, or the reconciler later.
+func TestEvaluate_AFailureNotesAnIgnoredCheckFirst(t *testing.T) {
+	const note = " A series upgrade always checks first; check_first=false was ignored."
+	failures := map[string]func(m *Meta) (Input, Probes){
+		"never triggered": func(m *Meta) (Input, Probes) {
+			m.TriggeredAt = 0
+			return inputAt(m, 2*time.Minute), idleDevice().probes()
+		},
+		"a partial failure": func(m *Meta) (Input, Probes) {
+			return inputAt(m, 2*time.Minute), idleDevice().with(func(d *device) { d.evidence = "The upgrade was aborted due to an error." }).probes()
+		},
+		"ended unchanged": func(m *Meta) (Input, Probes) {
+			in := inputAt(m, 2*time.Minute)
+			in.Sentinel = "done"
+			return in, idleDevice().with(func(d *device) { d.release = "26.1.9" }).probes()
+		},
+	}
+	for name, failure := range failures {
+		for _, ignored := range []bool{true, false} {
+			m := majorMeta()
+			m.CheckFirstIgnored = ignored
+			in, probes := failure(&m)
+			v := Evaluate(context.Background(), in, probes)
+			if v.Action != Fail {
+				t.Fatalf("%s: Evaluate = %+v, want a failure", name, v)
+			}
+			if noted := strings.HasSuffix(v.Message, note); noted != ignored {
+				t.Errorf("%s, check_first ignored %v: message %q", name, ignored, v.Message)
+			}
+		}
+	}
+}
+
 func TestEvaluate_PackagesOnlyResultKeepsTheRelease(t *testing.T) {
 	dev := idleDevice().with(func(d *device) { d.boot = bootBefore })
 	v := Evaluate(context.Background(), inputAt(metaPtr(nightlyMeta()), 2*time.Minute), dev.probes())

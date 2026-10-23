@@ -2,13 +2,22 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/config"
+	"github.com/netdefense-io/ndagent/internal/network"
+	"github.com/netdefense-io/ndagent/internal/signing"
+	"github.com/netdefense-io/ndagent/internal/state"
 )
 
 func TestMaybeClearRebindTokenInConfig(t *testing.T) {
@@ -100,5 +109,99 @@ func TestClearRebindTokenInConfigDefault_RunsTheHelperAsAConfigWriter(t *testing
 	rebindTokenScript = filepath.Join(t.TempDir(), "missing.php")
 	if err := clearRebindTokenInConfigDefault(ctx); err == nil || len(calls) != 0 {
 		t.Fatalf("a plugin without the helper: error %v, calls %d", err, len(calls))
+	}
+}
+
+// The run that sends the rebind token clears it from config.xml too: the
+// registration start zeroes the in-memory copy it shares with the lifecycle,
+// and the cleanup used to read that copy and skip the helper until the next
+// agent start.
+func TestTheRebindTokenIsClearedInTheRunThatUsedIt(t *testing.T) {
+	const token = "rebind-token-0123456789"
+	var sent network.StartRegistrationRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&sent); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("{}"))
+	}))
+	t.Cleanup(srv.Close)
+
+	_, priv, err := signing.GenerateKeypair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		BootstrapToken: token,
+		DeviceUUID:     "3a1e88a3-0000-4000-8000-0000000000aa",
+		Token:          "00000000-0000-4000-8000-000000000000",
+		ServerURIStart: srv.URL + "/v1/DeviceRegistrationStart",
+		DevicePrivKey:  base64.StdEncoding.EncodeToString(signing.SeedFromPrivateKey(priv)),
+	}
+	st, err := state.New(filepath.Join(t.TempDir(), "state.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The keypair was rotated for this token already: the rotation writes the
+	// device's own key file, which a test cannot.
+	sum := sha256.Sum256([]byte(token))
+	if err := st.SetLastRebindTokenHash(hex.EncodeToString(sum[:])); err != nil {
+		t.Fatal(err)
+	}
+
+	prev := clearRebindTokenInConfigFunc
+	t.Cleanup(func() { clearRebindTokenInConfigFunc = prev })
+	cleared := 0
+	clearRebindTokenInConfigFunc = func(context.Context) error {
+		cleared++
+		return nil
+	}
+
+	l := &LifecycleManager{cfg: cfg, state: st, registrationClient: network.NewRegistrationClient(cfg)}
+	if err := l.maybeRotateForRebindToken(); err != nil {
+		t.Fatalf("rebind-token check: %v", err)
+	}
+	if err := l.registrationClient.StartRegistration(context.Background()); err != nil {
+		t.Fatalf("StartRegistration: %v", err)
+	}
+	if sent.BootstrapToken != token {
+		t.Fatalf("the registration start carried bootstrap token %q, want the one in the conf", sent.BootstrapToken)
+	}
+	if cfg.BootstrapToken != "" {
+		t.Fatal("the registration start left the in-memory token, so this test shows nothing")
+	}
+
+	l.maybeClearRebindTokenInConfig(context.Background())
+	if cleared != 1 {
+		t.Fatalf("the helper ran %d times after the device was enabled, want once", cleared)
+	}
+	l.maybeClearRebindTokenInConfig(context.Background())
+	if cleared != 1 {
+		t.Fatalf("the helper ran again (%d times) once the token was cleared", cleared)
+	}
+}
+
+// A helper that fails is tried again by the next lifecycle round of the run.
+func TestARebindTokenTheHelperCouldNotClearIsTriedAgain(t *testing.T) {
+	prev := clearRebindTokenInConfigFunc
+	t.Cleanup(func() { clearRebindTokenInConfigFunc = prev })
+	calls := 0
+	clearRebindTokenInConfigFunc = func(context.Context) error {
+		calls++
+		if calls == 1 {
+			return errors.New("config lock held")
+		}
+		return nil
+	}
+
+	// What the lifecycle holds once the registration start sent the token.
+	l := &LifecycleManager{cfg: &config.Config{}, rebindTokenInConf: true}
+	l.maybeClearRebindTokenInConfig(context.Background())
+	l.maybeClearRebindTokenInConfig(context.Background())
+	l.maybeClearRebindTokenInConfig(context.Background())
+	if calls != 2 {
+		t.Fatalf("the helper ran %d times, want twice: the failure, then the success", calls)
 	}
 }

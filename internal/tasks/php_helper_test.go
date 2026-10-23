@@ -13,6 +13,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // standInPHP makes RunPHPConfigHelper run a shell script in place of PHP. The
@@ -51,6 +52,53 @@ func TestRunPHPConfigHelper_ANonZeroExitIsAnErrorThatCarriesTheReport(t *testing
 	}
 	if result != "failed" {
 		t.Errorf("result %q", result)
+	}
+}
+
+// A script that dies before its report (a PHP fatal error, printed on stdout on
+// OPNsense) says why in the error, without the stack trace, whose frames can
+// carry call arguments.
+func TestRunPHPConfigHelper_AFailureWithoutAReportSaysWhatTheScriptSaid(t *testing.T) {
+	script, _ := standInPHP(t, `printf '\nFatal error: Uncaught Error: Class "OPNsense\\NetDefense\\ConfigTransaction" not found in /usr/local/opnsense/scripts/OPNsense/NetDefense/configure.php:54\nStack trace:\n#0 /x.php(9): f('"'"'argument-in-a-frame'"'"')\n#1 {main}\n  thrown in /x.php on line 54\n'; exit 255`+"\n")
+	result, err := RunPHPConfigHelper(context.Background(), script, "--json")
+	if err == nil {
+		t.Fatal("a script that exited 255 was not an error")
+	}
+	msg := err.Error()
+	for _, want := range []string{"helper.sh exited 255 without a report", `Class "OPNsense\NetDefense\ConfigTransaction" not found`, "configure.php:54"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("error %q, want it to contain %q", msg, want)
+		}
+	}
+	for _, unwanted := range []string{"Stack trace", "argument-in-a-frame", "\n"} {
+		if strings.Contains(msg, unwanted) {
+			t.Errorf("error %q contains %q", msg, unwanted)
+		}
+	}
+	if result != "" {
+		t.Errorf("result %q from a script that printed no report", result)
+	}
+}
+
+func TestHelperOutputReason(t *testing.T) {
+	cases := []struct{ out, want string }{
+		{"", "no output"},
+		{"\n  \n", "no output"},
+		{"PHP Warning:  x\n\tin y\n", "PHP Warning: x in y"},
+		{"bad \x1b[31mcolour\x00\n", "bad [31mcolour"},
+	}
+	for _, tc := range cases {
+		if got := helperOutputReason([]byte(tc.out)); got != tc.want {
+			t.Errorf("helperOutputReason(%q) = %q, want %q", tc.out, got, tc.want)
+		}
+	}
+
+	// A long output keeps its end, cut at a character boundary.
+	got := helperOutputReason([]byte(strings.Repeat("é", 400) + " the end"))
+	kept := strings.TrimPrefix(got, "...")
+	if !strings.HasPrefix(got, "...") || !strings.HasSuffix(got, " the end") || !utf8.ValidString(got) ||
+		len(kept) > helperReasonMax || len(kept) < helperReasonMax-utf8.UTFMax {
+		t.Errorf("a long output gave %q (%d bytes kept), want its last %d bytes or so, whole characters", got, len(kept), helperReasonMax)
 	}
 }
 

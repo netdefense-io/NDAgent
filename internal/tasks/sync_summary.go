@@ -3,6 +3,8 @@ package tasks
 import (
 	"fmt"
 	"strings"
+
+	"github.com/netdefense-io/ndagent/internal/pkgmgr"
 )
 
 // syncSectionLabels maps SyncAPIItemResult.Type values to the
@@ -30,6 +32,8 @@ var syncSectionLabels = []struct {
 	{"zabbix_settings", "Zabbix settings"},
 	{"zabbix_userparameter", "Zabbix userparams"},
 	{"zabbix_alias", "Zabbix aliases"},
+	{"REPOSITORY", "Package repositories"},
+	{"SOFTWARE", "Software"},
 }
 
 // normalizeSyncAction collapses the past/present-tense action variants
@@ -46,13 +50,18 @@ var syncSectionLabels = []struct {
 // "deferred", etc.) is a non-mutating or blocked outcome and is
 // deliberately left unrecognized here — it belongs in errors, not in the
 // created/updated/deleted tally.
+//
+// The software family speaks pkg's vocabulary: a package installed or
+// removed, a repository file written (new or changed, which the agent does
+// not tell apart) or removed. ALREADY_PRESENT, ALREADY_ABSENT and
+// REPO_UNCHANGED changed nothing.
 func normalizeSyncAction(action string) string {
 	switch action {
-	case "create", "created":
+	case "create", "created", string(pkgmgr.ActionInstalled):
 		return "created"
-	case "update", "updated", "written", "renumbered":
+	case "update", "updated", "written", "renumbered", string(pkgmgr.ActionRepoConfigured):
 		return "updated"
-	case "delete", "deleted":
+	case "delete", "deleted", string(pkgmgr.ActionRemoved), string(pkgmgr.ActionRepoRemoved):
 		return "deleted"
 	}
 	return ""
