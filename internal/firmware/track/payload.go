@@ -33,6 +33,10 @@ type Payload struct {
 	// Approved maps each series the track has a target for to that target. It is
 	// required and non-empty for advance and empty for the other two actions.
 	Approved map[string]string
+	// Revisions maps a series of Approved to the fingerprint of the folder content
+	// the track approved for it. A series without an entry is not held to a
+	// revision. Present only on an advance, and then non-empty.
+	Revisions map[string]string
 	// Reboot is true to apply the full update, base and kernel included, and
 	// reboot; false applies the userland packages only. Only advance reads it.
 	Reboot bool
@@ -58,7 +62,7 @@ func ParsePayload(raw map[string]interface{}) (*Payload, *Fault) {
 
 	for key := range raw {
 		switch key {
-		case "action", "track", "approved", "reboot", "major", "boot_environment":
+		case "action", "track", "approved", "revisions", "reboot", "major", "boot_environment":
 		default:
 			return nil, fault("unknown_key", "unknown key %q", key)
 		}
@@ -119,6 +123,37 @@ func ParsePayload(raw map[string]interface{}) (*Payload, *Fault) {
 				return nil, fault("version_outside_series", "release %q does not belong to series %q", version, s)
 			}
 			p.Approved[s] = version
+		}
+	}
+
+	if revisions, present := raw["revisions"]; present {
+		m, ok := revisions.(map[string]interface{})
+		switch {
+		case !ok:
+			return nil, fault("revisions_not_object", "revisions must be an object")
+		case len(m) == 0:
+			return nil, fault("revisions_empty", "revisions must not be empty")
+		case p.Action != ActionAdvance:
+			return nil, fault("revisions_not_allowed", "revisions is only valid for advance")
+		}
+		series := make([]string, 0, len(m))
+		for s := range m {
+			series = append(series, s)
+		}
+		sort.Strings(series)
+		p.Revisions = make(map[string]string, len(m))
+		for _, s := range series {
+			if !ValidSeries(s) {
+				return nil, fault("revisions_bad_series", "revisions key %q is not a series", s)
+			}
+			if _, approved := p.Approved[s]; !approved {
+				return nil, fault("revisions_not_approved", "revisions names %q, which approved does not", s)
+			}
+			value, isString := m[s].(string)
+			if !isString || !ValidRevision(value) {
+				return nil, fault("revisions_bad_fingerprint", "the revision for %q is not a 64-digit lowercase hex fingerprint", s)
+			}
+			p.Revisions[s] = value
 		}
 	}
 

@@ -62,6 +62,7 @@ const (
 	ReasonHeldHAMember            = "held_ha_member"
 	ReasonHeldAgentABIUnavailable = "held_agent_abi_unavailable"
 	ReasonHeldUpgradeAborted      = "held_upgrade_aborted"
+	ReasonHeldRevisionMismatch    = "held_revision_mismatch"
 	ReasonApplied                 = "applied"
 	ReasonEnrolled                = "enrolled"
 	ReasonUnenrolled              = "unenrolled"
@@ -77,7 +78,7 @@ var (
 		ReasonReleaseFolderUnavailable, ReasonHeldDowngradeRisk, ReasonHeldUnsupportedEdition,
 		ReasonHeldCustomFlavour, ReasonHeldFirmwareBusy, ReasonHeldUnexpectedPlan,
 		ReasonHeldRebootPending, ReasonHeldTestMode, ReasonHeldLateDispatch, ReasonHeldInsufficientSpace,
-		ReasonHeldHAMember, ReasonHeldAgentABIUnavailable, ReasonHeldUpgradeAborted,
+		ReasonHeldHAMember, ReasonHeldAgentABIUnavailable, ReasonHeldUpgradeAborted, ReasonHeldRevisionMismatch,
 		ReasonApplied, ReasonEnrolled, ReasonUnenrolled,
 	}
 
@@ -87,7 +88,7 @@ var (
 		ReasonHeldDowngradeRisk, ReasonHeldUnsupportedEdition, ReasonHeldCustomFlavour,
 		ReasonHeldFirmwareBusy, ReasonHeldUnexpectedPlan, ReasonHeldRebootPending,
 		ReasonHeldTestMode, ReasonHeldLateDispatch, ReasonHeldInsufficientSpace, ReasonHeldHAMember,
-		ReasonHeldAgentABIUnavailable, ReasonHeldUpgradeAborted,
+		ReasonHeldAgentABIUnavailable, ReasonHeldUpgradeAborted, ReasonHeldRevisionMismatch,
 	}
 
 	// releasedReasons go with the released outcome and only that does.

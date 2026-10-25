@@ -1,0 +1,14 @@
+{
+ "e2e-a": {
+  "trimmed_fingerprint": "db9580ba4878e4aa417485ddceb1bfc3c08afe12c1d53971073f14c4644b0eed",
+  "trimmed_records": 80,
+  "full_fingerprint": "efd78f7371ce149013aab037940fe49dc766a1944b8412de9a7be83d8041c3fd",
+  "full_records": 938
+ },
+ "e2e-c": {
+  "trimmed_fingerprint": "98ed9bc2dd48db8ebf7f2c4c708b7b81bf2c17564fcb1901fa277ec6194910f9",
+  "trimmed_records": 66,
+  "full_fingerprint": "e4253948c784b9cdd6eab30387a59a6601255209186426c05283d1ab7f81e8aa",
+  "full_records": 933
+ }
+}

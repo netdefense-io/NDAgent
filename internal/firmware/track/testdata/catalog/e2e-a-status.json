@@ -1,0 +1,223 @@
+{
+ "connection": "ok",
+ "repository": "ok",
+ "product_version": "26.7.5",
+ "product_abi": "26.7",
+ "needs_reboot": "1",
+ "last_check": "Sun Oct 25 01:40:49 UTC 2026",
+ "upgrade_packages": [
+  {
+   "name": "boost-libs",
+   "repository": "OPNsense",
+   "current_version": "1.91.0",
+   "new_version": "1.92.0"
+  },
+  {
+   "name": "ca_root_nss",
+   "repository": "OPNsense",
+   "current_version": "3.129",
+   "new_version": "3.130"
+  },
+  {
+   "name": "expat",
+   "repository": "OPNsense",
+   "current_version": "2.8.4",
+   "new_version": "2.8.5"
+  },
+  {
+   "name": "libltdl",
+   "repository": "OPNsense",
+   "current_version": "2.5.4",
+   "new_version": "2.6.2"
+  },
+  {
+   "name": "libuuid",
+   "repository": "OPNsense",
+   "current_version": "2.42.3",
+   "new_version": "2.42.4"
+  },
+  {
+   "name": "nss",
+   "repository": "OPNsense",
+   "current_version": "3.129",
+   "new_version": "3.130"
+  },
+  {
+   "name": "openldap26-client",
+   "repository": "OPNsense",
+   "current_version": "2.6.15",
+   "new_version": "2.6.15_1"
+  },
+  {
+   "name": "opnsense",
+   "repository": "OPNsense",
+   "current_version": "26.7.5",
+   "new_version": "26.7.7"
+  },
+  {
+   "name": "opnsense-update",
+   "repository": "OPNsense",
+   "current_version": "26.7.4_1",
+   "new_version": "26.7.7"
+  },
+  {
+   "name": "pcre2",
+   "repository": "OPNsense",
+   "current_version": "10.48",
+   "new_version": "10.49"
+  },
+  {
+   "name": "php85",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-ctype",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-curl",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-dom",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-filter",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-gettext",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-ldap",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-mbstring",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-pcntl",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-pdo",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-phalcon",
+   "repository": "OPNsense",
+   "current_version": "5.22.0",
+   "new_version": "5.22.1"
+  },
+  {
+   "name": "php85-session",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-simplexml",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-sockets",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-sqlite3",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-xml",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "php85-zlib",
+   "repository": "OPNsense",
+   "current_version": "8.5.10",
+   "new_version": "8.5.12"
+  },
+  {
+   "name": "py313-duckdb",
+   "repository": "OPNsense",
+   "current_version": "1.5.5",
+   "new_version": "1.5.6"
+  },
+  {
+   "name": "py313-pycparser",
+   "repository": "OPNsense",
+   "current_version": "2.23",
+   "new_version": "3.0"
+  },
+  {
+   "name": "py313-pytz",
+   "repository": "OPNsense",
+   "current_version": "2026.3,1",
+   "new_version": "2026.5,1"
+  },
+  {
+   "name": "py313-truststore",
+   "repository": "OPNsense",
+   "current_version": "0.10.4",
+   "new_version": "0.10.4_1"
+  },
+  {
+   "name": "py313-tzdata",
+   "repository": "OPNsense",
+   "current_version": "2026.4",
+   "new_version": "2026.5"
+  },
+  {
+   "name": "qemu-guest-agent",
+   "repository": "OPNsense",
+   "current_version": "11.1.1",
+   "new_version": "11.1.2"
+  },
+  {
+   "name": "base",
+   "size": "98326064",
+   "repository": "OPNsense",
+   "current_version": "26.7.4",
+   "new_version": "26.7.7"
+  },
+  {
+   "name": "kernel",
+   "size": "33172196",
+   "repository": "OPNsense",
+   "current_version": "26.7.4",
+   "new_version": "26.7.7"
+  }
+ ],
+ "new_packages": []
+}

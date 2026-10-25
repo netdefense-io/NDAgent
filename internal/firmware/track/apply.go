@@ -176,6 +176,9 @@ func (e *Engine) requestRun(ctx context.Context, o *op, meta *firmware.Meta, pre
 		if ctx.Err() != nil {
 			return aborted()
 		}
+		if out := e.recheckRevision(ctx, o, meta, prev, next); out != nil {
+			return out
+		}
 		if attempt == 1 && !spec.marked {
 			if err := e.markTriggered(o, meta); err != nil {
 				return e.nothingStarted(ctx, o, meta, prev, next, ReasonHeldCheckFailed)
@@ -273,6 +276,9 @@ func (e *Engine) applyPackagesOnly(ctx context.Context, o *op, meta *firmware.Me
 			return aborted()
 		}
 		return e.nothingStarted(ctx, o, meta, prev, next, ReasonHeldFirmwareBusy)
+	}
+	if out := e.recheckRevision(ctx, o, meta, prev, next); out != nil {
+		return out
 	}
 	if err := e.markTriggered(o, meta); err != nil {
 		return e.nothingStarted(ctx, o, meta, prev, next, ReasonHeldCheckFailed)
@@ -512,6 +518,7 @@ func (e *Engine) settle(ctx context.Context, o *op, meta *firmware.Meta, sentine
 // applied and the periodic round checks the pin against the record.
 func (e *Engine) finishApplied(ctx context.Context, o *op, wait time.Duration) *Outcome {
 	cx := detached(ctx)
+	e.readAppliedRevision(cx, o)
 
 	var installed string
 	if err := e.retryFor(cx, wait, func() (err error) {

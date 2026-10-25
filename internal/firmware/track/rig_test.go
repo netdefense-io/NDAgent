@@ -123,7 +123,7 @@ func (r *rig) checkOutcome(p Payload, out *Outcome) {
 		if out.Failure != "" || out.Aborted {
 			r.t.Fatalf("an outcome that is a result and something else: %+v", out)
 		}
-		if f := ValidateResult(out.Message, &Expect{Action: p.Action, Track: p.Track, Approved: p.Approved, Major: p.Major}); f != nil {
+		if f := ValidateResult(out.Message, &Expect{Action: p.Action, Track: p.Track, Approved: p.Approved, Major: p.Major, Revisions: p.Revisions}); f != nil {
 			r.t.Fatalf("the result %s is refused by the contract: %v", out.Message, f)
 		}
 	case out.Failure != "":

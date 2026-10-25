@@ -1,0 +1,107 @@
+{
+ "connection": "ok",
+ "repository": "ok",
+ "product_version": "26.1.11_10",
+ "product_abi": "26.1",
+ "needs_reboot": "0",
+ "last_check": "Sat Oct 24 23:06:55 UTC 2026",
+ "upgrade_packages": [
+  {
+   "name": "php83",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-ctype",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-curl",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-dom",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-filter",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-gettext",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-ldap",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-mbstring",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-pcntl",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-pdo",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-session",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-simplexml",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-sockets",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-sqlite3",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-xml",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  },
+  {
+   "name": "php83-zlib",
+   "repository": "OPNsense",
+   "current_version": "8.3.31",
+   "new_version": "8.3.36"
+  }
+ ],
+ "new_packages": []
+}

@@ -99,8 +99,11 @@ type Job struct {
 	Action   string            `json:"action"`
 	Track    string            `json:"track"`
 	Approved map[string]string `json:"approved,omitempty"`
-	Reboot   bool              `json:"reboot"`
-	Phase    string            `json:"phase"`
+	// Revisions are the payload's, kept so the answer after a restart still names
+	// the revision the dispatch asked for.
+	Revisions map[string]string `json:"revisions,omitempty"`
+	Reboot    bool              `json:"reboot"`
+	Phase     string            `json:"phase"`
 
 	// From is the installed release when the task began, Target the release the
 	// payload approves for its series ("" when none).
@@ -363,7 +366,7 @@ func (e *Engine) Execute(ctx context.Context, in Input) (out *Outcome) {
 	o = &op{
 		in: in,
 		job: Job{
-			Action: in.Payload.Action, Track: in.Payload.Track, Approved: in.Payload.Approved, Reboot: in.Payload.Reboot,
+			Action: in.Payload.Action, Track: in.Payload.Track, Approved: in.Payload.Approved, Revisions: in.Payload.Revisions, Reboot: in.Payload.Reboot,
 			Phase: PhaseStarted, StartedAt: in.Started.Unix(), ExpiresAt: in.Expires.Unix(), Major: in.Payload.Major,
 		},
 	}
@@ -407,6 +410,10 @@ type op struct {
 	kind  string
 	notes []string
 
+	// revision is the fingerprint of the folder content the task read from the
+	// device's catalog; the answer names it when the dispatch carried revisions.
+	revision string
+
 	// noPin says the answer reports no pin: the agent holds none it can vouch for
 	// (the gone-record rule), so the result carries no pinned_version.
 	noPin bool
@@ -444,6 +451,24 @@ func (o *op) asHop(major string) {
 	o.kind, o.target, o.notes = KindMajor, major, nil
 }
 
+// wanted is the revision the dispatch holds the task's series to, "" for a series
+// the track has not fixed one for.
+func (o *op) wanted() string {
+	series, _ := SeriesOf(o.installed)
+	return o.in.Payload.Revisions[series]
+}
+
+// namesRevision says whether the answer carries the revision the task read: only
+// for an advance whose dispatch carried revisions, only for the answers that are
+// about the content (the update applied, nothing newer on offer, a folder that is
+// not the approved revision), and never for a series upgrade's.
+func (o *op) namesRevision(outcome, reason string) bool {
+	if o.revision == "" || len(o.in.Payload.Revisions) == 0 || o.kind != "" {
+		return false
+	}
+	return outcome == OutcomeSuccess || reason == ReasonAtOrAboveTarget || reason == ReasonPinDrift || reason == ReasonHeldRevisionMismatch
+}
+
 func (o *op) progress(message string) {
 	if o.in.Progress != nil {
 		o.in.Progress(message)
@@ -460,6 +485,9 @@ func (e *Engine) result(o *op, outcome, reason string) *Outcome {
 	}
 	if o.noPin {
 		r.PinnedVersion = ""
+	}
+	if o.namesRevision(outcome, reason) {
+		r.Revision = o.revision
 	}
 	message, err := r.MessageFor(o.in.Payload)
 	if err != nil {
@@ -522,7 +550,7 @@ var (
 // knows which action and track the answer must echo, and that nothing has changed.
 func NewJob(p Payload, started, expires time.Time) Job {
 	return Job{
-		Action: p.Action, Track: p.Track, Approved: p.Approved, Reboot: p.Reboot, Major: p.Major,
+		Action: p.Action, Track: p.Track, Approved: p.Approved, Revisions: p.Revisions, Reboot: p.Reboot, Major: p.Major,
 		Phase: PhaseStarted, StartedAt: started.Unix(), ExpiresAt: expires.Unix(),
 	}
 }

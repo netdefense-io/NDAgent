@@ -19,9 +19,9 @@ import (
 // decision, made in NDDataModels and in every copy together.
 var vectorDigests = map[string]string{
 	"dead-man.json":        "71041fe7855b77f17eebf4869dcb3d9d3815b48868a54d432686b516f5b8f171",
-	"failure-details.json": "071b45bd86766f7a01a2ab4a5f35b418a73aff05a301b0c5fa7385a331237fdf",
-	"payloads.json":        "e9c1abdc8130ac4bf8702d0fccddc9a5c9017bfd0bfdc43ba93d3bfedaf914db",
-	"results.json":         "86251ac7784e0a4e40ca0059158152c0c8051e8e30ce138a0271dd44155cfc5d",
+	"failure-details.json": "554acb0cc3fcb31c2542d7103fdd6f7885d65b8cac803c9bb53c87e115f361c6",
+	"payloads.json":        "43cd15111232517aa62f9e1353b657c6d56e1a3c5907a36da0faa41a5fb005bf",
+	"results.json":         "dbd40198e518dc6b09e0fe1eb339ecf7620ffd099c639f516934fb90d8d25267",
 	"versions.json":        "f99fa1bcf27cdfceeff8af3f8c7b9ea7b3c9deff2c9119f73909f3d477020cb5",
 }
 
@@ -472,6 +472,9 @@ type resultVector struct {
 	// DispatchedMajor is the `major` of the payload the task was dispatched with;
 	// a vector without it was dispatched with none.
 	DispatchedMajor string `json:"dispatched_major"`
+	// DispatchedRevisions is the payload's `revisions`; a vector without it was
+	// dispatched with none.
+	DispatchedRevisions map[string]string `json:"dispatched_revisions"`
 }
 
 func loadResultVectors(t *testing.T) resultVectors {
@@ -525,7 +528,7 @@ func TestResultVocabularyIsTheSharedOne(t *testing.T) {
 	if !equalStrings(v.VersionKeys, []string{"from_version", "to_version", "target_version", "pinned_version"}) {
 		t.Errorf("version keys: the vectors say %v", v.VersionKeys)
 	}
-	if !equalStrings(v.OptionalKeys, []string{"kind", "notes"}) {
+	if !equalStrings(v.OptionalKeys, []string{"kind", "notes", "revision"}) {
 		t.Errorf("optional keys: the vectors say %v", v.OptionalKeys)
 	}
 	if !equalStrings(v.Kinds, []string{KindMajor}) {
@@ -546,7 +549,7 @@ func TestResultValidatorAgreesWithEveryVector(t *testing.T) {
 	v := loadResultVectors(t)
 	for _, vec := range v.Vectors {
 		// The dispatch is the vector's: a task dispatched with no major refuses a kind.
-		f := ValidateResult(vec.text(t), &Expect{Major: vec.DispatchedMajor})
+		f := ValidateResult(vec.text(t), &Expect{Major: vec.DispatchedMajor, Revisions: vec.DispatchedRevisions})
 		switch {
 		case vec.Valid && f != nil:
 			t.Errorf("%s: refused: %v", vec.Description, f)
@@ -571,7 +574,7 @@ func TestResultBuilderProducesEveryValidVectorAndNothingInvalid(t *testing.T) {
 		if !ok {
 			continue // a vector whose point is a key or a type the builder cannot express
 		}
-		text, err := r.message(&Expect{Major: vec.DispatchedMajor})
+		text, err := r.message(&Expect{Major: vec.DispatchedMajor, Revisions: vec.DispatchedRevisions})
 		if vec.Valid {
 			if err != nil {
 				t.Errorf("%s: the builder refused a valid result: %v", vec.Description, err)
@@ -602,7 +605,7 @@ func resultFromVector(m map[string]json.RawMessage) (Result, bool) {
 	if !str("action", &r.Action) || !str("track", &r.Track) || !str("outcome", &r.Outcome) || !str("reason", &r.Reason) ||
 		!str("from_version", &r.FromVersion) || !str("to_version", &r.ToVersion) ||
 		!str("target_version", &r.TargetVersion) || !str("pinned_version", &r.PinnedVersion) ||
-		!str("kind", &r.Kind) {
+		!str("kind", &r.Kind) || !str("revision", &r.Revision) {
 		return Result{}, false
 	}
 	// notes is a list of strings; a typed result cannot be asked for null, a string,
@@ -623,7 +626,7 @@ func resultFromVector(m map[string]json.RawMessage) (Result, bool) {
 	if json.Unmarshal(m["drift"], &r.Drift) != nil || json.Unmarshal(m["reinstall_entries"], &r.ReinstallEntries) != nil {
 		return Result{}, false
 	}
-	for _, key := range []string{"from_version", "to_version", "target_version", "pinned_version", "kind"} {
+	for _, key := range []string{"from_version", "to_version", "target_version", "pinned_version", "kind", "revision"} {
 		if raw, present := m[key]; present && string(raw) == `""` {
 			return Result{}, false
 		}
@@ -631,12 +634,12 @@ func resultFromVector(m map[string]json.RawMessage) (Result, bool) {
 	for key := range m {
 		switch key {
 		case "action", "track", "outcome", "reason", "drift", "reinstall_entries",
-			"from_version", "to_version", "target_version", "pinned_version", "kind", "notes":
+			"from_version", "to_version", "target_version", "pinned_version", "kind", "notes", "revision":
 		default:
 			return Result{}, false
 		}
 	}
-	for _, key := range []string{"from_version", "to_version", "target_version", "pinned_version", "kind"} {
+	for _, key := range []string{"from_version", "to_version", "target_version", "pinned_version", "kind", "revision"} {
 		if raw, present := m[key]; present && string(raw) == "null" {
 			return Result{}, false // null is "omit it instead": not expressible as an empty string either
 		}
@@ -673,18 +676,18 @@ func TestResultTargetsAreTheOnesAPayloadWouldHaveCarried(t *testing.T) {
 		var target string
 		_ = json.Unmarshal(raw, &target)
 		series, _ := SeriesOf(target)
-		if f := ValidateResult(vec.text(t), &Expect{Approved: map[string]string{series: target}, Major: vec.DispatchedMajor}); f != nil {
+		if f := ValidateResult(vec.text(t), &Expect{Approved: map[string]string{series: target}, Major: vec.DispatchedMajor, Revisions: vec.DispatchedRevisions}); f != nil {
 			t.Errorf("%s: refused against its own target: %v", vec.Description, f)
 		}
 		if _, isMajor := vec.Message["kind"]; isMajor {
 			// Under a kind the target is the series, judged against the dispatched
 			// major and not against the approved map: a different major is refused.
-			if f := ValidateResult(vec.text(t), &Expect{Major: "27.1"}); f == nil {
+			if f := ValidateResult(vec.text(t), &Expect{Major: "27.1", Revisions: vec.DispatchedRevisions}); f == nil {
 				t.Errorf("%s: accepted a series the dispatch did not carry", vec.Description)
 			}
 			continue
 		}
-		if f := ValidateResult(vec.text(t), &Expect{Approved: map[string]string{}, Major: vec.DispatchedMajor}); f == nil {
+		if f := ValidateResult(vec.text(t), &Expect{Approved: map[string]string{}, Major: vec.DispatchedMajor, Revisions: vec.DispatchedRevisions}); f == nil {
 			t.Errorf("%s: accepted a target the dispatch did not carry", vec.Description)
 		}
 	}

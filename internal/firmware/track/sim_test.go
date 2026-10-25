@@ -143,6 +143,14 @@ type simDevice struct {
 	foreignLife     int
 	foreignLeft     int
 
+	// the catalog pkg cached: catalogSalt stands for a rewrite of the folder in
+	// place (same names, other content), catalogErr makes it unreadable and
+	// onCatalogRead runs before the nth read, outside the lock.
+	catalogSalt   string
+	catalogErr    error
+	catalogReads  int
+	onCatalogRead func(d *simDevice, n int)
+
 	// errors injected
 	settingsErr      error
 	setErr           error

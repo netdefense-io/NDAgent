@@ -36,6 +36,11 @@ type Result struct {
 	// Both are omitted from the wire when empty.
 	Kind  string
 	Notes []string
+
+	// Revision is the fingerprint of the folder content the answer is about (see
+	// revision.go); "" is omitted. Only an advance whose dispatch carried
+	// revisions reports one.
+	Revision string
 }
 
 type wireResult struct {
@@ -51,6 +56,7 @@ type wireResult struct {
 	PinnedVersion    string   `json:"pinned_version,omitempty"`
 	Kind             string   `json:"kind,omitempty"`
 	Notes            []string `json:"notes,omitempty"`
+	Revision         string   `json:"revision,omitempty"`
 }
 
 // Message is the result as the compact JSON text a task carries. The agent
@@ -65,7 +71,7 @@ func (r Result) Message() (string, error) { return r.message(nil) }
 // names exactly it) is checked here too, so a result the control plane would
 // refuse is a bug found in the agent and not a lost answer.
 func (r Result) MessageFor(p Payload) (string, error) {
-	return r.message(&Expect{Action: p.Action, Track: p.Track, Approved: p.Approved, Major: p.Major})
+	return r.message(&Expect{Action: p.Action, Track: p.Track, Approved: p.Approved, Major: p.Major, Revisions: p.Revisions})
 }
 
 func (r Result) message(expect *Expect) (string, error) {
@@ -90,6 +96,9 @@ type Expect struct {
 	Approved map[string]string
 	// Major is the series the payload asked for ("" when it asked for none).
 	Major string
+	// Revisions is the payload's revisions map: a result may name a revision only
+	// when the dispatch carried some.
+	Revisions map[string]string
 }
 
 // ValidateResult is the agent's port of validate_firmware_track_result. text is
@@ -105,7 +114,7 @@ func ValidateResult(text string, expect *Expect) *Fault {
 
 	required := []string{"action", "track", "outcome", "reason", "drift", "reinstall_entries"}
 	versionKeys := []string{"from_version", "to_version", "target_version", "pinned_version"}
-	optionalKeys := []string{"kind", "notes"}
+	optionalKeys := []string{"kind", "notes", "revision"}
 	for key := range obj {
 		if !contains(required, key) && !contains(versionKeys, key) && !contains(optionalKeys, key) {
 			return fault("unknown_key", "unknown key %q", key)
@@ -189,6 +198,32 @@ func ValidateResult(text string, expect *Expect) *Fault {
 		}
 	}
 
+	_, hasRevision := obj["revision"]
+	if raw, ok := obj["revision"]; ok {
+		var v string
+		if err := json.Unmarshal(raw, &v); err != nil || !ValidRevision(v) {
+			return fault("bad_revision", "revision must be a 64-digit lowercase hex fingerprint, or omitted")
+		}
+		switch {
+		case hasKind:
+			return fault("revision_with_kind", "revision does not go with a series upgrade's answer")
+		case values["action"] != ActionAdvance:
+			return fault("revision_not_advance", "revision is only valid for an advance")
+		case values["outcome"] == OutcomeReleased:
+			return fault("revision_outcome_mismatch", "revision does not fit a released outcome")
+		case expect != nil && len(expect.Revisions) == 0:
+			return fault("revision_not_dispatched", "the dispatch carried no revisions")
+		}
+	}
+
+	if values["reason"] == ReasonHeldRevisionMismatch {
+		switch {
+		case values["action"] != ActionAdvance || (expect != nil && len(expect.Revisions) == 0):
+			return fault("reason_not_dispatched", "held_revision_mismatch answers an advance dispatched with revisions")
+		case !hasRevision:
+			return fault("revision_missing", "held_revision_mismatch names the revision it saw")
+		}
+	}
 	if expect != nil {
 		if expect.Action != "" && values["action"] != expect.Action {
 			return fault("action_mismatch", "the result's action is not the dispatched one")

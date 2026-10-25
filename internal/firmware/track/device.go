@@ -78,6 +78,10 @@ type Device interface {
 	CreateBootEnvironment(ctx context.Context, name, note string) error
 	FindBootEnvironment(ctx context.Context, name string) (BootEnvironment, bool, error)
 
+	// Catalog reads the catalog pkg cached for OPNsense's repository: what the
+	// last check was made against.
+	Catalog(ctx context.Context) (Catalog, error)
+
 	// Probes are the reads firmware.Evaluate makes to decide how an update ended.
 	Probes() firmware.Probes
 }
@@ -154,6 +158,9 @@ func (d *SystemDevice) Probes() firmware.Probes { return d.probes }
 var (
 	// repoConfPath is the generated repository file.
 	repoConfPath = RepoConfPath
+
+	// reposDir is where pkg keeps its catalogs.
+	reposDir = PkgReposDir
 
 	// pkgABIFunc reads pkg's ABI (FreeBSD:15:amd64).
 	pkgABIFunc = func(ctx context.Context) (string, error) {
@@ -240,6 +247,20 @@ func (d *SystemDevice) RepoBase(ctx context.Context) (RepoBase, error) {
 		return RepoBase{}, fmt.Errorf("read pkg's ABI: %w", err)
 	}
 	return ParseRepoConf(string(conf), abi)
+}
+
+// Catalog reads the cached catalog of the repository the generated repository
+// file defines.
+func (d *SystemDevice) Catalog(ctx context.Context) (Catalog, error) {
+	conf, err := os.ReadFile(repoConfPath)
+	if err != nil {
+		return Catalog{}, fmt.Errorf("read the repository file: %w", err)
+	}
+	name, err := RepoName(string(conf))
+	if err != nil {
+		return Catalog{}, err
+	}
+	return ReadCatalog(ctx, CatalogDBPath(reposDir, name))
 }
 
 // RepoPath reads the path the generated repository file points at.

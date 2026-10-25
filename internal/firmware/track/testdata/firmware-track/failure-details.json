@@ -4,7 +4,7 @@
   "kinds": ["major"],
   "notes": ["boot_environment_made", "boot_environment_skipped_no_room", "boot_environment_off", "boot_environment_unavailable", "third_party_repository", "third_party_package"],
   "notes_max": 8,
-  "reasons": ["at_or_above_target", "target_not_yet_offered", "series_not_approved", "pin_drift", "major_offered", "held_check_failed", "held_release_folder_missing", "release_folder_unavailable", "held_downgrade_risk", "held_unsupported_edition", "held_custom_flavour", "held_firmware_busy", "held_unexpected_plan", "held_reboot_pending", "held_test_mode", "held_late_dispatch", "held_insufficient_space", "held_ha_member", "held_agent_abi_unavailable", "held_upgrade_aborted", "applied", "enrolled", "unenrolled"],
+  "reasons": ["at_or_above_target", "target_not_yet_offered", "series_not_approved", "pin_drift", "major_offered", "held_check_failed", "held_release_folder_missing", "release_folder_unavailable", "held_downgrade_risk", "held_unsupported_edition", "held_custom_flavour", "held_firmware_busy", "held_unexpected_plan", "held_reboot_pending", "held_test_mode", "held_late_dispatch", "held_insufficient_space", "held_ha_member", "held_agent_abi_unavailable", "held_upgrade_aborted", "held_revision_mismatch", "applied", "enrolled", "unenrolled"],
   "faults": ["bad_kind", "bad_notes", "bad_pinned_version", "bad_reason", "bad_target", "empty_detail", "kind_not_dispatched", "kind_target_mismatch", "kind_target_missing", "not_an_object", "notes_without_kind", "unknown_key"],
   "vectors": [
     {"description": "a failed advance names its target and the reason", "response": {"status": "FAILED", "message": "firmware update failed", "firmware_track_failure": {"target": "26.7.5", "reason": "held_check_failed"}}, "valid": true},

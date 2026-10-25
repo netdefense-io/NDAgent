@@ -215,6 +215,9 @@ func (e *Engine) moveAndApply(ctx context.Context, o *op, series string, needsUp
 		e.log.Warnw("The firmware check at the target is unusable", "error", describeErr(err))
 		return holdBack(ReasonHeldCheckFailed)
 	}
+	if reason := e.verifyRevision(ctx, o, status); reason != "" {
+		return holdBack(reason)
+	}
 	plan := NewPlan(status)
 	o.reinstalls = plan.ReinstallEntries()
 

@@ -68,7 +68,7 @@ func (e *Engine) opFromJob(job Job, row Row) *op {
 	o := &op{
 		in: Input{
 			TaskID:  row.TaskID,
-			Payload: Payload{Action: job.Action, Track: job.Track, Approved: job.Approved, Reboot: job.Reboot, Major: job.Major},
+			Payload: Payload{Action: job.Action, Track: job.Track, Approved: job.Approved, Revisions: job.Revisions, Reboot: job.Reboot, Major: job.Major},
 			Started: time.Unix(job.StartedAt, 0),
 			Expires: time.Unix(job.ExpiresAt, 0),
 		},
