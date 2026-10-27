@@ -39,6 +39,10 @@ type snapshot struct {
 	Since      time.Time `json:"since"`
 	UpdatedAt  time.Time `json:"updated_at"`
 	LastError  string    `json:"last_error,omitempty"`
+	// KeyState and KeyMessage carry the broker's key verdict from the last
+	// auth; empty unless it reported a mismatch.
+	KeyState   string `json:"key_state,omitempty"`
+	KeyMessage string `json:"key_message,omitempty"`
 }
 
 // Writer serializes status snapshots to a file. Safe for concurrent use.
@@ -82,6 +86,20 @@ func (w *Writer) MarkConnected(serverURL string) error {
 // optional human-readable context (network err, auth fail, etc.).
 func (w *Writer) MarkDisconnected(reason string) error {
 	return w.transition(StateDisconnected, "", reason)
+}
+
+// SetKeyState records the broker's key verdict from the latest auth. An empty
+// state clears it.
+func (w *Writer) SetKeyState(state, message string) error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.snap.KeyState = state
+	w.snap.KeyMessage = message
+	w.snap.UpdatedAt = time.Now().UTC()
+	return w.persist()
 }
 
 // Touch refreshes UpdatedAt without changing state — used by the

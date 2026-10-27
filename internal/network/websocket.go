@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"crypto/tls"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -49,13 +50,31 @@ type AuthMessage struct {
 	DeviceUUID string       `json:"device_uuid"`
 	Version    string       `json:"version"`
 	Facts      *facts.Facts `json:"facts,omitempty"`
+	// DeviceKid is the hex kid of the on-disk key; the broker compares it
+	// with the bound one. Omitted when the key cannot be loaded.
+	DeviceKid string `json:"device_kid,omitempty"`
 }
 
-// AuthResponse from server
+// AuthResponse from server. KeyState and Message are absent from older
+// brokers and from replies to an auth without a kid.
 type AuthResponse struct {
-	Status string `json:"status"`
-	Error  string `json:"error,omitempty"`
+	Status   string `json:"status"`
+	Error    string `json:"error,omitempty"`
+	KeyState any    `json:"key_state,omitempty"`
+	Message  any    `json:"message,omitempty"`
 }
+
+// keyVerdict returns the reply's key_state and message, ignoring any value that
+// is not a string so a malformed field can never fail auth.
+func (r AuthResponse) keyVerdict() (state, message string) {
+	state, _ = r.KeyState.(string)
+	message, _ = r.Message.(string)
+	return state, message
+}
+
+// KeyStateMismatch is the broker's verdict that the key this agent presented
+// is not the one bound to the device.
+const KeyStateMismatch = "mismatch"
 
 // Command received from server, post-envelope-verification. Wire shape:
 //
@@ -493,11 +512,15 @@ func (w *WebSocketClient) authenticate(ctx context.Context) error {
 		Version:    version.Version,
 		Facts:      deviceFacts,
 	}
+	if _, kid, err := w.devicePrivkey(); err == nil {
+		authMsg.DeviceKid = hex.EncodeToString(kid)
+	}
 
 	log.Infow("Sending authentication message",
 		"device_uuid", w.cfg.DeviceUUID,
 		"version", version.Version,
 		"facts_attached", deviceFacts != nil,
+		"device_kid", authMsg.DeviceKid,
 	)
 
 	if err := w.SendJSON(authMsg); err != nil {
@@ -519,7 +542,23 @@ func (w *WebSocketClient) authenticate(ctx context.Context) error {
 	}
 
 	if authResp.Status != "authenticated" {
+		w.markStatus(func(sw *status.Writer) error { return sw.SetKeyState("", "") })
 		return fmt.Errorf("authentication rejected: %s", authResp.Error)
+	}
+
+	keyState, msg := authResp.keyVerdict()
+	if keyState == KeyStateMismatch {
+		if msg == "" {
+			msg = "device key changed - rebind required"
+		}
+		log.Errorw("Device key does not match the one bound to this device; task responses will be rejected until it is rebound",
+			"device_uuid", w.cfg.DeviceUUID,
+			"device_kid", authMsg.DeviceKid,
+			"message", msg,
+		)
+		w.markStatus(func(sw *status.Writer) error { return sw.SetKeyState(KeyStateMismatch, msg) })
+	} else {
+		w.markStatus(func(sw *status.Writer) error { return sw.SetKeyState("", "") })
 	}
 
 	// The broker now has this payload, so heartbeats stay quiet until it

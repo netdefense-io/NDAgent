@@ -71,6 +71,8 @@ class ServiceController extends ApiMutableServiceControllerBase
             'server' => '',
             'since' => '',
             'last_error' => '',
+            'key_state' => '',
+            'key_message' => '',
         ];
 
         if (!is_readable(self::STATUS_FILE)) {
@@ -101,6 +103,8 @@ class ServiceController extends ApiMutableServiceControllerBase
             'server' => isset($snap['server']) ? (string)$snap['server'] : '',
             'since' => isset($snap['since']) ? (string)$snap['since'] : '',
             'last_error' => isset($snap['last_error']) ? (string)$snap['last_error'] : '',
+            'key_state' => isset($snap['key_state']) ? (string)$snap['key_state'] : '',
+            'key_message' => isset($snap['key_message']) ? (string)$snap['key_message'] : '',
         ];
     }
 }

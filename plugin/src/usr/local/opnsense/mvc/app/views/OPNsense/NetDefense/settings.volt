@@ -159,6 +159,13 @@
             success: function(data) {
                 var versionEl = $('#statusAgentVersion');
                 var connEl = $('#statusServerConnection');
+                var keyEl = $('#statusKeyMismatch');
+
+                if (data.key_state === 'mismatch') {
+                    keyEl.text('Device key mismatch - ' + (data.key_message || 'rebind required')).show();
+                } else {
+                    keyEl.hide().empty();
+                }
 
                 if (data.version && data.version !== 'unknown') {
                     versionEl.html('<span class="text-success"><i class="fa fa-check-circle"></i> ' + data.version + '</span>');
@@ -187,6 +194,7 @@
                 }
             },
             error: function() {
+                $('#statusKeyMismatch').hide().empty();
                 $('#statusAgentVersion').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
                 $('#statusServerConnection').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
             }
@@ -483,6 +491,7 @@
             </tr>
         </tbody>
     </table>
+    <div id="statusKeyMismatch" class="alert alert-danger" style="display:none; margin: 10px;"></div>
 </div>
 
 <!-- Step 1: API Configuration -->
