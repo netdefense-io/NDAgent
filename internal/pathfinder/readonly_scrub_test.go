@@ -2,6 +2,7 @@ package pathfinder
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -286,6 +287,44 @@ func scrubAndRead(t *testing.T, rule *scrubRule, body string) (string, int) {
 		t.Errorf("ContentLength = %d for a body of %d bytes", resp.ContentLength, len(out))
 	}
 	return string(out), changed
+}
+
+// A client applies the codings of every Content-Encoding line, each a list, so a
+// body is cleaned only when none of them names a coding other than identity.
+func TestScrubResponse_ReadsEveryContentEncoding(t *testing.T) {
+	rule := scrubRuleFor(http.MethodGet, "/api/auth/user/get/u1")
+	tests := []struct {
+		lines    []string
+		withheld bool
+	}{
+		{nil, false},
+		{[]string{""}, false},
+		{[]string{"identity"}, false},
+		{[]string{"Identity"}, false},
+		{[]string{"identity", " identity ,"}, false},
+		{[]string{"gzip"}, true},
+		{[]string{"GZIP"}, true},
+		{[]string{"x-gzip"}, true},
+		{[]string{"identity, gzip"}, true},
+		{[]string{"identity", "gzip"}, true},
+		{[]string{"gzip", "identity"}, true},
+		{[]string{", br"}, true},
+	}
+	for _, tt := range tests {
+		resp := &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        http.Header{"Content-Type": {"application/json"}},
+			Body:          io.NopCloser(strings.NewReader(userGetBody)),
+			ContentLength: int64(len(userGetBody)),
+		}
+		for _, line := range tt.lines {
+			resp.Header.Add("Content-Encoding", line)
+		}
+		_, err := scrubResponse(resp, rule)
+		if got := errors.Is(err, errScrubEncoded); got != tt.withheld || (!tt.withheld && err != nil) {
+			t.Errorf("Content-Encoding lines %q: withheld %v (%v), want %v", tt.lines, got, err, tt.withheld)
+		}
+	}
 }
 
 func TestScrubRules_EveryAuditedRouteIsCleaned(t *testing.T) {

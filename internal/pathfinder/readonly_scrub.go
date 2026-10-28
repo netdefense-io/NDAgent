@@ -264,8 +264,9 @@ func withheldCause(err error) string {
 // returns the number of values it changed. On any error nothing has been written
 // anywhere and resp is not to be forwarded. The original body is always closed.
 //
-// The request asked for an identity body (see HandleStream), so the transport has
-// undone gzip already; a Content-Encoding that is still set is one it cannot undo.
+// The request asked for no encoding (see HandleStream), and the transport neither
+// asks for one nor decodes one, so a body whose Content-Encoding names a coding
+// other than identity came encoded unasked and cannot be read.
 func scrubResponse(resp *http.Response, rule *scrubRule) (int, error) {
 	if resp.Body == nil || resp.Body == http.NoBody {
 		return 0, nil
@@ -274,7 +275,7 @@ func scrubResponse(resp *http.Response, rule *scrubRule) (int, error) {
 		resp.Body.Close()
 		return 0, nil
 	}
-	if enc := resp.Header.Get("Content-Encoding"); enc != "" && !strings.EqualFold(enc, "identity") {
+	if contentEncoded(resp.Header) {
 		resp.Body.Close()
 		return 0, errScrubEncoded
 	}
@@ -317,4 +318,18 @@ func scrubResponse(resp *http.Response, rule *scrubRule) (int, error) {
 		resp.Header.Del(h)
 	}
 	return changed, nil
+}
+
+// contentEncoded reports whether the header names a content coding other than
+// identity. A client applies the codings of every Content-Encoding line, each a
+// comma-separated list, so all of them are read.
+func contentEncoded(h http.Header) bool {
+	for _, line := range h.Values("Content-Encoding") {
+		for _, coding := range strings.Split(line, ",") {
+			if coding = strings.TrimSpace(coding); coding != "" && !strings.EqualFold(coding, "identity") {
+				return true
+			}
+		}
+	}
+	return false
 }

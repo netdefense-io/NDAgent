@@ -91,6 +91,10 @@ func NewHTTPProxy(host string, port int, sessionMgr *SessionManager) *HTTPProxy 
 		},
 		// Disable connection pooling to avoid issues with session cookies
 		DisableKeepAlives: true,
+		// Send only the client's own Accept-Encoding and decode nothing. A body
+		// the transport decoded loses its Content-Length and would reach the
+		// stream with nothing to say where it ends.
+		DisableCompression: true,
 		// Timeouts for connection establishment (not response body)
 		TLSHandshakeTimeout:   10 * time.Second,
 		ResponseHeaderTimeout: 30 * time.Second,
@@ -301,6 +305,8 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			)
 		}
 
+		chunkIfUnframed(req, resp)
+
 		// Write response back to stream
 		if err := resp.Write(stream); err != nil {
 			resp.Body.Close()
@@ -459,6 +465,27 @@ func removeExistingPHPSESSID(cookies string) string {
 // splitCookies splits a cookie header value into individual cookies.
 func splitCookies(cookies string) []string {
 	return strings.Split(cookies, ";")
+}
+
+// chunkIfUnframed sets a forwarded response whose body has neither a length nor
+// chunks to be written in chunks. Such a body ends only when the connection
+// does, and the proxy keeps the stream open behind a response. Chunks need
+// HTTP/1.1, so the response is labelled HTTP/1.1. The guard only adds chunks:
+// it adds none for a client that asked in HTTP/1.0, and a body the upstream
+// chunked is written as it came, whoever asked.
+func chunkIfUnframed(req *http.Request, resp *http.Response) {
+	if resp.ContentLength >= 0 || len(resp.TransferEncoding) > 0 || req.Method == http.MethodHead ||
+		!req.ProtoAtLeast(1, 1) || !bodyAllowedForStatus(resp.StatusCode) {
+		return
+	}
+	resp.TransferEncoding = []string{"chunked"}
+	resp.Proto, resp.ProtoMajor, resp.ProtoMinor = "HTTP/1.1", 1, 1
+}
+
+// bodyAllowedForStatus reports whether a response with the status can carry a
+// body: 1xx, 204 and 304 carry none.
+func bodyAllowedForStatus(status int) bool {
+	return status >= 200 && status != http.StatusNoContent && status != http.StatusNotModified
 }
 
 // requestHasBody reports whether the request declares a body, whatever its

@@ -46,7 +46,8 @@ func exchangeWith(t *testing.T, readOnly bool, handler http.HandlerFunc, raw str
 	done := runHandleStream(proxy, stream)
 	stream.readBuf <- []byte(raw)
 
-	resp := waitForHandleStreamResponse(t, cap)
+	method, _, _ := strings.Cut(raw, " ")
+	resp := waitForHandleStreamResponseTo(t, cap, method)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		t.Fatalf("reading the response the client got: %v", err)
@@ -106,8 +107,8 @@ func TestHandleStream_ReadWriteSessionIsNotScrubbed(t *testing.T) {
 }
 
 // The body is rewritten whole, so the request must ask for it in the clear: the
-// client's Accept-Encoding and Range never reach OPNsense, and what the
-// transport decodes is what is cleaned.
+// client's Accept-Encoding and Range never reach OPNsense, nothing asks for an
+// encoding in their place, and the plain body that comes back is what is cleaned.
 func TestHandleStream_ReadOnlyScrubbedRouteAsksForAWholeIdentityBody(t *testing.T) {
 	var mu sync.Mutex
 	var seen http.Header
@@ -130,8 +131,8 @@ func TestHandleStream_ReadOnlyScrubbedRouteAsksForAWholeIdentityBody(t *testing.
 
 	mu.Lock()
 	defer mu.Unlock()
-	if ae := seen.Get("Accept-Encoding"); strings.Contains(ae, "br") || strings.Contains(ae, "deflate") {
-		t.Errorf("the client's Accept-Encoding reached OPNsense: %q", ae)
+	if ae := seen.Get("Accept-Encoding"); ae != "" {
+		t.Errorf("OPNsense was asked for the encodings %q; neither the client's nor any other may reach it", ae)
 	}
 	if seen.Get("Range") != "" || seen.Get("If-Range") != "" {
 		t.Errorf("Range reached OPNsense: %q %q", seen.Get("Range"), seen.Get("If-Range"))
@@ -140,10 +141,10 @@ func TestHandleStream_ReadOnlyScrubbedRouteAsksForAWholeIdentityBody(t *testing.
 		t.Errorf("Accept = %q, the other headers must still be forwarded", seen.Get("Accept"))
 	}
 	if ex.body != userGetCleaned {
-		t.Errorf("a gzip response was not cleaned: %s", ex.body)
+		t.Errorf("the response was not cleaned: %s", ex.body)
 	}
 	if enc := ex.resp.Header.Get("Content-Encoding"); enc != "" {
-		t.Errorf("Content-Encoding = %q on a body the proxy decoded", enc)
+		t.Errorf("Content-Encoding = %q on a cleaned body", enc)
 	}
 }
 
@@ -263,13 +264,39 @@ func TestHandleStream_ReadOnlyWithholdsWhatItCannotClean(t *testing.T) {
 			},
 		},
 		{
-			name:   "an encoding the proxy cannot undo",
+			name:   "a br body nothing asked for",
 			cause:  "encoded",
 			target: "/api/auth/user/get/u1",
 			handler: func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Encoding", "br")
 				_, _ = io.WriteString(w, `{"user":{"otp_seed":"SECRET-LEAK"}}`)
+			},
+		},
+		{
+			// The proxy decodes no encoding, gzip included.
+			name:   "a gzip body nothing asked for",
+			cause:  "encoded",
+			target: "/api/auth/user/get/u1",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Encoding", "gzip")
+				zw := gzip.NewWriter(w)
+				_, _ = io.WriteString(zw, `{"user":{"otp_seed":"SECRET-LEAK"}}`)
+				_ = zw.Close()
+			},
+		},
+		{
+			// A client applies the codings of every line, and the input scan
+			// finds no tag in compressed bytes.
+			name:   "a gzip page whose first Content-Encoding line says identity",
+			cause:  "encoded",
+			target: "/interfaces_ppps_edit.php?id=0",
+			handler: func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				w.Header().Add("Content-Encoding", "identity")
+				w.Header().Add("Content-Encoding", "gzip")
+				_, _ = w.Write(gzipBytes([]byte(`<html><input name="password" value="SECRET-LEAK" /></html>`)))
 			},
 		},
 		{
@@ -305,8 +332,9 @@ func TestHandleStream_ReadOnlyWithholdsWhatItCannotClean(t *testing.T) {
 			if ex.resp.StatusCode != http.StatusBadGateway {
 				t.Errorf("status = %d, want 502", ex.resp.StatusCode)
 			}
-			if bytes.Contains(ex.raw, []byte("SECRET-LEAK")) || bytes.Contains(ex.raw, []byte("Login")) {
-				t.Errorf("part of the upstream response reached the client: %.200s", ex.raw)
+			gzipMagic := []byte{0x1f, 0x8b}
+			if bytes.Contains(ex.raw, []byte("SECRET-LEAK")) || bytes.Contains(ex.raw, []byte("Login")) || bytes.Contains(ex.raw, gzipMagic) {
+				t.Errorf("part of the upstream response reached the client: %.200q", ex.raw)
 			}
 			if want := "502 Bad Gateway (read-only session: response withheld)"; ex.resp.Status != want {
 				t.Errorf("Status = %q, want %q", ex.resp.Status, want)

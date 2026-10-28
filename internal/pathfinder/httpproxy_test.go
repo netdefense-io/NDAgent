@@ -3,6 +3,7 @@ package pathfinder
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -462,12 +464,24 @@ func closeHandleStreamTestStream(s *Stream) {
 // answers (block or forward) synchronously per request with no real network
 // latency involved in these tests, so this resolves within a handful of
 // polls; it exists only to avoid a fixed sleep racing the handler goroutine.
+// A body with neither a Content-Length nor chunks reads to the end of what has
+// been captured so far, which may be only part of it, so a response a client
+// could not delimit still parses here: a test about framing asserts it on the
+// response this returns.
 func waitForHandleStreamResponse(t *testing.T, cap *handleStreamCapture) *http.Response {
+	t.Helper()
+	return waitForHandleStreamResponseTo(t, cap, http.MethodGet)
+}
+
+// waitForHandleStreamResponseTo is waitForHandleStreamResponse for a request of
+// the method, which says whether the response has a body: one to a HEAD has
+// none, whatever its Content-Length says.
+func waitForHandleStreamResponseTo(t *testing.T, cap *handleStreamCapture, method string) *http.Response {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if data := cap.dataBytes(); len(data) > 0 {
-			resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(data)), nil)
+			resp, err := http.ReadResponse(bufio.NewReader(bytes.NewReader(data)), &http.Request{Method: method})
 			if err == nil {
 				body, readErr := io.ReadAll(resp.Body)
 				resp.Body.Close()
@@ -704,4 +718,284 @@ func TestHandleStream_NonReadOnlyAllowsServiceRestart_IsForwarded(t *testing.T) 
 
 	closeHandleStreamTestStream(stream)
 	waitHandleStreamDone(t, done)
+}
+
+// staticScript stands in for a script lighttpd serves as a static file.
+var staticScript = bytes.Repeat([]byte("window.opnsense = window.opnsense || {};\n"), 200)
+
+// gzipBytes returns b gzipped.
+func gzipBytes(b []byte) []byte {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	_, _ = zw.Write(b)
+	_ = zw.Close()
+	return buf.Bytes()
+}
+
+// serveStaticScript serves staticScript the way lighttpd serves a static file:
+// gzipped only to a request that asks for gzip, with the length of what it sends
+// either way.
+func serveStaticScript(w http.ResponseWriter, r *http.Request) {
+	body := staticScript
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+		body = gzipBytes(staticScript)
+		w.Header().Set("Content-Encoding", "gzip")
+	}
+	w.Header().Set("Content-Type", "text/javascript")
+	w.Header().Set("Content-Length", strconv.Itoa(len(body)))
+	_, _ = w.Write(body)
+}
+
+// serveInChunks sends staticScript in pieces and no length, which the server
+// sends as chunks.
+func serveInChunks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript")
+	for part := range slices.Chunk(staticScript, len(staticScript)/4+1) {
+		_, _ = w.Write(part)
+		w.(http.Flusher).Flush()
+	}
+}
+
+// serveToTheClose writes head as the response's header, then staticScript unless
+// the request is a HEAD, and closes the connection, which is then the only end
+// of the body.
+func serveToTheClose(head string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		c, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		_, _ = io.WriteString(c, head+"\r\n\r\n")
+		if r.Method != http.MethodHead {
+			_, _ = c.Write(staticScript)
+		}
+	}
+}
+
+// serveStatus answers with the status and no body.
+func serveStatus(code int) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("ETag", `"v1"`)
+		w.WriteHeader(code)
+	}
+}
+
+// acceptEncodings records the Accept-Encoding lines of every request that
+// reaches the handler it wraps.
+type acceptEncodings struct {
+	mu   sync.Mutex
+	seen [][]string
+}
+
+func (a *acceptEncodings) record(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		a.mu.Lock()
+		a.seen = append(a.seen, slices.Clone(r.Header.Values("Accept-Encoding")))
+		a.mu.Unlock()
+		h(w, r)
+	}
+}
+
+// assertOne fails unless one request arrived and its Accept-Encoding lines are
+// want: none, when want is empty.
+func (a *acceptEncodings) assertOne(t *testing.T, want ...string) {
+	t.Helper()
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if len(a.seen) != 1 || !slices.Equal(a.seen[0], want) {
+		t.Errorf("OPNsense got the Accept-Encoding lines %q, want one request with %q", a.seen, want)
+	}
+}
+
+var proxySessions = []struct {
+	name     string
+	readOnly bool
+}{{"read-write", false}, {"read-only", true}}
+
+// The proxy writes a response to the stream as the transport hands it over and
+// leaves the stream open behind it, so a client finds the end of a body only by
+// its Content-Length or its chunks, and a response without a body must end with
+// its header. A transport that asks for gzip on its own decodes the body and
+// drops its Content-Length, so nothing may ask OPNsense for an encoding the
+// client did not ask for, and a body that comes with neither a length nor chunks
+// is sent in chunks.
+func TestHandleStream_ForwardedResponsesAreFramed(t *testing.T) {
+	const toTheClose = "HTTP/1.1 200 OK\r\nContent-Type: text/javascript\r\nConnection: close"
+	tests := []struct {
+		name    string
+		method  string
+		headers []string
+		handler http.HandlerFunc
+		status  int
+		framing string // "length", "chunks", or "" for a response without a body
+	}{
+		{"a static file", "GET", nil, serveStaticScript, http.StatusOK, "length"},
+		{"a chunked body", "GET", nil, serveInChunks, http.StatusOK, "chunks"},
+		{"a body that ends with the connection", "GET", nil, serveToTheClose(toTheClose), http.StatusOK, "chunks"},
+		{"an HTTP/1.0 body that ends with the connection", "GET", nil, serveToTheClose("HTTP/1.0 200 OK\r\nContent-Type: text/javascript"), http.StatusOK, "chunks"},
+		{"HEAD answered without a length", "HEAD", nil, serveToTheClose(toTheClose), http.StatusOK, ""},
+		{"no content", "GET", nil, serveStatus(http.StatusNoContent), http.StatusNoContent, ""},
+		{"not modified", "GET", []string{`If-None-Match: "v1"`}, serveStatus(http.StatusNotModified), http.StatusNotModified, ""},
+	}
+	for _, session := range proxySessions {
+		for _, tt := range tests {
+			t.Run(session.name+"/"+tt.name, func(t *testing.T) {
+				var asked acceptEncodings
+				ex := exchangeWith(t, session.readOnly, asked.record(tt.handler), rawMethod(tt.method, "/ui/js/opnsense.js", tt.headers...))
+				head, rest, _ := bytes.Cut(ex.raw, []byte("\r\n\r\n"))
+
+				if ex.resp.StatusCode != tt.status {
+					t.Fatalf("status = %d, want %d:\n%s", ex.resp.StatusCode, tt.status, head)
+				}
+				chunked := slices.Contains(ex.resp.TransferEncoding, "chunked")
+				switch tt.framing {
+				case "length":
+					if ex.resp.ContentLength != int64(len(staticScript)) || chunked {
+						t.Errorf("the body does not come with its Content-Length of %d:\n%s", len(staticScript), head)
+					}
+				case "chunks":
+					if !chunked {
+						t.Errorf("the body has neither a length nor chunks, so a client cannot tell where it ends:\n%s", head)
+					}
+				default:
+					if chunked || len(rest) != 0 {
+						t.Errorf("a response without a body does not end with its header (%d more bytes):\n%s", len(rest), head)
+					}
+				}
+				if tt.framing != "" && ex.body != string(staticScript) {
+					t.Errorf("the body is %d bytes, want the %d of the file", len(ex.body), len(staticScript))
+				}
+				if enc := ex.resp.Header.Get("Content-Encoding"); enc != "" {
+					t.Errorf("Content-Encoding = %q on a request that asked for none", enc)
+				}
+				asked.assertOne(t)
+			})
+		}
+	}
+}
+
+// A client that asks for an encoding itself gets the body as OPNsense encoded
+// it, byte for byte, with its Content-Encoding and its length: its
+// Accept-Encoding reaches OPNsense as the client sent it, and the proxy decodes
+// nothing.
+func TestHandleStream_ClientAcceptEncodingPassesThrough(t *testing.T) {
+	const browser = "gzip, deflate, br, zstd"
+	gzipped := gzipBytes(staticScript)
+	for _, session := range proxySessions {
+		t.Run(session.name, func(t *testing.T) {
+			var asked acceptEncodings
+			ex := exchangeWith(t, session.readOnly, asked.record(serveStaticScript), rawGet("/ui/js/opnsense.js", "Accept-Encoding: "+browser))
+
+			asked.assertOne(t, browser)
+			if enc := ex.resp.Header.Get("Content-Encoding"); enc != "gzip" {
+				t.Errorf("Content-Encoding = %q, want gzip, as OPNsense sent it", enc)
+			}
+			if ex.resp.ContentLength != int64(len(gzipped)) {
+				t.Errorf("Content-Length = %d, want %d, the length OPNsense sent", ex.resp.ContentLength, len(gzipped))
+			}
+			if ex.body != string(gzipped) {
+				t.Errorf("the body is not the %d bytes OPNsense sent (got %d)", len(gzipped), len(ex.body))
+			}
+		})
+	}
+}
+
+// waitUntilCaptured reports whether the stream carries want within 5 seconds.
+func waitUntilCaptured(cap *handleStreamCapture, want string) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	for !bytes.Contains(cap.dataBytes(), []byte(want)) {
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return true
+}
+
+// A body that ends with the connection is sent in chunks as it arrives, not
+// held until it ends: an event stream answered that way delivers each event
+// while the next one is still to come.
+func TestHandleStream_AnUnframedEventStreamStillStreams(t *testing.T) {
+	for _, session := range proxySessions {
+		t.Run(session.name, func(t *testing.T) {
+			release := make(chan struct{})
+			releaseSecond := sync.OnceFunc(func() { close(release) })
+			defer releaseSecond()
+			ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				c, _, err := w.(http.Hijacker).Hijack()
+				if err != nil {
+					return
+				}
+				defer c.Close()
+				_, _ = io.WriteString(c, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: first\n\n")
+				<-release
+				_, _ = io.WriteString(c, "data: second\n\n")
+			}))
+			defer ts.Close()
+			proxy := newHandleStreamTestProxy(t, ts, session.readOnly)
+			stream, cap := newHandleStreamTestStream()
+			defer closeHandleStreamTestStream(stream)
+			done := runHandleStream(proxy, stream)
+			stream.readBuf <- []byte(rawGet("/api/diagnostics/firewall/stream_log"))
+
+			if !waitUntilCaptured(cap, "data: first") {
+				t.Fatalf("the first event did not arrive while the response was still open: %q", cap.dataBytes())
+			}
+			if bytes.Contains(cap.dataBytes(), []byte("data: second")) {
+				t.Fatal("the second event arrived before it was sent")
+			}
+			releaseSecond()
+			resp := waitForHandleStreamResponse(t, cap)
+			body, _ := io.ReadAll(resp.Body)
+			if !slices.Contains(resp.TransferEncoding, "chunked") || string(body) != "data: first\n\ndata: second\n\n" {
+				t.Errorf("the stream did not carry both events in chunks: Transfer-Encoding %q, body %q", resp.TransferEncoding, body)
+			}
+			closeHandleStreamTestStream(stream)
+			waitHandleStreamDone(t, done)
+		})
+	}
+}
+
+// chunkIfUnframed chunks only a body that has neither a length nor chunks, for a
+// client that reads chunks, and never a response that has no body.
+func TestChunkIfUnframed(t *testing.T) {
+	tests := []struct {
+		name          string
+		method        string
+		clientMinor   int
+		status        int
+		contentLength int64
+		upstreamMinor int
+		chunked       bool
+	}{
+		{"a body that ends with the connection", "GET", 1, 200, -1, 1, true},
+		{"the same from an HTTP/1.0 upstream", "GET", 1, 200, -1, 0, true},
+		{"a body with a length", "GET", 1, 200, 10, 1, false},
+		{"an empty body", "GET", 1, 200, 0, 1, false},
+		{"HEAD", "HEAD", 1, 200, -1, 1, false},
+		{"a client of HTTP/1.0", "GET", 0, 200, -1, 1, false},
+		{"switching protocols", "GET", 1, 101, -1, 1, false},
+		{"no content", "GET", 1, 204, -1, 1, false},
+		{"not modified", "GET", 1, 304, -1, 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &http.Request{Method: tt.method, ProtoMajor: 1, ProtoMinor: tt.clientMinor}
+			resp := &http.Response{StatusCode: tt.status, ContentLength: tt.contentLength,
+				Proto: fmt.Sprintf("HTTP/1.%d", tt.upstreamMinor), ProtoMajor: 1, ProtoMinor: tt.upstreamMinor}
+			chunkIfUnframed(req, resp)
+
+			if got := slices.Equal(resp.TransferEncoding, []string{"chunked"}); got != tt.chunked {
+				t.Errorf("TransferEncoding = %q, want chunked: %v", resp.TransferEncoding, tt.chunked)
+			}
+			wantMinor := tt.upstreamMinor
+			if tt.chunked {
+				wantMinor = 1
+			}
+			if resp.Proto != fmt.Sprintf("HTTP/1.%d", wantMinor) || resp.ProtoMinor != wantMinor {
+				t.Errorf("the response is %s (minor %d), want HTTP/1.%d", resp.Proto, resp.ProtoMinor, wantMinor)
+			}
+		})
+	}
 }

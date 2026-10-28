@@ -50,6 +50,25 @@ sends CLOSE right behind its reply loses replies there, how many depends on
 timing; the `closeSent` checks of the frame-capture tests are what catch it
 deterministically.
 
+## Framing of forwarded responses
+
+`waitForHandleStreamResponse`, and so `exchangeWith`, parses the captured bytes
+with `http.ReadResponse` over a buffer that ends. A body with neither a
+`Content-Length` nor chunks reads to the end of what has been captured so far,
+so a response no client could delimit on a stream the proxy keeps open still
+parses, with however much of its body had arrived. A test about framing asserts
+`resp.ContentLength` or `resp.TransferEncoding` itself, on a proxy built by
+`NewHTTPProxy` (a test that replaces `httpClient` tests another transport):
+`TestHandleStream_ForwardedResponsesAreFramed` does, against backends that
+compress only when asked (as lighttpd does), send chunks, end the body with the
+connection, or send no body. `exchangeWith` parses with the method of its
+request, so the response to a HEAD has no body, whatever its `Content-Length`
+says. Framing does not show that a body is passed on as it arrives: a proxy that
+read a body whole before chunking it passes every row. So
+`TestHandleStream_AnUnframedEventStreamStillStreams` holds an event stream that
+ends with the connection open between two events, and requires the first event
+before the second is sent.
+
 ## Request bodies the transport still holds
 
 An upstream can answer before it has read a request's body. The transport then
