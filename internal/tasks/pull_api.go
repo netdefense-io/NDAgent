@@ -120,6 +120,8 @@ func pullConfig(ctx context.Context, client *opnapi.Client, configType, name str
 		// snippet name only; the agent always returns the full
 		// zabbixagent settings tree.
 		content, err = pullZabbixSettings(ctx, client)
+	case "crowdsec_settings":
+		content, err = pullCrowdsecSettings(ctx, client)
 	case "zabbix_userparameter":
 		content, err = pullZabbixUserParameter(ctx, client, name)
 	case "zabbix_alias":
@@ -331,6 +333,32 @@ func pullUnboundACL(ctx context.Context, client *opnapi.Client, name string) (ma
 		"networks":    payload.Networks,
 		"description": payload.Description,
 	}, nil
+}
+
+// pullCrowdsecSettings returns the eight settings a CROWDSEC_SETTINGS snippet
+// carries, booleans as real bools. A device without os-crowdsec has nothing to
+// pull and answers "not found".
+func pullCrowdsecSettings(ctx context.Context, client *opnapi.Client) (map[string]interface{}, error) {
+	current, err := client.GetCrowdsecGeneral(ctx)
+	if err != nil {
+		if opnapi.IsNotFound(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	out := map[string]interface{}{}
+	for _, key := range crowdsecKeys {
+		value, ok := current[key]
+		if !ok {
+			continue
+		}
+		if crowdsecBoolKeys[key] {
+			out[key] = normalizeCrowdsecValue(key, value) == "1"
+		} else {
+			out[key] = value
+		}
+	}
+	return out, nil
 }
 
 // pullZabbixSettings fetches the full zabbixagent settings tree and flattens

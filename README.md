@@ -11,7 +11,7 @@ Production packages for OPNsense are published to the NetDefense package reposit
 
 ## Trust model
 
-This code is open source specifically so none of the following is a "trust me" claim — it's what's in this repository.
+NDAgent executes only signed commands, only ever dials out (it opens no listening port), and each device holds its own signing key. The source is public, so your team can also review the code that runs on your firewall.
 
 **Outbound-only.** NDAgent never opens a listening port. It dials out to the control plane over HTTPS/WSS and stays connected; there's nothing on the firewall for a scanner or an attacker on the network to find or connect to.
 
@@ -59,7 +59,7 @@ NDAgent makes outbound HTTPS/WSS connections to the NetDefense control plane (`h
 
 ## Open source vs. not
 
-The agent and the OPNsense plugin in this repository are **Apache-2.0**. Every package published to the NetDefense repository corresponds to a tagged commit here — same source, not a paraphrase of it. This mirror is also self-contained enough to build on its own: `go build ./cmd/ndagent` compiles the agent from exactly the `cmd/`, `internal/`, `pkg/`, `go.mod`, and `go.sum` in this repository, nothing outside it required. The control plane it talks to (device management, policy, the web dashboard) is closed-source SaaS, with a free tier for personal, non-commercial use.
+The agent and the OPNsense plugin in this repository are **Apache-2.0**. Every package published to the NetDefense repository corresponds to a tagged commit here. This mirror is also self-contained enough to build on its own: `go build ./cmd/ndagent` compiles the agent from exactly the `cmd/`, `internal/`, `pkg/`, `go.mod`, and `go.sum` in this repository, nothing outside it required. The control plane it talks to (device management, policy, the web dashboard) is closed-source SaaS, with a free tier for personal, non-commercial use.
 
 ## Links
 

@@ -31,6 +31,10 @@
    "names": [],
    "prefixes": []
   },
+  "CROWDSEC_SETTINGS": {
+   "names": [],
+   "prefixes": []
+  },
   "GROUP": {
    "names": [],
    "prefixes": []
@@ -258,6 +262,12 @@
   {"type": "TRUST_CERT", "key": "sequence", "ignored": false},
   {"type": "TRUST_CERT", "key": "categories_uuid", "ignored": false},
   {"type": "TRUST_CERT", "key": "alias_meta_x", "ignored": false},
-  {"type": "TRUST_CERT", "key": "uuid", "ignored": false}
+  {"type": "TRUST_CERT", "key": "uuid", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "templates", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "%x", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "sequence", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "categories_uuid", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "alias_meta_x", "ignored": false},
+  {"type": "CROWDSEC_SETTINGS", "key": "uuid", "ignored": false}
  ]
 }

@@ -32,6 +32,7 @@ var syncSectionLabels = []struct {
 	{"zabbix_settings", "Zabbix settings"},
 	{"zabbix_userparameter", "Zabbix userparams"},
 	{"zabbix_alias", "Zabbix aliases"},
+	{"crowdsec_settings", "CrowdSec settings"},
 	{"REPOSITORY", "Package repositories"},
 	{"SOFTWARE", "Software"},
 }

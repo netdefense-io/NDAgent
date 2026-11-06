@@ -30,9 +30,10 @@ var ignoredContentKeys = map[string]ignoredKeySet{
 		},
 		prefixes: []string{"%"},
 	},
-	"AUTH_ORDER":  {},
-	"AUTH_SERVER": {},
-	"GROUP":       {},
+	"AUTH_ORDER":        {},
+	"AUTH_SERVER":       {},
+	"CROWDSEC_SETTINGS": {},
+	"GROUP":             {},
 	"RULE": {
 		names: []string{
 			"#priority", "audit", "category_colors", "is_automatic", "legacy",

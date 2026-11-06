@@ -15,7 +15,7 @@ import (
 // tests/fixtures/ignored-content-keys/vectors.json, written out here and not
 // read from the file: the copy in testdata must stay byte-identical to it, and
 // a change is a deliberate re-copy, never an edit.
-const pinnedIgnoredContentKeysSHA256 = "eb8100e8381188280f828f325d7c648e0678103d3ab7143e492fa3b5e8d81609"
+const pinnedIgnoredContentKeysSHA256 = "0036f733b850c8dbd0e9795277c57715562c7bc5a521df4421b2cad786a4bc9b"
 
 type ignoredKeyVectors struct {
 	Schema int    `json:"schema"`

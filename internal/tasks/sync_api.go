@@ -463,6 +463,15 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		syncResult.Success = false
 	}
 
+	// CrowdSec settings: a singleton applied only on a real difference, with
+	// at most one reconfigure.
+	crowdsecResult := syncCrowdsecFromPayload(ctx, apiClient, cmd.Payload)
+	syncResult.Results = append(syncResult.Results, crowdsecResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, crowdsecResult.Errors...)
+	if !crowdsecResult.Success {
+		syncResult.Success = false
+	}
+
 	// Execute software policy reconciliation. Unlike the other executors,
 	// this one doesn't need the OPNsense apiClient — it shells out to
 	// pkg(8) directly. nil softwarePayload (no SoftwarePolicy attached)
