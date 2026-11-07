@@ -135,6 +135,9 @@ func TestExecuteSyncUnbound_ReconfigureFailure_HasMatchingResultItem(t *testing.
 	mux.HandleFunc("/unbound/settings/searchForward", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
+	mux.HandleFunc("/unbound/settings/searchDot", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
+	})
 	mux.HandleFunc("/unbound/settings/searchAcl", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
@@ -195,6 +198,9 @@ func TestExecuteSyncUnbound_ListHostAliasesFailure_HasMatchingResultItem(t *test
 	mux.HandleFunc("/unbound/settings/searchForward", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
+	mux.HandleFunc("/unbound/settings/searchDot", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
+	})
 	mux.HandleFunc("/unbound/settings/searchHostAlias", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	})
@@ -215,6 +221,9 @@ func TestExecuteSyncUnbound_ListACLsFailure_HasMatchingResultItem(t *testing.T) 
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
 	mux.HandleFunc("/unbound/settings/searchForward", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
+	})
+	mux.HandleFunc("/unbound/settings/searchDot", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
 	mux.HandleFunc("/unbound/settings/searchHostAlias", func(w http.ResponseWriter, r *http.Request) {

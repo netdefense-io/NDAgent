@@ -146,7 +146,24 @@ func (c *Client) DeleteHostOverride(ctx context.Context, uuid string) error {
 // Domain Forward Operations
 // ============================================================================
 
-// SearchForwards searches for domain forwards matching the search phrase.
+// Forwards and DNS-over-TLS forwards share one model, told apart by `type`,
+// but OPNsense's forward endpoints work on one type each: setForward and
+// addForward overwrite the posted `type` with "forward", and searchForward
+// answers only the rows of type "forward". The Dot endpoints (a request to
+// ...Dot... is rewritten to the Forward action with type "dot") are the only
+// way to write or list a dot row; get and del work on either type by uuid.
+const forwardTypeDot = "dot"
+
+func decodeSearchRows(respBody []byte) ([]map[string]interface{}, error) {
+	var resp SearchResponse
+	if err := json.Unmarshal(respBody, &resp); err != nil {
+		return nil, fmt.Errorf("failed to parse search response: %w", err)
+	}
+	return resp.Rows, nil
+}
+
+// SearchForwards searches for domain forwards matching the search phrase: the
+// rows of type "forward" followed by the rows of type "dot".
 func (c *Client) SearchForwards(ctx context.Context, searchPhrase string) ([]map[string]interface{}, error) {
 	req := SearchRequest{SearchPhrase: searchPhrase}
 
@@ -154,21 +171,31 @@ func (c *Client) SearchForwards(ctx context.Context, searchPhrase string) ([]map
 	if err != nil {
 		return nil, err
 	}
-
-	var resp SearchResponse
-	if err := json.Unmarshal(respBody, &resp); err != nil {
-		return nil, fmt.Errorf("failed to parse search response: %w", err)
+	rows, err := decodeSearchRows(respBody)
+	if err != nil {
+		return nil, err
 	}
+
+	dotBody, err := c.doRequest(ctx, "POST", "/unbound/settings/searchDot", req)
+	if err != nil {
+		return nil, err
+	}
+	dotRows, err := decodeSearchRows(dotBody)
+	if err != nil {
+		return nil, err
+	}
+	rows = append(rows, dotRows...)
 
 	c.log.Debugw("SearchForwards completed",
 		"search_phrase", searchPhrase,
-		"count", len(resp.Rows),
+		"count", len(rows),
+		"dot_count", len(dotRows),
 	)
 
-	return resp.Rows, nil
+	return rows, nil
 }
 
-// ListAllForwards retrieves ALL domain forwards from OPNsense.
+// ListAllForwards retrieves ALL domain forwards from OPNsense, of both types.
 func (c *Client) ListAllForwards(ctx context.Context) ([]map[string]interface{}, error) {
 	return c.SearchForwards(ctx, "")
 }
@@ -220,9 +247,16 @@ func (c *Client) GetForwardByDomain(ctx context.Context, domain string) (map[str
 	return nil, nil // Not found
 }
 
-// SetForward creates or updates a domain forward (upsert operation).
+// SetForward creates or updates a domain forward (upsert operation). A "dot"
+// forward goes to setDot and any other to setForward, because OPNsense stores
+// the type its endpoint names, whatever the body says. A row whose type
+// changes keeps its uuid and lands with the new type.
 func (c *Client) SetForward(ctx context.Context, uuid string, forward DomainForward) error {
-	path := fmt.Sprintf("/unbound/settings/setForward/%s", uuid)
+	action := "setForward"
+	if forward.Type == forwardTypeDot {
+		action = "setDot"
+	}
+	path := fmt.Sprintf("/unbound/settings/%s/%s", action, uuid)
 	wrapper := DomainForwardWrapper{Forward: forward}
 
 	respBody, err := c.doRequest(ctx, "POST", path, wrapper)

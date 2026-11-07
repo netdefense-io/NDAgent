@@ -1,7 +1,10 @@
 package opnapi
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -474,5 +477,131 @@ func TestHostOverrideAddPTR(t *testing.T) {
 	pulled := ConvertHostOverrideToAPI(map[string]interface{}{"uuid": "x", "hostname": "nas", "domain": "lan", "addptr": "0"})
 	if pulled.AddPTR != "0" {
 		t.Errorf("pulled addptr = %q", pulled.AddPTR)
+	}
+}
+
+// forwardServer answers the Unbound forward endpoints the way OPNsense does:
+// searchForward lists the rows of type forward, searchDot those of type dot,
+// and a set stores the type its endpoint names, whatever the body says.
+func forwardServer(t *testing.T, rows []map[string]interface{}) (*Client, *[]string, *map[string]map[string]interface{}) {
+	t.Helper()
+	var calls []string
+	stored := map[string]map[string]interface{}{}
+	for _, r := range rows {
+		stored[r["uuid"].(string)] = r
+	}
+	rowsOf := func(kind string) []map[string]interface{} {
+		out := []map[string]interface{}{}
+		for _, r := range stored {
+			if r["type"] == kind {
+				out = append(out, r)
+			}
+		}
+		return out
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/unbound/settings/", func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.URL.Path)
+		rest := strings.TrimPrefix(r.URL.Path, "/unbound/settings/")
+		switch {
+		case rest == "searchForward":
+			_ = json.NewEncoder(w).Encode(SearchResponse{Rows: rowsOf("forward")})
+		case rest == "searchDot":
+			_ = json.NewEncoder(w).Encode(SearchResponse{Rows: rowsOf("dot")})
+		case strings.HasPrefix(rest, "setForward/") || strings.HasPrefix(rest, "setDot/"):
+			action, uuid, _ := strings.Cut(rest, "/")
+			var body struct {
+				Dot map[string]interface{} `json:"dot"`
+			}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			row := body.Dot
+			row["uuid"] = uuid
+			row["type"] = map[string]string{"setForward": "forward", "setDot": "dot"}[action]
+			stored[uuid] = row
+			_, _ = w.Write([]byte(`{"result":"saved"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	return NewClient(server.URL, "key", "secret", true), &calls, &stored
+}
+
+const forwardTestUUID = "221f3268-3333-4000-8000-000000000003"
+
+func TestSetForwardUsesTheEndpointOfItsType(t *testing.T) {
+	for _, tc := range []struct{ kind, endpoint string }{
+		{"forward", "/unbound/settings/setForward/" + forwardTestUUID},
+		{"dot", "/unbound/settings/setDot/" + forwardTestUUID},
+	} {
+		client, calls, stored := forwardServer(t, nil)
+		err := client.SetForward(context.Background(), forwardTestUUID, DomainForward{
+			Enabled: "1", Type: tc.kind, Domain: "corp.example.com", Server: "192.0.2.53",
+		})
+		if err != nil {
+			t.Fatalf("%s: %v", tc.kind, err)
+		}
+		if len(*calls) != 1 || (*calls)[0] != tc.endpoint {
+			t.Errorf("%s: calls = %v, want [%s]", tc.kind, *calls, tc.endpoint)
+		}
+		if got := (*stored)[forwardTestUUID]["type"]; got != tc.kind {
+			t.Errorf("%s: stored type = %v", tc.kind, got)
+		}
+	}
+}
+
+func TestSetForwardChangesTheTypeAndKeepsTheUUID(t *testing.T) {
+	client, _, stored := forwardServer(t, []map[string]interface{}{
+		{"uuid": forwardTestUUID, "type": "forward", "domain": "corp.example.com"},
+	})
+	if err := client.SetForward(context.Background(), forwardTestUUID, DomainForward{Type: "dot", Domain: "corp.example.com", Server: "192.0.2.53"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*stored) != 1 || (*stored)[forwardTestUUID]["type"] != "dot" {
+		t.Errorf("after forward -> dot: %v", *stored)
+	}
+	if err := client.SetForward(context.Background(), forwardTestUUID, DomainForward{Type: "forward", Domain: "corp.example.com", Server: "192.0.2.53"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(*stored) != 1 || (*stored)[forwardTestUUID]["type"] != "forward" {
+		t.Errorf("after dot -> forward: %v", *stored)
+	}
+}
+
+func TestListAllForwardsIncludesDotRows(t *testing.T) {
+	client, calls, _ := forwardServer(t, []map[string]interface{}{
+		{"uuid": "221f3268-1111-4000-8000-000000000001", "type": "forward", "domain": "a.example.com"},
+		{"uuid": "221f3268-2222-4000-8000-000000000002", "type": "dot", "domain": "b.example.com"},
+	})
+	rows, err := client.ListAllForwards(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0]["type"] != "forward" || rows[1]["type"] != "dot" {
+		t.Errorf("rows = %v", rows)
+	}
+	if len(*calls) != 2 || (*calls)[0] != "/unbound/settings/searchForward" || (*calls)[1] != "/unbound/settings/searchDot" {
+		t.Errorf("calls = %v", *calls)
+	}
+	if managed := FilterManagedForwards(rows); len(managed) != 2 {
+		t.Errorf("managed = %d, want both types", len(managed))
+	}
+	found, err := client.GetForwardByDomain(context.Background(), "b.example.com")
+	if err != nil || found == nil || found["type"] != "dot" {
+		t.Errorf("GetForwardByDomain(dot row) = %v, %v", found, err)
+	}
+}
+
+func TestListAllForwardsFailsWhenTheDotSearchFails(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/unbound/settings/searchForward", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(SearchResponse{Rows: []map[string]interface{}{}})
+	})
+	server := httptest.NewServer(mux)
+	defer server.Close()
+	client := NewClient(server.URL, "key", "secret", true)
+	if _, err := client.ListAllForwards(context.Background()); err == nil {
+		t.Error("ListAllForwards answered without the dot rows")
 	}
 }

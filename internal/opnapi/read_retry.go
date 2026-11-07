@@ -40,6 +40,7 @@ var readOnlyPOSTs = map[string]bool{
 	"/auth/priv/search":                    true,
 	"/unbound/settings/searchHostOverride": true,
 	"/unbound/settings/searchForward":      true,
+	"/unbound/settings/searchDot":          true,
 	"/unbound/settings/searchHostAlias":    true,
 	"/unbound/settings/searchAcl":          true,
 	"/wireguard/server/search_server":      true,
