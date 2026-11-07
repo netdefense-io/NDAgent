@@ -10,6 +10,10 @@ import (
 	"github.com/netdefense-io/ndagent/internal/logging"
 )
 
+// ErrStreamOverflow is what a reader sees, after the data already buffered, on a
+// stream the agent closed because its read buffer filled up.
+var ErrStreamOverflow = errors.New("stream read buffer overflow")
+
 // StreamManager manages multiplexed streams over a single Pathfinder connection.
 type StreamManager struct {
 	client *Client
@@ -116,31 +120,36 @@ func (sm *StreamManager) handleOpen(frame *Frame) {
 	sm.hadStreams = true
 	sm.streamsMu.Unlock()
 
-	// Send ACK (via sendFrame so the sendFrameFunc test seam applies, matching
-	// Stream.Write/Close).
-	ackFrame := &Frame{
-		Type:     FrameTypeAck,
-		StreamID: frame.StreamID,
-	}
-	if err := sm.sendFrame(ackFrame); err != nil {
-		sm.log.Errorw("Failed to send ACK", "error", err)
-		stream.Close()
-		return
-	}
+	// The ACK write and the handler run off the read goroutine, so a slow
+	// relay write cannot stall frame reads. The ACK still precedes the
+	// handler, hence any data the agent sends on the stream.
+	go func() {
+		if stream.IsClosed() {
+			return
+		}
+		ackFrame := &Frame{
+			Type:     FrameTypeAck,
+			StreamID: frame.StreamID,
+		}
+		if err := sm.sendFrame(ackFrame); err != nil {
+			sm.log.Errorw("Failed to send ACK", "error", err)
+			stream.Close()
+			return
+		}
 
-	sm.log.Debugw("Sent ACK for stream", "stream_id", frame.StreamID)
+		sm.log.Debugw("Sent ACK for stream", "stream_id", frame.StreamID)
 
-	// Notify handler
-	sm.handlerMu.RLock()
-	handler := sm.newStreamHandler
-	sm.handlerMu.RUnlock()
+		sm.handlerMu.RLock()
+		handler := sm.newStreamHandler
+		sm.handlerMu.RUnlock()
 
-	if handler != nil {
-		go handler(stream)
-	} else {
-		sm.log.Warnw("No stream handler set, closing stream", "stream_id", frame.StreamID)
-		stream.Close()
-	}
+		if handler != nil {
+			handler(stream)
+		} else {
+			sm.log.Warnw("No stream handler set, closing stream", "stream_id", frame.StreamID)
+			stream.Close()
+		}
+	}()
 }
 
 // handleData processes a DATA frame.
@@ -170,11 +179,13 @@ func (sm *StreamManager) handleData(frame *Frame) {
 		// Stream closing, discard remaining data
 		return
 	default:
-		// Buffer full, drop the frame to prevent deadlock
-		sm.log.Warnw("Stream buffer full, dropping data",
+		// Buffer full: a dropped frame would leave a hole in the byte stream,
+		// so end the stream instead. The CLOSE is sent off the read goroutine.
+		sm.log.Warnw("Stream buffer full, closing stream",
 			"stream_id", frame.StreamID,
 			"data_len", len(frame.Data),
 		)
+		stream.fail(ErrStreamOverflow)
 	}
 }
 
@@ -281,10 +292,34 @@ type Stream struct {
 	closeChan chan struct{} // Signals stream closure to unblock handleData
 	pending   []byte        // Partially read data from previous Read call
 
-	closed bool
-	mu     sync.Mutex
+	closed  bool
+	readErr error // returned by Read once buffered data is drained, in place of io.EOF
+	mu      sync.Mutex
 
 	log *zap.SugaredLogger
+}
+
+// fail ends the stream with err for its reader. The CLOSE frame goes out on a
+// separate goroutine so the caller (the relay read loop) never blocks on a write.
+func (s *Stream) fail(err error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return
+	}
+	s.readErr = err
+	s.mu.Unlock()
+	go s.Close()
+}
+
+// endErr is the error Read reports once a closed stream has no data left.
+func (s *Stream) endErr() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.readErr != nil {
+		return s.readErr
+	}
+	return io.EOF
 }
 
 // ID returns the stream ID.
@@ -326,7 +361,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			}
 		default:
 		}
-		return 0, io.EOF
+		return 0, s.endErr()
 	}
 
 	// Wait for data from buffer, or for the stream to close. We select on
@@ -360,7 +395,7 @@ func (s *Stream) Read(p []byte) (n int, err error) {
 			}
 		default:
 		}
-		return 0, io.EOF
+		return 0, s.endErr()
 	}
 }
 

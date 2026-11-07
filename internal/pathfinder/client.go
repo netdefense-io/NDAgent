@@ -104,6 +104,8 @@ type Client struct {
 	deviceID   string
 	tlsConfig  *tls.Config
 
+	writeTimeout time.Duration // per relay write; writeWait unless a test shortens it
+
 	conn    *websocket.Conn
 	mu      sync.Mutex
 	writeMu sync.Mutex // Serializes writes to WebSocket (gorilla only supports one concurrent writer)
@@ -119,11 +121,12 @@ type Client struct {
 // NewClient creates a new Pathfinder client.
 func NewClient(serverURL, sessionKey, deviceID string, tlsConfig *tls.Config) *Client {
 	return &Client{
-		serverURL:  serverURL,
-		sessionKey: sessionKey,
-		deviceID:   deviceID,
-		tlsConfig:  tlsConfig,
-		log:        logging.Named("pathfinder"),
+		serverURL:    serverURL,
+		sessionKey:   sessionKey,
+		deviceID:     deviceID,
+		tlsConfig:    tlsConfig,
+		writeTimeout: writeWait,
+		log:          logging.Named("pathfinder"),
 	}
 }
 
@@ -205,6 +208,7 @@ func (c *Client) register() error {
 	defer conn.SetReadDeadline(time.Time{})
 
 	// Send registration
+	conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
 	if err := conn.WriteJSON(msg); err != nil {
 		return fmt.Errorf("failed to send register message: %w", err)
 	}
@@ -284,6 +288,11 @@ func (c *Client) WaitForPairing(ctx context.Context, timeout time.Duration) erro
 
 			case MsgTypeError:
 				pairChan <- fmt.Errorf("pairing error: %s", msg.Error)
+				return
+
+			case MsgTypePeerOffline:
+				c.log.Infow("Peer left the relay session before pairing completed")
+				pairChan <- &ErrSessionEndedCleanly{Reason: ReasonClientDisconnected}
 				return
 
 			default:
@@ -366,7 +375,7 @@ func (c *Client) RunFrameLoop(ctx context.Context) error {
 				return
 			case <-ticker.C:
 				c.writeMu.Lock()
-				err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait))
+				err := c.writeLocked(conn, websocket.PingMessage, nil)
 				c.writeMu.Unlock()
 				if err != nil {
 					c.log.Warnw("Failed to send ping", "error", err)
@@ -460,7 +469,21 @@ func (c *Client) SendFrame(data []byte) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 
-	return conn.WriteMessage(websocket.BinaryMessage, data)
+	return c.writeLocked(conn, websocket.BinaryMessage, data)
+}
+
+// writeLocked writes one message under a write deadline. Must be called with
+// writeMu held. A write that times out leaves the connection unusable, so it is
+// closed and the read loop ends the session. Other errors are left to the read
+// loop, which may still hold the relay's close frame.
+func (c *Client) writeLocked(conn *websocket.Conn, messageType int, data []byte) error {
+	_ = conn.SetWriteDeadline(time.Now().Add(c.writeTimeout))
+	err := conn.WriteMessage(messageType, data)
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		_ = conn.Close()
+	}
+	return err
 }
 
 // OnFrame sets the handler for incoming binary frames.

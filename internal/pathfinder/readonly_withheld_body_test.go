@@ -161,12 +161,12 @@ func TestEndAfterReply_ReadsNothingUntilTheBodyIsReleased(t *testing.T) {
 		proxy.endAfterReply(stream, bufio.NewReader(stream), released)
 	}()
 
-	// The client keeps sending, more frames than the stream's queue holds.
+	// The client keeps sending, enough frames to fill the stream's queue.
 	flooded := make(chan struct{})
 	go func() {
 		defer close(flooded)
 		chunk := bytes.Repeat([]byte("x"), 1024)
-		for i := 0; i < cap(stream.readBuf)+64; i++ {
+		for i := 0; i < cap(stream.readBuf); i++ {
 			sm.handleFrame(EncodeFrame(&Frame{Type: FrameTypeData, StreamID: 1, Data: chunk}))
 		}
 	}()
@@ -233,5 +233,84 @@ func TestEndAfterReply_ReadsNothingUntilTheBodyIsReleased(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(hits); got != 1 {
 		t.Errorf("OPNsense was reached %d time(s), want 1 (the second stream's request)", got)
+	}
+}
+
+// TestEndAfterReply_OverflowingBodyClosesTheStreamAfterTheReply: a withheld
+// request body larger than the stream's queue no longer drops frames silently;
+// the stream is closed, and the reply written before that is delivered intact
+// ahead of the CLOSE.
+func TestEndAfterReply_OverflowingBodyClosesTheStreamAfterTheReply(t *testing.T) {
+	ts, hits := newSentinelBackend("forwarded")
+	defer ts.Close()
+	proxy := newHandleStreamTestProxy(t, ts, true)
+	proxy.replyLinger = time.Minute
+
+	var mu sync.Mutex
+	var events []string
+	sm := &StreamManager{streams: make(map[uint32]*Stream), log: logging.Named("test")}
+	sm.sendFrameFunc = func(b []byte) error {
+		f, err := DecodeFrame(b)
+		if err != nil {
+			return err
+		}
+		mu.Lock()
+		switch f.Type {
+		case FrameTypeData:
+			events = append(events, "data:"+string(f.Data))
+		case FrameTypeClose:
+			events = append(events, "close")
+		}
+		mu.Unlock()
+		return nil
+	}
+	held := make(chan *Stream, 1)
+	sm.OnNewStream(func(s *Stream) { held <- s })
+
+	sm.handleFrame(EncodeFrame(&Frame{Type: FrameTypeOpen, StreamID: 1, Data: []byte(ServiceWebadmin)}))
+	stream := <-held
+	if _, err := stream.Write([]byte("403-REPLY")); err != nil {
+		t.Fatal(err)
+	}
+	released := make(chan struct{})
+	ended := make(chan struct{})
+	go func() {
+		defer close(ended)
+		proxy.endAfterReply(stream, bufio.NewReader(stream), released)
+	}()
+
+	flooded := make(chan struct{})
+	go func() {
+		defer close(flooded)
+		for i := 0; i < cap(stream.readBuf)+1; i++ {
+			sm.handleFrame(EncodeFrame(&Frame{Type: FrameTypeData, StreamID: 1, Data: []byte("x")}))
+		}
+	}()
+	select {
+	case <-flooded:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the frame loop waited on a stream nothing reads")
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !stream.IsClosed() && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !stream.IsClosed() {
+		t.Fatal("the overflowing stream was not closed")
+	}
+	close(released)
+	select {
+	case <-ended:
+	case <-time.After(5 * time.Second):
+		t.Fatal("endAfterReply did not return on the closed stream")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(events) < 2 || events[0] != "data:403-REPLY" || events[1] != "close" {
+		t.Errorf("frames sent = %q, want the reply then a CLOSE", events)
+	}
+	if got := atomic.LoadInt32(hits); got != 0 {
+		t.Errorf("OPNsense was reached %d time(s), want 0", got)
 	}
 }

@@ -277,6 +277,16 @@ func (em *ExecManager) runCommand(ctx context.Context, stream *Stream, req ExecR
 	cmdCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// A stream that closes mid-command (client gone, relay close) kills the
+	// command's process group instead of letting it run to its timeout.
+	go func() {
+		select {
+		case <-stream.CloseChan():
+			cancel()
+		case <-cmdCtx.Done():
+		}
+	}()
+
 	var stdoutBuf, stderrBuf bytes.Buffer
 
 	cmd := exec.CommandContext(cmdCtx, "/bin/sh", "-c", req.Command)
