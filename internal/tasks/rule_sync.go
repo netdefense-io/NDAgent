@@ -32,6 +32,9 @@ type ruleSync struct {
 	gone map[string]bool
 	// moved maps a renumbered local rule to its sequence before this SYNC.
 	moved map[string]localMove
+	// preread holds a local rule as read before the first write of a
+	// renumber, for its move to compare with what it reads after.
+	preread map[string]map[string]string
 	// failed are the managed rules whose write failed, or that no sequence
 	// was left for: a second pass leaves them alone.
 	failed map[string]bool
@@ -74,6 +77,7 @@ func newRuleSync(client *opnapi.Client, rules []APIRulePayload, bodies map[strin
 		fixed:    map[string]bool{},
 		gone:     map[string]bool{},
 		moved:    map[string]localMove{},
+		preread:  map[string]map[string]string{},
 		failed:   map[string]bool{},
 		drift:    map[string][2]int{},
 	}
@@ -276,47 +280,72 @@ func (s *ruleSync) interfaceKeys(value string) []string {
 // sequence and one deleted on the device drops out; either way placement is
 // planned again, and the PREPEND rules go as close to the front as they can.
 // It returns the plan and the local rules that are still there.
+//
+// Every planned move is read before the first write (NDAgent-go#129): a rule
+// that cannot be moved, or is gone, changes the plan, and found only when its
+// own write came up, after the others of its tie had moved, it cost those
+// moves a second write or a wasted one.
 func (s *ruleSync) renumberLocals(ctx context.Context, managed, locals []*placedRule) (rulePlan, []*placedRule) {
+	settle := func(mv localMove, outcome localOutcome) {
+		switch outcome {
+		case localMoved:
+			first, seen := s.moved[mv.uuid]
+			if !seen {
+				first = mv
+			}
+			first.to = mv.to
+			s.moved[mv.uuid] = first
+			for _, l := range locals {
+				if l.uuid == mv.uuid {
+					l.current = mv.to
+				}
+			}
+		case localStuck:
+			s.fixed[mv.uuid] = true
+			for _, l := range locals {
+				if l.uuid == mv.uuid {
+					l.fixed = true
+				}
+			}
+		case localGone:
+			s.gone[mv.uuid] = true
+			delete(s.moved, mv.uuid)
+			kept := locals[:0:0]
+			for _, l := range locals {
+				if l.uuid != mv.uuid {
+					kept = append(kept, l)
+				}
+			}
+			locals = kept
+		}
+	}
+	movable := map[string]bool{}
 	for {
 		plan := planRulePlacement(managed, locals)
 		replan := false
+		for _, mv := range plan.moves {
+			if movable[mv.uuid] {
+				continue
+			}
+			before, outcome, stop := s.checkBeforeMove(ctx, mv)
+			if stop {
+				settle(mv, outcome)
+				replan = true
+				continue
+			}
+			movable[mv.uuid] = true
+			s.preread[mv.uuid] = before
+		}
 		for i := len(plan.moves) - 1; i >= 0 && !replan; i-- {
 			mv := plan.moves[i]
-			switch s.moveLocal(ctx, mv) {
-			case localMoved:
-				first, seen := s.moved[mv.uuid]
-				if !seen {
-					first = mv
-				}
-				first.to = mv.to
-				s.moved[mv.uuid] = first
-				for _, l := range locals {
-					if l.uuid == mv.uuid {
-						l.current = mv.to
-					}
-				}
-			case localStuck:
-				s.fixed[mv.uuid] = true
-				for _, l := range locals {
-					if l.uuid == mv.uuid {
-						l.fixed = true
-					}
-				}
-				replan = true
-			case localGone:
-				s.gone[mv.uuid] = true
-				delete(s.moved, mv.uuid)
-				kept := locals[:0:0]
-				for _, l := range locals {
-					if l.uuid != mv.uuid {
-						kept = append(kept, l)
-					}
-				}
-				locals = kept
-				replan = true
-			}
+			outcome := s.moveLocal(ctx, mv)
+			settle(mv, outcome)
+			replan = outcome != localMoved
 		}
 		if !replan {
+			// A move a re-plan dropped leaves its read behind; nothing may
+			// take it for a later move's "before".
+			clear(s.preread)
 			return plan, locals
 		}
 	}
@@ -331,6 +360,41 @@ const (
 	localGone               // deleted on the device
 )
 
+// reportLocal reports what became of one local renumber.
+func (s *ruleSync) reportLocal(mv localMove, status, code, msg string) {
+	s.report(SyncAPIItemResult{Type: "rule_local", UUID: mv.uuid, Name: mv.name, Action: "renumber", Status: status, Code: code, Error: msg}, status == "error")
+}
+
+// notMovedLocal reports a local rule that keeps its sequence.
+func (s *ruleSync) notMovedLocal(mv localMove, reason string) localOutcome {
+	s.reportLocal(mv, "error", codeRuleLocalRenumberFailed, fmt.Sprintf("Local rule %q could not be moved from sequence %d to %d, so the PREPEND rules of its section are placed after it: %s",
+		mv.name, mv.from, mv.to, reason))
+	return localStuck
+}
+
+// checkBeforeMove reads a local rule a move is planned for and reports the
+// cases that keep it from moving: it cannot be read, it is gone, or it holds
+// nothing but the defaults. stop says the move must not be made; before is the
+// rule as read.
+func (s *ruleSync) checkBeforeMove(ctx context.Context, mv localMove) (before map[string]string, outcome localOutcome, stop bool) {
+	before, found, err := s.readRule(ctx, mv.uuid)
+	if err != nil {
+		return nil, s.notMovedLocal(mv, fmt.Sprintf("it could not be read before the move: %v", err)), true
+	}
+	if !found {
+		s.reportLocal(mv, "warning", codeRuleLocalVanished, fmt.Sprintf("Local rule %q was deleted on the device during this SYNC, so it was not moved", mv.name))
+		return nil, localGone, true
+	}
+	// A rule holding nothing but the defaults is what the write would
+	// re-create were the rule deleted meanwhile: the read after it could not
+	// tell the two apart, so such a rule is not moved. A reference to
+	// something that no longer exists reads as the default too.
+	if s.sameRule(before, s.model.Values()) {
+		return nil, s.notMovedLocal(mv, "it reads as nothing but OPNsense's defaults (it may name a gateway or schedule that no longer exists), so a rule the move re-created could not be told from it: give it a description, or fix what it names"), true
+	}
+	return before, localMoved, false
+}
+
 // moveLocal writes a local rule's new sequence, and nothing else of it.
 // setRule creates a rule it does not find, with OPNsense's defaults: a pass
 // rule on every interface. So the rule is read first and not written when it
@@ -344,29 +408,19 @@ const (
 // the rule reads at its new sequence: one that reads at another saved
 // nothing, and one that cannot be read back is planned where it was.
 func (s *ruleSync) moveLocal(ctx context.Context, mv localMove) localOutcome {
-	report := func(status, code, msg string) {
-		s.report(SyncAPIItemResult{Type: "rule_local", UUID: mv.uuid, Name: mv.name, Action: "renumber", Status: status, Code: code, Error: msg}, status == "error")
-	}
-	notMoved := func(reason string) localOutcome {
-		report("error", codeRuleLocalRenumberFailed, fmt.Sprintf("Local rule %q could not be moved from sequence %d to %d, so the PREPEND rules of its section are placed after it: %s",
-			mv.name, mv.from, mv.to, reason))
-		return localStuck
-	}
+	report := func(status, code, msg string) { s.reportLocal(mv, status, code, msg) }
+	notMoved := func(reason string) localOutcome { return s.notMovedLocal(mv, reason) }
 
-	before, found, err := s.readRule(ctx, mv.uuid)
-	if err != nil {
-		return notMoved(fmt.Sprintf("it could not be read before the move: %v", err))
-	}
-	if !found {
-		report("warning", codeRuleLocalVanished, fmt.Sprintf("Local rule %q was deleted on the device during this SYNC, so it was not moved", mv.name))
-		return localGone
-	}
-	// A rule holding nothing but the defaults is what the write would
-	// re-create were the rule deleted meanwhile: the read after it could not
-	// tell the two apart, so such a rule is not moved. A reference to
-	// something that no longer exists reads as the default too.
-	if s.sameRule(before, s.model.Values()) {
-		return notMoved("it reads as nothing but OPNsense's defaults (it may name a gateway or schedule that no longer exists), so a rule the move re-created could not be told from it: give it a description, or fix what it names")
+	// The read made before the renumber's first write is this move's
+	// "before"; a rule that moves a second time is read again.
+	before, read := s.preread[mv.uuid]
+	delete(s.preread, mv.uuid)
+	if !read {
+		var outcome localOutcome
+		var stop bool
+		if before, outcome, stop = s.checkBeforeMove(ctx, mv); stop {
+			return outcome
+		}
 	}
 	// A refusal with field validations saved nothing. Any other error (a
 	// timeout, a dropped connection, a 5xx, an answer that cannot be read)

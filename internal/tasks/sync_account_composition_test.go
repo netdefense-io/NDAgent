@@ -78,7 +78,7 @@ func TestAccountGate_SameNamePairs(t *testing.T) {
 				users, groups := liveAccounts()
 				f := newFakeAccounts(t, users, groups)
 				rw := opnapi.APIGroupPayload{Name: "it-admins", Members: []string{"nd-hm-plain"}, SnippetName: "rw-group", SnippetIndex: 1}
-				su := opnapi.APIGroupPayload{Name: "it-admins", Priv: []string{"page-all"}, Members: []string{"not-a-local-user"}, SuperuserCleared: true, SnippetName: "su-group", SnippetIndex: 0}
+				su := opnapi.APIGroupPayload{Name: "it-admins", Priv: []string{"page-all"}, Members: []string{"carol"}, SuperuserCleared: true, SnippetName: "su-group", SnippetIndex: 0}
 				payload := []opnapi.APIGroupPayload{su, rw}
 				if rwFirst {
 					payload = []opnapi.APIGroupPayload{rw, su}
@@ -210,11 +210,31 @@ func TestAccountGate_ElementsOfOneSyncThatMakeAnAccountAdministratorEquivalent(t
 
 		result := runGate(t, f,
 			[]opnapi.APIUserPayload{{Name: "Nd-HM-Plain", Password: "RW-chosen-pw"}},
-			[]opnapi.APIGroupPayload{{Name: "it-admins", Priv: []string{"page-all"}, Members: []string{" nd-hm-plain "}, SuperuserCleared: true}},
+			[]opnapi.APIGroupPayload{{Name: "it-admins", Priv: []string{"page-all"}, Members: []string{"nd-hm-plain"}, SuperuserCleared: true}},
 			false,
 		)
 		if len(refusedItems(result)) != 1 || f.wroteAnythingFor("user", "Nd-HM-Plain") || f.wroteAnythingFor("user", "nd-hm-plain") {
 			t.Errorf("refused %+v, writes %v", refusedItems(result), f.writes)
+		}
+	})
+
+	// A member spelled other than any account is refused with its GROUP, which
+	// the device would not have resolved either; nothing is made elevated.
+	t.Run("a declared member spelled other than the account", func(t *testing.T) {
+		users, groups := liveAccounts()
+		f := newFakeAccounts(t, users, groups)
+
+		result := runGate(t, f,
+			[]opnapi.APIUserPayload{{Name: "Nd-HM-Plain", Password: "RW-chosen-pw"}},
+			[]opnapi.APIGroupPayload{{Name: "it-admins", Priv: []string{"page-all"}, Members: []string{" nd-hm-plain "}, SuperuserCleared: true}},
+			false,
+		)
+		items := refusedItems(result)
+		if len(items) != 1 || items[0].Type != "group" || items[0].Code != groupMemberUnknownCode {
+			t.Fatalf("refused %+v, want the group, for its member", items)
+		}
+		if f.wroteAnythingFor("group", "it-admins") || f.administratorEquivalent("user", "nd-hm-plain") {
+			t.Errorf("the group was written or made nd-hm-plain elevated: %v", f.writes)
 		}
 	})
 
@@ -308,7 +328,7 @@ func TestAccountGate_ElementsOfOneSyncThatMakeAnAccountAdministratorEquivalent(t
 
 		result := runGate(t, f,
 			[]opnapi.APIUserPayload{{Name: "svc-other", Password: "pw"}},
-			[]opnapi.APIGroupPayload{{Name: "it-admins", Priv: []string{"page-system-usermanager"}, Members: []string{"svc-new"}, SuperuserCleared: true}},
+			[]opnapi.APIGroupPayload{{Name: "it-admins", Priv: []string{"page-system-usermanager"}, Members: []string{"carol"}, SuperuserCleared: true}},
 			false,
 		)
 		if len(refusedItems(result)) != 0 || !f.wrote("add", "user", "svc-other") {

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,6 +23,7 @@ import (
 type fakeRelay struct {
 	url       string
 	closeCode chan int
+	dials     atomic.Int32
 }
 
 func newFakeRelay(t *testing.T, script func(conn *websocket.Conn)) *fakeRelay {
@@ -34,6 +37,7 @@ func newFakeRelay(t *testing.T, script func(conn *websocket.Conn)) *fakeRelay {
 		if err != nil {
 			return
 		}
+		relay.dials.Add(1)
 		go func() {
 			<-testEnded
 			conn.Close()
@@ -122,6 +126,34 @@ func TestConnectToPathfinder_EndsWhenTheClientLeaves(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("the agent did not close its relay connection")
+	}
+}
+
+// TestConnectToPathfinder_AStreamFloodCloseIsOneDialAndAFailure: the relay
+// closes a leg that floods it with streams with 1008 "stream flood". The CONNECT
+// ends FAILED, naming the reason, after the one dial it made: no retry, tight
+// or with backoff, since a new session takes a new CONNECT.
+func TestConnectToPathfinder_AStreamFloodCloseIsOneDialAndAFailure(t *testing.T) {
+	relay := newFakeRelay(t, func(conn *websocket.Conn) {
+		_ = conn.WriteJSON(pathfinder.Message{Type: pathfinder.MsgTypePaired})
+		time.Sleep(20 * time.Millisecond)
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "stream flood"),
+			time.Now().Add(time.Second))
+	})
+
+	err := connectWithin(t, relay.client(), 3*time.Second)
+
+	outcome := classifyPathfinderSessionEnd(nil, err)
+	if outcome.result.Success || outcome.naturalEnd || outcome.cancelled {
+		t.Fatalf("outcome = %+v (err %v), want a failure", outcome, err)
+	}
+	if !strings.Contains(outcome.result.Message, "stream flood") {
+		t.Errorf("message = %q, want the relay's reason", outcome.result.Message)
+	}
+	time.Sleep(200 * time.Millisecond)
+	if n := relay.dials.Load(); n != 1 {
+		t.Errorf("the relay was dialled %d times, want once", n)
 	}
 }
 

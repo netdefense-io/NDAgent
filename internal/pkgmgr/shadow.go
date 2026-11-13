@@ -68,6 +68,9 @@ func OfferedBy(ctx context.Context, name string) ([]string, error) {
 // `pkg update` once up front, and refreshing again per package would turn a
 // cheap check into a slow one.
 func pkgOfferedByFreeBSD(ctx context.Context, name string) ([]string, error) {
+	if optionLike(name) {
+		return nil, errOptionLike(name)
+	}
 	out, err := runPkg(ctx, "rquery", "-U", "%R", name)
 	if err != nil {
 		// A package in no catalog at all exits non-zero. That is not an

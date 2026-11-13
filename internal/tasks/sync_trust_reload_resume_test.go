@@ -272,13 +272,15 @@ func TestExecuteSyncTrust_OldOPNsenseTakesNoWrites(t *testing.T) {
 	p := newTrustPKI(t)
 	recordConfigctl(t)
 
-	for _, tc := range []struct{ name, version, reason string }{
-		{"below the floor", "25.7.3", "this device runs OPNsense 25.7.3"},
-		{"unreadable", "", "the OPNsense release of this device could not be read"},
+	for _, tc := range []struct{ name, version, product, reason string }{
+		{"below the floor", "25.7.3", "opnsense", "this device runs OPNsense 25.7.3"},
+		{"unreadable", "", "opnsense", "the OPNsense release of this device could not be read"},
+		{"Business Edition built on a release below the floor", "26.4.1", "opnsense-business", "this device runs OPNsense Business Edition 26.4.1"},
+		{"the edition unknown", "26.1.11", "", "this device runs OPNsense 26.1.11 and its edition could not be told"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newFakeTrust(t)
-			useTrustRelease(t, tc.version)
+			useTrustReleaseOf(t, tc.version, tc.product)
 			f.add(opnapi.TrustCA, uuidRootCA, "Corp Root CA", p.root.certPEM, "", "")
 			f.add(opnapi.TrustCert, uuidOrphanCert, "old", p.wildcard.certPEM, p.wildcard.keyPEM, "")
 
@@ -292,12 +294,36 @@ func TestExecuteSyncTrust_OldOPNsenseTakesNoWrites(t *testing.T) {
 				"trust_cert old deleted success",
 			)
 			msg := out.Result.Results[1].Error
-			if !strings.Contains(msg, tc.reason) || !strings.Contains(msg, "26.1.11") {
+			if !strings.Contains(msg, tc.reason) || !strings.Contains(msg, "26.1.11 or later (Business Edition 26.4.2 or later)") {
 				t.Errorf("refusal = %q", msg)
 			}
 			if got := f.writeLog(); !reflect.DeepEqual(got, []string{"del cert " + uuidOrphanCert}) {
 				t.Fatalf("writes = %q", got)
 			}
+		})
+	}
+}
+
+// Each edition is held to its own floor: Business Edition from 26.4.2, the
+// first Business release built on community 26.1.11, takes the writes.
+func TestExecuteSyncTrust_BusinessEditionAtItsFloorTakesWrites(t *testing.T) {
+	p := newTrustPKI(t)
+	recordConfigctl(t)
+
+	for _, version := range []string{"26.4.2", "26.10"} {
+		t.Run(version, func(t *testing.T) {
+			f := newFakeTrust(t)
+			useTrustReleaseOf(t, version, "opnsense-business")
+			f.add(opnapi.TrustCA, uuidRootCA, "Corp Root CA", p.root.certPEM, "", "")
+
+			out := runTrust(t, f, trustPayload(
+				caSnippet(uuidRootCA, "Corp Root CA", p.root),
+				caSnippet(uuidInterCA, "Corp Issuing CA", p.inter),
+			), false, f.configXML(t, ""))
+			assertItems(t, out.Result,
+				"trust_ca Corp Root CA unchanged success",
+				"trust_ca Corp Issuing CA created success",
+			)
 		})
 	}
 }

@@ -33,7 +33,7 @@ func TestNeedBytes_TheFormulaAndTheFloor(t *testing.T) {
 		}
 	}
 	if needBytes(sets(1142865408, 33428352, 98926556)) != floor || floor != 3489660928 {
-		t.Error("the floor is 3.25 GiB, the smallest budget that completed the proof's hop (2.75 GiB) plus 512 MiB")
+		t.Error("the floor is 3.25 GiB, the smallest budget that completed the lab run's hop (2.75 GiB) plus 512 MiB")
 	}
 }
 

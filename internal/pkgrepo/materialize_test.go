@@ -1,6 +1,7 @@
 package pkgrepo
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,7 +99,7 @@ func TestEnabledFlipLeavesExactlyOneDefinition(t *testing.T) {
 
 	on := fingerprintRepo()
 	off := fingerprintRepo()
-	off.Enabled = false
+	off.Enabled = enabledAs(false)
 
 	for i, step := range []Repository{on, off, on} {
 		if _, err := Apply([]Repository{step}, true); err != nil {
@@ -122,7 +123,7 @@ func TestEnabledFlipLeavesExactlyOneDefinition(t *testing.T) {
 			t.Fatalf("step %d: %d definitions of mimugmail in one file", i, n)
 		}
 		want := "enabled: no,"
-		if step.Enabled {
+		if step.IsEnabled() {
 			want = "enabled: yes,"
 		}
 		if !strings.Contains(string(body), want) {
@@ -230,6 +231,33 @@ func TestUnverifiedSourcesRefusedWithoutPermission(t *testing.T) {
 		r.URL = "http://opn-repo.example/repo/${ABI}"
 		if _, err := Apply([]Repository{r}, false); err == nil {
 			t.Fatal("expected refusal for non-https repo without permission")
+		}
+	})
+
+	for _, typ := range []SignatureType{"NONE", "None", "", "gpg", " none"} {
+		for _, allow := range []bool{false, true} {
+			t.Run(fmt.Sprintf("signature type %q, unverified allowed %v", typ, allow), func(t *testing.T) {
+				withTempRoot(t)
+				r := fingerprintRepo()
+				r.Signature = Signature{Type: typ}
+				if _, err := Apply([]Repository{r}, allow); err == nil {
+					t.Fatal("a signature type pkg would read as unverified was accepted")
+				}
+				if _, err := os.Stat(ConfPath("mimugmail")); !os.IsNotExist(err) {
+					t.Error("refused repo must not be written to disk")
+				}
+			})
+		}
+	}
+
+	t.Run("signed types are permitted", func(t *testing.T) {
+		withTempRoot(t)
+		for _, sig := range []Signature{{Type: SignatureFingerprints, Fingerprints: fingerprintRepo().Signature.Fingerprints}, {Type: SignaturePubkey, Pubkey: "-----BEGIN PUBLIC KEY-----\nX\n-----END PUBLIC KEY-----\n"}} {
+			r := fingerprintRepo()
+			r.Signature = sig
+			if _, err := Apply([]Repository{r}, false); err != nil {
+				t.Errorf("signature type %q refused: %v", sig.Type, err)
+			}
 		}
 	})
 

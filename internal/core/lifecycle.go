@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/config"
@@ -25,6 +26,10 @@ import (
 // 1. Registration verification phase (HTTP API calls)
 // 2. WebSocket connection phase (persistent connection)
 type LifecycleManager struct {
+	// waitProgress is when the registration wait last read a status or failed
+	// a check, in Unix nanoseconds.
+	waitProgress atomic.Int64
+
 	cfg                *config.Config
 	configPath         string
 	shutdown           *ShutdownCoordinator
@@ -275,7 +280,10 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 		log.Info("Phase 1: Starting registration verification...")
 		_ = l.status.MarkConnecting()
 
+		l.registrationClient.SetWaitStatusHook(l.noteRegistrationStatus)
+		stopTouching := l.touchStatusWhileWaiting()
 		err := l.registrationClient.WaitForRegistration(ctx)
+		stopTouching()
 		if err != nil {
 			// Check if it's a shutdown/cancellation
 			if ctx.Err() != nil {
@@ -483,4 +491,63 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 
 	// Run WebSocket client (handles reconnection internally)
 	return wsClient.Run(phaseCtx)
+}
+
+// noteRegistrationStatus writes what the registration wait waits for into the
+// status file, so the plugin page says so instead of "Connecting", and notes
+// that the wait is moving. A check that failed is disconnected with its error:
+// the page then says the control plane cannot be reached, rather than that the
+// device still waits for an approval. DELETED and any status this agent does
+// not know are connecting.
+func (l *LifecycleManager) noteRegistrationStatus(registration string, checkErr error) {
+	l.waitProgress.Store(time.Now().UnixNano())
+	if checkErr != nil {
+		_ = l.status.MarkDisconnected(checkErr.Error())
+		return
+	}
+	switch registration {
+	case network.StatusPending:
+		_ = l.status.MarkPending()
+	case network.StatusDisabled:
+		_ = l.status.MarkDisabled()
+	default:
+		_ = l.status.MarkConnecting()
+	}
+}
+
+// statusTouchInterval keeps the status file fresh during the registration
+// wait, whose checks can be minutes apart: the plugin reads a file older than
+// 120 s as stale.
+var statusTouchInterval = 30 * time.Second
+
+// waitQuietLimit is how long the wait may go without a check before the file
+// is left to go stale: a wait that is stuck reads as stale on the page.
+var waitQuietLimit = network.MaxRegistrationCheckGap + time.Minute
+
+// touchStatusWhileWaiting refreshes the status file every statusTouchInterval
+// until the returned function is called, while the wait shows progress
+// (noteRegistrationStatus) within waitQuietLimit.
+func (l *LifecycleManager) touchStatusWhileWaiting() (stop func()) {
+	l.waitProgress.Store(time.Now().UnixNano())
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		ticker := time.NewTicker(statusTouchInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if time.Since(time.Unix(0, l.waitProgress.Load())) <= waitQuietLimit {
+					_ = l.status.Touch()
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+		<-finished
+	}
 }

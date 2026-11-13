@@ -2,6 +2,7 @@ package pathfinder
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"math/rand"
 	"reflect"
@@ -276,6 +277,87 @@ func TestScrubJSON_URLUserinfo(t *testing.T) {
 	}
 }
 
+func TestHoldsPrivateKey(t *testing.T) {
+	const (
+		cert = "-----BEGIN CERTIFICATE-----\nMIIBszCCAVmgAwIBAgIBATAKBggqhkjOPQQDAjAZ\n-----END CERTIFICATE-----\n"
+		csr  = "-----BEGIN CERTIFICATE REQUEST-----\nMIIBDzCBtgIBADAZMRcwFQYDVQQDDA5mdy5leGFt\n-----END CERTIFICATE REQUEST-----\n"
+	)
+	b64 := func(s string) string { return base64.StdEncoding.EncodeToString([]byte(s)) }
+	wrapped := func(s string) string {
+		var lines []string
+		for len(s) > 64 {
+			lines = append(lines, s[:64])
+			s = s[64:]
+		}
+		return strings.Join(append(lines, s), "\r\n")
+	}
+	tests := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{"a certificate", cert, false},
+		{"a signing request", csr, false},
+		{"a certificate in base64", b64(cert), false},
+		{"a signing request in base64", b64(csr), false},
+		{"nothing", "", false},
+		{"words that name a key", "the private key is kept elsewhere", false},
+
+		{"a certificate and a key", cert + "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----\n", true},
+		{"an RSA key", "-----BEGIN RSA PRIVATE KEY-----\nX", true},
+		{"an EC key", cert + "-----BEGIN EC PARAMETERS-----\nX\n-----END EC PARAMETERS-----\n-----BEGIN EC PRIVATE KEY-----\nX", true},
+		{"an encrypted key", csr + "-----BEGIN ENCRYPTED PRIVATE KEY-----\nX", true},
+		{"an OpenSSH key", "-----BEGIN OPENSSH PRIVATE KEY-----\nX", true},
+		{"a label in lower case", "-----begin private key-----\nX", true},
+		{"a certificate and a key in base64", b64(cert + "-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----\n"), true},
+		{"in base64 wrapped at 64 columns", wrapped(b64(cert + "-----BEGIN RSA PRIVATE KEY-----\nX\n")), true},
+		{"two encodings one after the other", "YWJjZA==" + b64("-----BEGIN PRIVATE KEY-----\nX\n"), true},
+		{"two encodings without padding", base64.RawStdEncoding.EncodeToString([]byte(cert+"xy")) + base64.RawStdEncoding.EncodeToString([]byte("-----BEGIN PRIVATE KEY-----\nX\n")), true},
+		{"an encoding after a stray character", "-" + b64(cert+"-----BEGIN PRIVATE KEY-----\nX\n"), true},
+		{"an encoding after a stray character PHP skips", "*" + b64(cert+"-----BEGIN PRIVATE KEY-----\nX\n"), true},
+		{"an encoding with a = inside the label", b64("-----BEGIN PRIVATE KEY-----\nX\n")[:12] + "=" + b64("-----BEGIN PRIVATE KEY-----\nX\n")[12:], true},
+		{"in URL-safe base64", strings.NewReplacer("+", "-", "/", "_").Replace(b64("\xfb\xff" + "-----BEGIN PRIVATE KEY-----")), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := holdsPrivateKey(tt.value); got != tt.want {
+				t.Errorf("holdsPrivateKey(%q) = %v, want %v", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// A key-material field is a certificate: it is blanked when a private key is in
+// it, kept to the byte when none is, and only a string is ever blanked.
+func TestScrubJSON_KeyMaterial(t *testing.T) {
+	secrets := secretKeys(jsonKey{name: "crt", kinds: kindString, keyMaterial: true})
+	tests := []struct{ in, want string }{
+		{`{"crt":"-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n"}`, `{"crt":"-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n"}`},
+		{`{"crt":"-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nSECRET"}`, `{"crt":""}`},
+		{`{"crt":"-----BEGIN CERTIFICATE-----\n-----BEGIN \u0050RIVATE KEY-----\nSECRET"}`, `{"crt":""}`},
+		{`{"crt":"-----BEGIN CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\nSECRET"}`, `{"crt":""}`},
+		{`{"crt":12}`, `{"crt":12}`},
+		{`{"crt":{"crt":"-----BEGIN RSA PRIVATE KEY-----"}}`, `{"crt":{"crt":""}}`},
+		{`{"rows":[{"crt":"` + base64.StdEncoding.EncodeToString([]byte("-----BEGIN PRIVATE KEY-----\nSECRET")) + `","descr":"x"}]}`, `{"rows":[{"crt":"","descr":"x"}]}`},
+	}
+	for _, tt := range tests {
+		got, _, err := scrubJSON([]byte(tt.in), secrets)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != tt.want {
+			t.Errorf("got  %s\nwant %s", got, tt.want)
+		}
+	}
+
+	// a position that names the same value as a secret blanks it whatever it holds
+	secrets.paths = []jsonPath{at("crt")}
+	got, _, err := scrubJSON([]byte(`{"crt":"-----BEGIN CERTIFICATE-----"}`), secrets)
+	if err != nil || string(got) != `{"crt":""}` {
+		t.Errorf("got %s, %v; want the value blanked", got, err)
+	}
+}
+
 // Anything that is not exactly one JSON value is refused, never passed along.
 func TestScrubJSON_MalformedBodiesAreErrors(t *testing.T) {
 	bodies := map[string]string{
@@ -351,8 +433,11 @@ func reference(v interface{}, secrets jsonSecrets, path []string, asKey *string)
 	}
 	if asKey != nil {
 		if k, ok := secrets.keys[*asKey]; ok {
-			if out, done := blank(k.kinds); done {
-				return out
+			s, isString := v.(string)
+			if !k.keyMaterial || isString && holdsPrivateKey(s) {
+				if out, done := blank(k.kinds); done {
+					return out
+				}
 			}
 		}
 	}
@@ -400,9 +485,15 @@ func decodeExact(t testing.TB, b []byte) interface{} {
 // randomDoc builds a document out of the names the rules use, so that secrets
 // and look-alikes turn up at every depth and in every type.
 func randomDoc(r *rand.Rand, depth int) interface{} {
-	names := []string{"password", "key", "m_enc", "httpdAllow", "value", "tag", "properties", "ids", "fileTags", "a", "selected", "0", "1"}
+	names := []string{"password", "key", "m_enc", "httpdAllow", "crt", "value", "tag", "properties", "ids", "fileTags", "a", "selected", "0", "1"}
 	if depth <= 0 {
-		switch r.Intn(6) {
+		switch r.Intn(9) {
+		case 6:
+			return "-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n"
+		case 7:
+			return "-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n-----BEGIN PRIVATE KEY-----\n"
+		case 8:
+			return "LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t"
 		case 0:
 			return "s" + itoa(r.Intn(100))
 		case 1:
@@ -445,6 +536,7 @@ func TestScrubJSON_AgreesWithTheReferenceOnRandomDocuments(t *testing.T) {
 			"key":        {name: "key"},
 			"m_enc":      {name: "m_enc", kinds: kindString | kindArray},
 			"httpdAllow": {name: "httpdAllow", kinds: kindString | kindObject},
+			"crt":        {name: "crt", kinds: kindString, keyMaterial: true},
 		},
 		paths: []jsonPath{
 			{segments: []string{"ids", "fileTags", "tag", "*", "value"}},
@@ -491,10 +583,12 @@ func FuzzScrubJSON(f *testing.F) {
 		keys: map[string]jsonKey{
 			"password": {name: "password"},
 			"m_enc":    {name: "m_enc", kinds: kindString | kindArray},
+			"crt":      {name: "crt", kinds: kindString, keyMaterial: true},
 		},
 		paths: []jsonPath{{segments: []string{"properties", "*"}}},
 	}
 	for _, seed := range []string{
+		`{"crt":"-----BEGIN CERTIFICATE-----"}`, `{"crt":"LS0tLS1CRUdJTiBQUklWQVRFIEtFWS0tLS0t"}`, `{"crt":{"crt":"-----BEGIN RSA PRIVATE KEY"}}`, `{"crt":7}`,
 		`{"password":"x"}`, `[{"password":1},{"m_enc":[1,2]}]`, `{"properties":{"a":"b"}}`, `{"a":{"b":[]}}`,
 		`{"password":{"password":"x"}}`, "  {\"password\" : \"x\"}  ", `{"password":"x"}`, `[`, ``, `{"a":"\ud800"}`,
 	} {

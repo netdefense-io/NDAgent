@@ -37,7 +37,7 @@ var ErrEmptyTarget = errors.New("no target specified for ping")
 var ErrInvalidPackageName = errors.New("invalid package name: only alphanumeric characters, hyphens, and underscores are allowed")
 
 // ErrInvalidTargetFormat is returned when ping target contains invalid characters
-var ErrInvalidTargetFormat = errors.New("invalid target format: only alphanumeric characters, dots, and hyphens are allowed")
+var ErrInvalidTargetFormat = errors.New("invalid target format: only alphanumeric characters, dots, and hyphens are allowed, and it cannot start with a hyphen")
 
 // ErrTargetTooLong is returned when ping target exceeds hostname length limit
 var ErrTargetTooLong = errors.New("target hostname too long")
@@ -60,6 +60,11 @@ func ValidatePingTarget(target string) error {
 
 	// TASK-001 Security Fix: Validate target input to prevent command injection
 	if !pingTargetRegex.MatchString(target) {
+		return ErrInvalidTargetFormat
+	}
+
+	// A leading hyphen would be read by ping as an option ("-f" floods).
+	if strings.HasPrefix(target, "-") {
 		return ErrInvalidTargetFormat
 	}
 

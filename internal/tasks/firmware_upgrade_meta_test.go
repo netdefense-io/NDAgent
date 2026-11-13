@@ -11,6 +11,7 @@ import (
 
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/firmware"
+	"github.com/netdefense-io/ndagent/internal/firmware/track"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/taskstore"
@@ -42,6 +43,9 @@ func newFirmwareFixture(t *testing.T) *firmwareFixture {
 		SetFirmwareTaskStoreForTest(store),
 		SetFirmwareBootTimeForTest(func() (int64, error) { return 1_780_000_000, nil }),
 		SetFirmwareNowForTest(func() time.Time { return metaTestNow }),
+		SetMajorAgentRepoProbeForTest(func(context.Context, string) (track.AgentRepo, error) {
+			return track.AgentRepo{Nested: true, Tree: true}, nil
+		}),
 		// The fixture's clock is fixed in the past, but a context deadline is real
 		// time: a run must not find its deadline already gone.
 		SetFirmwareDeadlineForTest(func(time.Time) time.Time { return time.Now().Add(time.Minute) }),

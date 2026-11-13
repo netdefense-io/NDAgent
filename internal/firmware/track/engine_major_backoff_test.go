@@ -51,8 +51,8 @@ func TestMajor_TwoAbortedAttemptsBackTheThirdOffWithoutTouchingTheBox(t *testing
 	}
 	aborted := r.state().HopAborts.At
 	r.dev.do(func(d *simDevice) {
-		if len(d.hop.bes) != 2 || d.hop.bes[0].Name != "ndagent-pre-26.7" || d.hop.bes[1].Name != "ndagent-pre-26.7-2" {
-			t.Errorf("boot environments %+v: a second attempt leaves a second copy under the next name", d.hop.bes)
+		if len(d.hop.bes) != 1 || d.hop.bes[0].Name != "ndagent-pre-26.7" {
+			t.Errorf("boot environments %+v: the second attempt reuses the first one's (#136)", d.hop.bes)
 		}
 	})
 

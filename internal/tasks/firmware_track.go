@@ -143,6 +143,12 @@ func HandleFirmwareTrack(ctx context.Context, ws *network.WebSocketClient, cmd n
 		return send(outcomeResult(track.Held(*payload, track.ReasonHeldFirmwareBusy)))
 	}
 	defer release()
+	// A context closes its Done channel before it cancels its children, so the
+	// slot can be handed to waitCtx after ctx ended (#143).
+	if ctx.Err() != nil {
+		log.Infow("Context ended before the FIRMWARE_TRACK task got its turn; leaving it IN_PROGRESS", "task_id", cmd.TaskID)
+		return nil
+	}
 	if firmwareExpired(cmd) {
 		return send(outcomeResult(track.Held(*payload, track.ReasonHeldFirmwareBusy)))
 	}

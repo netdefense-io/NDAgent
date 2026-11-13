@@ -24,22 +24,28 @@ func TestAdminPrivPolicy_SwitchOffNeverLooksAtTheRelease(t *testing.T) {
 // the lookup is one release read.
 func TestAdminPrivPolicy_TheBuildFollowsTheInstalledRelease(t *testing.T) {
 	tests := []struct {
-		name    string
-		version string
-		fail    bool
-		want    bool
+		name      string
+		version   string
+		fail      bool
+		want      bool
+		product   string
+		noProduct bool
 	}{
-		{"below the floor in the same series", "26.1.10", false, true},
-		{"the first release of the series", "26.1", false, true},
-		{"an older series", "25.7.11_9", false, true},
-		{"at the floor", "26.1.11", false, false},
-		{"above the floor", "26.1.12_2", false, false},
-		{"the next series", "26.7.4", false, false},
-		{"unreadable", "", true, true},
+		{"below the floor in the same series", "26.1.10", false, true, "", false},
+		{"the first release of the series", "26.1", false, true, "", false},
+		{"an older series", "25.7.11_9", false, true, "", false},
+		{"at the floor", "26.1.11", false, false, "", false},
+		{"above the floor", "26.1.12_2", false, false, "", false},
+		{"the next series", "26.7.4", false, false, "", false},
+		{"unreadable", "", true, true, "", false},
+		{"Business Edition built on a release below the floor", "26.4.1", false, true, "opnsense-business", false},
+		{"Business Edition at its floor", "26.4.2", false, false, "opnsense-business", false},
+		{"the edition unknown at the community floor", "26.1.11", false, true, "", true},
+		{"the edition unknown on the next series", "26.7.4", false, false, "", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			srv := &versionServer{version: tt.version, fail: tt.fail}
+			srv := &versionServer{version: tt.version, fail: tt.fail, product: tt.product, noProduct: tt.noProduct}
 			client := srv.client(t)
 
 			if got := adminPrivPolicy(context.Background(), client); got.FloorDependentElevated != tt.want {

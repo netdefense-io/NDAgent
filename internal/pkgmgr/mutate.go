@@ -82,6 +82,9 @@ func IsInstalled(ctx context.Context, name string) (bool, error) {
 }
 
 func pkgIsInstalledFreeBSD(ctx context.Context, name string) (bool, error) {
+	if optionLike(name) {
+		return false, errOptionLike(name)
+	}
 	_, err := runPkg(ctx, "info", "-q", name)
 	if err == nil {
 		return true, nil
@@ -124,6 +127,9 @@ func Delete(ctx context.Context, name string) MutateOutcome {
 //
 // We match on the prefix substring.
 func pkgInstallFreeBSD(ctx context.Context, name string) MutateOutcome {
+	if optionLike(name) {
+		return MutateOutcome{Action: ActionError, ErrMsg: errOptionLike(name).Error()}
+	}
 	stderr, err := runPkgCaptureStderr(ctx, "install", "-y", name)
 	if err == nil {
 		return MutateOutcome{Action: ActionInstalled}
@@ -141,6 +147,9 @@ func pkgInstallFreeBSD(ctx context.Context, name string) MutateOutcome {
 }
 
 func pkgRemoveFreeBSD(ctx context.Context, name string) MutateOutcome {
+	if optionLike(name) {
+		return MutateOutcome{Action: ActionError, ErrMsg: errOptionLike(name).Error()}
+	}
 	stderr, err := runPkgCaptureStderr(ctx, "delete", "-y", name)
 	if err == nil {
 		return MutateOutcome{Action: ActionRemoved}
@@ -188,7 +197,8 @@ func firstNonEmptyLine(s string) string {
 // matter (pkg-add(8)): it does not consult configured repositories for the
 // named package, and resolves dependencies only from sibling files in the same
 // directory as the archive. `-f` forces REINSTALLATION of an already-installed
-// package — it does not bypass dependency or signature checking.
+// package, and also skips pkg's ABI and OS-version checks (pkg 2.3.1
+// libpkg/pkg_add.c:1145-1156); it does not skip the dependency checks.
 //
 // A package installed this way carries no repository-origin annotation, so a
 // later `pkg upgrade` matches it by name against whatever repository offers
@@ -206,6 +216,9 @@ func AddURL(ctx context.Context, url string, force bool) MutateOutcome {
 }
 
 func pkgAddURLFreeBSD(ctx context.Context, url string, force bool) MutateOutcome {
+	if optionLike(url) {
+		return MutateOutcome{Action: ActionError, ErrMsg: errOptionLike(url).Error()}
+	}
 	args := []string{"add"}
 	if force {
 		args = append(args, "-f")

@@ -703,8 +703,8 @@ func (r *trustRun) upsert(item trustItem) {
 	}
 	if why := r.tooOld(); why != "" {
 		r.fail(SyncAPIItemResult{Type: item.resultType(), UUID: item.UUID, Name: item.Name, Action: "blocked", Status: "blocked", Code: trustCodeOPNsenseTooOld,
-			Error: fmt.Sprintf("%s: %s: %s, and certificate sync writes only to OPNsense %s or later; nothing was written",
-				trustCodeOPNsenseTooOld, label, why, minimumSupportedRelease())})
+			Error: fmt.Sprintf("%s: %s: %s, and certificate sync writes only to OPNsense %s; nothing was written",
+				trustCodeOPNsenseTooOld, label, why, minimumSupportedReleases())})
 		return
 	}
 	if r.rejectDangerous {
@@ -842,8 +842,8 @@ func sameSubject(a, b *x509.Certificate) bool {
 }
 
 // tooOld says why this device takes no trust writes, "" when it does: a
-// release below the supported floor, or one that cannot be read. It is read
-// once per pass, before the first write; removals do not ask.
+// release below the supported floor of its edition, or one that cannot be read.
+// It is read once per pass, before the first write; removals do not ask.
 func (r *trustRun) tooOld() string {
 	if !r.releaseRead {
 		r.releaseRead = true
@@ -852,8 +852,10 @@ func (r *trustRun) tooOld() string {
 	switch {
 	case r.releaseErr != nil:
 		return "the OPNsense release of this device could not be read"
-	case !r.release.AtLeast(opnapi.MinSupportedOPNsenseMajor, opnapi.MinSupportedOPNsenseMinor, opnapi.MinSupportedOPNsensePatch):
-		return fmt.Sprintf("this device runs OPNsense %s", r.release.String())
+	case !r.release.MeetsSupportedFloor() && r.release.Edition() == opnapi.EditionUnknown:
+		return fmt.Sprintf("this device runs OPNsense %s and its edition could not be told (no known product_id in /usr/local/opnsense/version/core), so it is held to the Business Edition floor", r.release.String())
+	case !r.release.MeetsSupportedFloor():
+		return fmt.Sprintf("this device runs OPNsense %s", r.release.Label())
 	}
 	return ""
 }

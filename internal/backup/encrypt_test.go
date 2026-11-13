@@ -91,15 +91,39 @@ func TestDecryptEmptyPassphrase(t *testing.T) {
 	}
 }
 
+// AES-CBC is not authenticated: a wrong key decrypts to random bytes, whose
+// PKCS#7 padding checks out about 1 time in 255, so a wrong passphrase does not
+// always give an error. It never gives the plaintext.
 func TestDecryptWrongPassphrase(t *testing.T) {
-	encrypted, err := EncryptConfig([]byte("secret data"), "correct-password")
+	plaintext := []byte("secret data")
+	encrypted, err := EncryptConfig(plaintext, "correct-password")
 	if err != nil {
 		t.Fatalf("EncryptConfig failed: %v", err)
 	}
 
-	_, err = DecryptConfig(encrypted, "wrong-password")
-	if err == nil {
-		t.Error("expected error for wrong passphrase")
+	got, err := DecryptConfig(encrypted, "wrong-password")
+	if err == nil && bytes.Equal(got, plaintext) {
+		t.Error("a wrong passphrase decrypted to the plaintext")
+	}
+}
+
+// wrongPassphraseVector is EncryptConfig("secret data", "correct-password")
+// with a salt for which "wrong-password" fails the padding check.
+const wrongPassphraseVector = `---- BEGIN config.xml ----
+Version: OPNsense 25.7.10
+Cipher: AES-256-CBC
+PBKDF2: 100000
+Hash: SHA512
+
+U2FsdGVkX18gxnNOeNEicv3s16NO/wjlIK9da7D/pnk=
+---- END config.xml ----`
+
+func TestDecryptWrongPassphraseFailsOnAFixedVector(t *testing.T) {
+	if got, err := DecryptConfig(wrongPassphraseVector, "correct-password"); err != nil || string(got) != "secret data" {
+		t.Fatalf("the vector does not decrypt with its passphrase: %q, %v", got, err)
+	}
+	if _, err := DecryptConfig(wrongPassphraseVector, "wrong-password"); err == nil {
+		t.Error("expected an error for the wrong passphrase")
 	}
 }
 

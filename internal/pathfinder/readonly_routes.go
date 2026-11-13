@@ -28,8 +28,9 @@ import (
 //
 // The lists come from auditing every API controller of OPNsense 26.1 - 26.7
 // and master (plus the ISC DHCP, Tailscale and QEMU guest agent plugins)
-// against the ACL of the read-only group; TESTING.md in this directory says
-// how to repeat it. Anything not listed relies on user-config-readonly.
+// against the ACL of the read-only group, with the 26.7.4 to 26.7.9 delta
+// audited again; TESTING.md in this directory says how to repeat it.
+// Anything not listed relies on user-config-readonly.
 
 // readOnlyRefusal returns the status a read-only session answers a request
 // with instead of forwarding it, or 0 to forward it. target is the request
@@ -196,7 +197,14 @@ var logClearRoutePattern = regexp.MustCompile(`^/api/diagnostics/log/[^/]+/[^/]+
 // there. The route and VIP edits write the delete_route_<uuid>.todo and
 // delete_vip_<uuid>.todo file that the next apply acts on, for any route or
 // address that exists, before the config guard or whatever setBase answered.
+//
+// The dashboard's product news feed writes nothing, but on 26.7.9 it runs the
+// configd action `firmware feed`, which takes OPNsense's firmware lock for up
+// to 30 s while it fetches the feed, and every firmware job asked for in that
+// time (check, update, plugin install, the auto-update) is dropped without a
+// word. A read-only session goes without the news.
 var anyMethodRoutePattern = regexp.MustCompile(`^/api/(` + strings.Join([]string{
+	`core/dashboard/productinfofeed`,
 	`diagnostics/netflow/setconfig`,
 	`firewall/aliasutil/updatebogons`,
 	`interfaces/overview/reloadinterface`,

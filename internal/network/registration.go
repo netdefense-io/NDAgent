@@ -124,7 +124,8 @@ func (e *DecommissionRequiredError) Error() string {
 }
 
 // registrationSleep is the shutdown-aware sleep used by the registration
-// client's own waits (the rate-limit floor and the DISABLED backoff).
+// client's own waits (the rate-limit floor, the poll interval, the retry of
+// a failed check and the DISABLED backoff).
 // Production is util.ShutdownAwareSleep; tests replace it so a state
 // machine built on minutes-long waits can be asserted in milliseconds.
 var registrationSleep = util.ShutdownAwareSleep
@@ -141,6 +142,11 @@ const checkRegistrationMinInterval = 10 * time.Second
 type RegistrationClient struct {
 	cfg        *config.Config
 	httpClient *http.Client
+
+	// onWaitStatus, when set, is told every status WaitForRegistration
+	// reads, or the error of a check that failed, so the agent's status file
+	// can say what it waits for.
+	onWaitStatus func(status string, checkErr error)
 
 	// lastCheck timestamps the previous CheckRegistration call so the
 	// next one can be held back to checkRegistrationMinInterval.
@@ -454,6 +460,19 @@ func (r *RegistrationClient) handleDeletedStatus(resp *CheckRegistrationResponse
 	return &DecommissionRequiredError{Tombstone: ts}
 }
 
+// SetWaitStatusHook sets the function WaitForRegistration tells every
+// registration status it reads, or the error of a check, or of a start of the
+// registration, that failed.
+func (r *RegistrationClient) SetWaitStatusHook(f func(status string, checkErr error)) {
+	r.onWaitStatus = f
+}
+
+// MaxRegistrationCheckGap is the longest a WaitForRegistration that is not
+// stuck goes between two checks: the disabled wait's ceiling and the floor
+// between checks. The retry of a failed check (about 75 s at most) and the
+// start backoff (60 s) are shorter.
+const MaxRegistrationCheckGap = disabledMaxBackoff + checkRegistrationMinInterval
+
 // WaitForRegistration polls the server until the device is registered and enabled.
 // Returns nil when device is enabled, or an error if device is disabled/deleted or context cancelled.
 func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
@@ -491,6 +510,9 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 
 		checkResp, err := r.CheckRegistration(ctx)
 		if err != nil {
+			if r.onWaitStatus != nil && ctx.Err() == nil {
+				r.onWaitStatus("", err)
+			}
 			// Handle connection errors with exponential backoff
 			log.Errorw("Connection error during registration",
 				"error", err,
@@ -512,7 +534,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 				"delay_seconds", totalDelay,
 			)
 
-			if err := util.ShutdownAwareSleep(ctx, actualDelay); err != nil {
+			if err := registrationSleep(ctx, actualDelay); err != nil {
 				log.Info("Registration retry cancelled during sleep")
 				return err
 			}
@@ -522,6 +544,9 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 		// Reset delay on successful connection
 		totalDelay = 0
 		status := checkResp.Status
+		if r.onWaitStatus != nil {
+			r.onWaitStatus(status, nil)
+		}
 		if status != StatusDisabled {
 			// Any other answer means the suspension is over (or never
 			// started); start the disabled wait from scratch next time.
@@ -539,7 +564,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 			log.Infow("Device registration is pending, waiting for approval",
 				"device_uuid", r.cfg.DeviceUUID,
 			)
-			if err := util.ShutdownAwareSleep(ctx, statusPollInterval); err != nil {
+			if err := registrationSleep(ctx, statusPollInterval); err != nil {
 				return err
 			}
 
@@ -548,6 +573,9 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 				"device_uuid", r.cfg.DeviceUUID,
 			)
 			startErr := r.StartRegistration(ctx)
+			if startErr != nil && r.onWaitStatus != nil && ctx.Err() == nil {
+				r.onWaitStatus(status, startErr)
+			}
 			if startErr == nil {
 				// Success: reset Start backoff. Continue with the
 				// normal poll cadence so the next Check sees the
@@ -562,7 +590,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 						"retry_after", tErr.RetryAfter,
 						"next_attempt_in", startBackoff,
 					)
-					if err := util.ShutdownAwareSleep(ctx, startBackoff); err != nil {
+					if err := registrationSleep(ctx, startBackoff); err != nil {
 						return err
 					}
 					continue
@@ -571,7 +599,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 					"error", startErr,
 				)
 			}
-			if err := util.ShutdownAwareSleep(ctx, statusPollInterval); err != nil {
+			if err := registrationSleep(ctx, statusPollInterval); err != nil {
 				return err
 			}
 
@@ -601,7 +629,7 @@ func (r *RegistrationClient) WaitForRegistration(ctx context.Context) error {
 			log.Errorw("Unknown registration status",
 				"status", status,
 			)
-			if err := util.ShutdownAwareSleep(ctx, statusPollInterval); err != nil {
+			if err := registrationSleep(ctx, statusPollInterval); err != nil {
 				return err
 			}
 		}

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
@@ -474,15 +476,12 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 
 	// Execute software policy reconciliation. Unlike the other executors,
 	// this one doesn't need the OPNsense apiClient — it shells out to
-	// pkg(8) directly. nil softwarePayload (no SoftwarePolicy attached)
-	// short-circuits to a no-op.
-	if softwarePayload != nil {
-		softwareResult := executeSyncSoftware(ctx, softwarePayload, ws.GetConfigXMLPath())
-		syncResult.Results = append(syncResult.Results, softwareResult.Results...)
-		syncResult.Errors = append(syncResult.Errors, softwareResult.Errors...)
-		if !softwareResult.Success {
-			syncResult.Success = false
-		}
+	// pkg(8) directly.
+	softwareResult := syncSoftwareSection(ctx, softwarePayload, ws.GetConfigXMLPath())
+	syncResult.Results = append(syncResult.Results, softwareResult.Results...)
+	syncResult.Errors = append(syncResult.Errors, softwareResult.Errors...)
+	if !softwareResult.Success {
+		syncResult.Success = false
 	}
 
 	// Compose the user-facing summary from the combined results so every
@@ -1650,6 +1649,41 @@ func parseAPIUsers(payload map[string]interface{}) ([]opnapi.APIUserPayload, err
 	return users, nil
 }
 
+// userContentKeys and groupContentKeys are the keys a USER and a GROUP snippet
+// may carry: what parseUserContent and parseGroupContent read, and `templates`,
+// snippet metadata the shared ignored-keys contract (content_keys.go) ignores
+// for the UNBOUND types but does not list yet for USER and GROUP. A key that
+// contract ignores for them is accepted too. Keys are matched exactly, so
+// "Descr" is unknown.
+var (
+	userContentKeys = map[string]bool{
+		"name": true, "password": true, "disabled": true, "scope": true, "descr": true,
+		"shell": true, "authorizedkeys": true, "expires": true, "email": true, "comment": true,
+		"language": true, "landing_page": true, "groups": true, "priv": true, "templates": true,
+	}
+	groupContentKeys = map[string]bool{
+		"name": true, "description": true, "source_networks": true, "external_members": true,
+		"members": true, "priv": true, "templates": true,
+	}
+)
+
+// unknownContentKeys refuses a key the element does not know. A left-out list
+// clears what the device holds, so a misspelt one ("member" for "members") must
+// not be dropped silently (NDAgent-go#191).
+func unknownContentKeys(snippetType string, content map[string]interface{}, known map[string]bool) error {
+	var unknown []string
+	for key := range content {
+		if !known[key] && !isIgnoredContentKey(snippetType, key) {
+			unknown = append(unknown, strconv.Quote(key))
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("unknown key %s", strings.Join(unknown, ", "))
+}
+
 // parseUserContent parses the JSON content of a user snippet.
 func parseUserContent(jsonContent string, templates []string) (opnapi.APIUserPayload, error) {
 	var contentMap map[string]interface{}
@@ -1688,25 +1722,43 @@ func parseUserContent(jsonContent string, templates []string) (opnapi.APIUserPay
 	user.Language, _ = contentMap["language"].(string)
 	user.LandingPage, _ = contentMap["landing_page"].(string)
 
-	// Parse groups (names)
-	if groups, ok := contentMap["groups"].([]interface{}); ok {
-		for _, g := range groups {
-			if gs, ok := g.(string); ok {
-				user.Groups = append(user.Groups, gs)
-			}
-		}
+	// A list left out declares none and clears, so one that is not a list of
+	// names refuses the element rather than reading as left out.
+	var err error
+	if user.Groups, err = nameList(contentMap, "groups"); err != nil {
+		user.ContentError = err.Error()
 	}
-
-	// Parse privileges
-	if priv, ok := contentMap["priv"].([]interface{}); ok {
-		for _, p := range priv {
-			if ps, ok := p.(string); ok {
-				user.Priv = append(user.Priv, ps)
-			}
-		}
+	if user.Priv, err = nameList(contentMap, "priv"); err != nil && user.ContentError == "" {
+		user.ContentError = err.Error()
+	}
+	if err := unknownContentKeys("USER", contentMap, userContentKeys); err != nil && user.ContentError == "" {
+		user.ContentError = err.Error()
 	}
 
 	return user, nil
+}
+
+// nameList reads an optional list of strings; absent, null and "" are none.
+// NDDataModels accepts "" as an empty GROUP members, and a snippet saved before
+// its kind checks may carry "" in the other lists.
+func nameList(content map[string]interface{}, key string) ([]string, error) {
+	raw, present := content[key]
+	if !present || raw == nil || raw == "" {
+		return nil, nil
+	}
+	list, ok := raw.([]interface{})
+	if !ok {
+		return nil, fmt.Errorf("%s must be a list of names, got %T", key, raw)
+	}
+	var out []string
+	for i, v := range list {
+		s, ok := v.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s[%d] must be a name, got %T", key, i, v)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // parseAPIGroups extracts groups from the payload snippets array.
@@ -1790,22 +1842,17 @@ func parseGroupContent(jsonContent string, templates []string) (opnapi.APIGroupP
 	group.SourceNetworks, _ = contentMap["source_networks"].(string)
 	group.ExternalMembers = parseBoolField(contentMap["external_members"])
 
-	// Parse members (names)
-	if members, ok := contentMap["members"].([]interface{}); ok {
-		for _, m := range members {
-			if ms, ok := m.(string); ok {
-				group.Members = append(group.Members, ms)
-			}
-		}
+	// A list left out declares none and clears, so one that is not a list of
+	// names refuses the element rather than reading as left out.
+	var err error
+	if group.Members, err = nameList(contentMap, "members"); err != nil {
+		group.ContentError = err.Error()
 	}
-
-	// Parse privileges
-	if priv, ok := contentMap["priv"].([]interface{}); ok {
-		for _, p := range priv {
-			if ps, ok := p.(string); ok {
-				group.Priv = append(group.Priv, ps)
-			}
-		}
+	if group.Priv, err = nameList(contentMap, "priv"); err != nil && group.ContentError == "" {
+		group.ContentError = err.Error()
+	}
+	if err := unknownContentKeys("GROUP", contentMap, groupContentKeys); err != nil && group.ContentError == "" {
+		group.ContentError = err.Error()
 	}
 
 	return group, nil
@@ -1853,24 +1900,49 @@ func parseBoolField(v interface{}) bool {
 // race-safe against a login landing between that read and this repair's
 // write — see opnapi.RepairGroupMember's doc comment for the accepted,
 // bounded residual risk.
-func updateExternalGroup(ctx context.Context, client *opnapi.Client, log *zap.SugaredLogger, uuid, name string, opnGroup opnapi.Group, validUIDs map[string]bool) error {
+//
+// held says the group's row already holds what the write would send (#195):
+// the plain update is then skipped, and written reports whether anything was.
+// The repair is never skipped, since the row does not show the artifact.
+func updateExternalGroup(ctx context.Context, client *opnapi.Client, log *zap.SugaredLogger, uuid, name string, opnGroup opnapi.Group, validUIDs map[string]bool, held bool) (written bool, err error) {
 	rawMember, found, err := client.GetGroupRawMemberByName(ctx, name)
 	if err != nil || !found {
 		// Fail open: an unreadable or (racily) missing group falls through
 		// to the plain update, exactly today's behavior and no worse — this
 		// repair is a bonus recovery path, never a precondition for an
 		// otherwise-healthy update.
-		return client.SetGroup(ctx, uuid, opnGroup)
+		if held {
+			return false, nil
+		}
+		return true, client.SetGroup(ctx, uuid, opnGroup)
 	}
 
 	sanitized, changed := opnapi.SanitizeMemberCSVAgainstUsers(rawMember, validUIDs)
 	if !changed {
-		return client.SetGroup(ctx, uuid, opnGroup)
+		if held {
+			return false, nil
+		}
+		return true, client.SetGroup(ctx, uuid, opnGroup)
 	}
 
 	log.Warnw("SYNC_API: external GROUP's stored member CSV carried an empty-token or stale-uid artifact; repairing without adding or removing a real, current member",
 		"group", name, "raw_member", rawMember, "sanitized_member", sanitized)
-	return client.RepairGroupMember(ctx, uuid, opnGroup, sanitized)
+	return true, client.RepairGroupMember(ctx, uuid, opnGroup, sanitized)
+}
+
+// rowsByName indexes listed rows by name for the no-op compare, under the
+// condition the uuid lookups use (a name and a uuid), so the row compared is
+// the row the update writes to.
+func rowsByName(rows []map[string]interface{}) map[string]map[string]interface{} {
+	out := make(map[string]map[string]interface{}, len(rows))
+	for _, row := range rows {
+		name, _ := row["name"].(string)
+		uuid, _ := row["uuid"].(string)
+		if name != "" && uuid != "" {
+			out[name] = row
+		}
+	}
+	return out
 }
 
 // executeSyncUsersGroups performs sync for users and groups.
@@ -1903,6 +1975,7 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 
 	gate := newAccountGate(policy, rejectDangerous, log)
 	gate.noteCleared(users, groups)
+	gate.noteSyncElements(users, groups)
 	record := func(kind, name string, r refusal) {
 		results = append(results, SyncAPIItemResult{
 			Type:   kind,
@@ -1922,8 +1995,14 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 	//
 	// First pass: what needs no live rows. It runs before discovery so a
 	// discovery failure, which returns early, still reports these refusals.
-	applyUsers := gate.filterUsers(users, record)
-	applyGroups := gate.filterGroups(groups, record)
+	applyUsers, invalid, invalidErrors := refuseInvalidUsers(users)
+	results = append(results, invalid...)
+	errors = append(errors, invalidErrors...)
+	validGroups, invalidGroups, invalidGroupErrors := refuseInvalidGroups(groups)
+	results = append(results, invalidGroups...)
+	errors = append(errors, invalidGroupErrors...)
+	applyUsers = gate.filterUsers(applyUsers, record)
+	applyGroups := gate.filterGroups(validGroups, record)
 
 	// Phase 1: Get all users and groups for lookups.
 	//
@@ -1985,7 +2064,29 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 	// group holds that the device does not define grants nothing there.
 	devicePrivs := livePrivCatalog(ctx, client)
 	gate.useLiveRows(allUsers, allGroups, devicePrivs)
+	liveGroupMembers := make(map[string]map[string]bool, len(allGroups))
+	for _, rawGroup := range allGroups {
+		name, _ := rawGroup["name"].(string)
+		if name == "" {
+			continue
+		}
+		api := opnapi.ConvertGroupToAPI(rawGroup, allUsers)
+		set := make(map[string]bool, len(api.Members))
+		for _, m := range api.Members {
+			set[m] = true
+		}
+		liveGroupMembers[name] = set
+	}
+	gate.useLiveMembers(liveGroupMembers)
 	applyGroups = gate.filterGroups(applyGroups, record)
+	// Before the gate plans the groups, so a GROUP refused here elevates
+	// nobody.
+	knownUsers, refusedUsers := memberCandidates(allUsers, applyUsers, users)
+	var memberResults []SyncAPIItemResult
+	var memberErrors []string
+	applyGroups, memberResults, memberErrors = refuseUnknownGroupMembers(applyGroups, knownUsers, refusedUsers, log)
+	results = append(results, memberResults...)
+	errors = append(errors, memberErrors...)
 	gate.planGroups(applyGroups)
 	applyUsers = gate.filterUsers(applyUsers, record)
 
@@ -2008,19 +2109,37 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 	// stale-exclusion deferral is about NEW names only (a member added THIS pass) — a name
 	// that was already a member before this sync started is never deferred,
 	// whatever the exclusion coverage says.
-	liveGroupMembers := make(map[string]map[string]bool, len(allGroups))
+
+	knownGroups := make(map[string]bool, len(allGroups)+len(applyGroups))
 	for _, rawGroup := range allGroups {
-		name, _ := rawGroup["name"].(string)
-		if name == "" {
-			continue
+		if name, _ := rawGroup["name"].(string); name != "" {
+			knownGroups[name] = true
 		}
-		api := opnapi.ConvertGroupToAPI(rawGroup, allUsers)
-		set := make(map[string]bool, len(api.Members))
-		for _, m := range api.Members {
-			set[m] = true
-		}
-		liveGroupMembers[name] = set
 	}
+	for _, g := range applyGroups {
+		knownGroups[g.Name] = true
+	}
+	// A group whose GROUP the gate refused and that the device does not
+	// have yet. One that already exists is known, refused or not, and a USER
+	// that names it joins it as it is on the device, which the gate judged.
+	refusedGroups := map[string]bool{}
+	for _, g := range groups {
+		if !knownGroups[g.Name] {
+			refusedGroups[g.Name] = true
+		}
+	}
+	var unknownResults []SyncAPIItemResult
+	var unknownErrors []string
+	applyUsers, unknownResults, unknownErrors = refuseUnknownUserGroups(applyUsers, knownGroups, refusedGroups, log)
+	results = append(results, unknownResults...)
+	errors = append(errors, unknownErrors...)
+	// A member whose USER this sync does not apply after all (the second gate
+	// pass, the group check) is reported; the group is written without it.
+	_, notApplied := memberCandidates(allUsers, applyUsers, users)
+	memberResults, memberErrors = reportUnappliedMembers(applyGroups, notApplied)
+	results = append(results, memberResults...)
+	errors = append(errors, memberErrors...)
+	membership := newMembershipPlan(applyUsers, users, applyGroups, groups, liveGroupMembers, auth)
 
 	// Build sets of desired names
 	desiredUserNames := make(map[string]opnapi.APIUserPayload)
@@ -2033,7 +2152,11 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 		desiredGroupNames[g.Name] = g
 	}
 
-	// Phase 2: Create/Update groups first (users depend on groups)
+	// Phase 2: Create/Update groups first (users depend on groups). A group
+	// whose row already holds what its write would send is not written again
+	// (#195). A row is compared once, so a second GROUP of the same name always
+	// writes.
+	groupRows := rowsByName(allGroups)
 	for _, groupPayload := range applyGroups {
 		existingUUID, exists := groupUUIDLookup[groupPayload.Name]
 
@@ -2048,7 +2171,10 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 		convertPayload := groupPayload
 		var deferredMembers []string
 		if !groupPayload.ExternalMembers {
-			convertPayload.Members, deferredMembers = filterDeferredGroupMembers(groupPayload, liveGroupMembers[groupPayload.Name], auth)
+			// Only the deferred list is used here: groupMembers holds the
+			// same members back itself.
+			_, deferredMembers = filterDeferredGroupMembers(groupPayload, liveGroupMembers[groupPayload.Name], auth)
+			convertPayload.Members = membership.groupMembers(groupPayload, true)
 		}
 
 		// Convert to OPNsense format (without member UIDs for now)
@@ -2056,8 +2182,17 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 
 		if exists {
 			action = "updated"
+			row, compared := groupRows[groupPayload.Name]
+			delete(groupRows, groupPayload.Name)
+			held := compared && opnapi.GroupRowHolds(opnGroup, row)
 			if groupPayload.ExternalMembers {
-				syncErr = updateExternalGroup(ctx, client, log, existingUUID, groupPayload.Name, opnGroup, validUIDs)
+				var written bool
+				written, syncErr = updateExternalGroup(ctx, client, log, existingUUID, groupPayload.Name, opnGroup, validUIDs, held)
+				if !written {
+					action = "unchanged"
+				}
+			} else if held {
+				action = "unchanged"
 			} else {
 				syncErr = client.SetGroup(ctx, existingUUID, opnGroup)
 			}
@@ -2082,6 +2217,9 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 			errors = append(errors, fmt.Sprintf("Group %s: %v", groupPayload.Name, syncErr))
 		} else {
 			itemResult.Status = "success"
+			if opnGroup.Member != nil {
+				membership.noteGroupWritten(groupPayload.Name, *opnGroup.Member)
+			}
 		}
 
 		results = append(results, itemResult)
@@ -2110,11 +2248,23 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 	}
 
 	// Refresh GID lookup after group changes
-	allGroups, _ = client.ListAllGroups(ctx)
-	gidLookup = opnapi.BuildGIDLookup(allGroups)
-	groupUUIDLookup = opnapi.BuildGroupUUIDLookup(allGroups)
+	// A listing that fails keeps the lookups in hand: an empty one would post
+	// every user of phase 3 with no groups at all. A group this sync created is
+	// then missing from it, and a user that names one is not written.
+	if refreshed, err := client.ListAllGroups(ctx); err == nil {
+		allGroups = refreshed
+		gidLookup = opnapi.BuildGIDLookup(allGroups)
+		groupUUIDLookup = opnapi.BuildGroupUUIDLookup(allGroups)
+	} else {
+		log.Warnw("SYNC_API: could not list the groups again after writing them", "error", err)
+	}
 
-	// Phase 3: Create/Update users (after groups exist)
+	// Phase 3: Create/Update users (after groups exist). A user whose row
+	// already holds what its write would send is not written again (#195):
+	// phase 2 keeps the sync's own users where they are in each group, so the
+	// rows listed before it still show their memberships. A row is compared
+	// once, so a second USER of the same name always writes.
+	userRows := rowsByName(allUsers)
 	for _, userPayload := range applyUsers {
 		existingUUID, exists := userUUIDLookup[userPayload.Name]
 
@@ -2145,8 +2295,28 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 		action := "created"
 		var syncErr error
 
-		// Convert to OPNsense format (resolves group names to GIDs)
-		opnUser := opnapi.ConvertAPIToUser(userPayload, userPayload.Templates, gidLookup)
+		// The user's full group list is posted, so every name must resolve: a
+		// partial list would take the user out of the groups left out of it.
+		convertPayload := userPayload
+		convertPayload.Groups = membership.userGroups(userPayload)
+		if _, missing := opnapi.ResolveGroupNamesToGIDs(convertPayload.Groups, gidLookup); len(missing) > 0 {
+			msg := fmt.Sprintf("User %s: group %s has no gid on the device after this sync's group changes; the user was not changed",
+				userPayload.Name, strings.Join(missing, ", "))
+			results = append(results, SyncAPIItemResult{Type: "user", Name: userPayload.Name, Action: "skipped", Status: "error", Code: userGroupUnresolvedCode, Error: msg})
+			errors = append(errors, msg)
+			membership.noteUserNotWritten(userPayload.Name)
+			continue
+		}
+		for _, group := range membership.userHeldBack(userPayload) {
+			msg := authDeferredMessage("group member", userPayload.Name)
+			log.Warnw("SYNC_API: deferred a new GROUP member pending AUTH exclusion coverage", "group", group, "member", userPayload.Name)
+			results = append(results, SyncAPIItemResult{
+				Type: "group_member", Name: group + "/" + userPayload.Name, Action: "deferred", Status: "blocked",
+				Code: authCodeUserDeferredExclusionStale, Error: msg,
+			})
+			errors = append(errors, msg)
+		}
+		opnUser := opnapi.ConvertAPIToUser(convertPayload, userPayload.Templates, gidLookup)
 
 		if exists {
 			action = "updated"
@@ -2154,7 +2324,13 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 			if userPayload.Password == "" {
 				opnUser.Password = ""
 			}
-			syncErr = client.SetUser(ctx, existingUUID, opnUser)
+			row, compared := userRows[userPayload.Name]
+			delete(userRows, userPayload.Name)
+			if compared && !opnapi.UserExpired(row, time.Now()) && opnapi.UserRowHolds(opnUser, row) {
+				action = "unchanged"
+			} else {
+				syncErr = client.SetUser(ctx, existingUUID, opnUser)
+			}
 		} else {
 			// Password required for new users
 			if opnUser.Password == "" {
@@ -2178,6 +2354,7 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 			itemResult.Status = "error"
 			itemResult.Error = syncErr.Error()
 			errors = append(errors, fmt.Sprintf("User %s: %v", userPayload.Name, syncErr))
+			membership.noteUserNotWritten(userPayload.Name)
 		} else {
 			itemResult.Status = "success"
 		}
@@ -2186,23 +2363,32 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 	}
 
 	// Refresh UID lookup after user changes
-	allUsers, _ = client.ListAllUsers(ctx)
-	uidLookup = opnapi.BuildUIDLookup(allUsers)
-	userUUIDLookup = opnapi.BuildUserUUIDLookup(allUsers)
-	managedUsers = opnapi.FilterManagedUsers(allUsers)
+	// A listing that fails keeps what is in hand, and the member writes below
+	// are skipped: they would leave out every user this sync created, whose own
+	// writes already put them in their groups.
+	usersListed := false
+	if refreshed, err := client.ListAllUsers(ctx); err == nil {
+		allUsers = refreshed
+		uidLookup = opnapi.BuildUIDLookup(allUsers)
+		userUUIDLookup = opnapi.BuildUserUUIDLookup(allUsers)
+		managedUsers = opnapi.FilterManagedUsers(allUsers)
+		usersListed = true
+	} else {
+		// The orphan sweep below then has no rows to act on, as it never
+		// decides from rows read before the writes.
+		managedUsers = nil
+		msg := fmt.Sprintf("Could not list the users again after writing them, so the groups' member lists were not rewritten and no orphan user was removed: %v", err)
+		log.Warnw("SYNC_API: " + msg)
+		results = append(results, SyncAPIItemResult{Type: "user_discovery", Name: "list_users", Action: "rediscover", Status: "error", Error: msg})
+		errors = append(errors, msg)
+	}
 
 	// Phase 4: Update groups with member UIDs (now that users exist). Uses
 	// applyGroups, not groups — a rejected group's full priv/description
 	// must not get re-pushed here under cover of "just updating members".
-	for _, groupPayload := range applyGroups {
-		if groupPayload.ExternalMembers || len(groupPayload.Members) == 0 {
+	for _, groupPayload := range phase4Groups(applyGroups, usersListed) {
+		if groupPayload.ExternalMembers {
 			// External groups never send `member`; nothing else to update.
-			// Known residual: a member-managed group with zero resolvable
-			// Members (e.g. an unscoped hand-made AUTH_SERVER's memberOf
-			// sync clearing it) hits this same branch and skips the update
-			// too, so it can carry the identical empty-token/stale-uid
-			// artifact updateExternalGroup repairs, unrepaired. Out of
-			// scope here; not a regression from this fix.
 			continue
 		}
 
@@ -2211,20 +2397,21 @@ func executeSyncUsersGroupsWithPolicy(ctx context.Context, client *opnapi.Client
 			continue // Group creation failed, skip
 		}
 
-		// Same stale-exclusion deferral filter as Phase 2, against the same pre-sync
-		// liveGroupMembers baseline — deterministic, so a name Phase 2
-		// already withheld (and reported) is withheld again here without
-		// a second "deferred" result. This is the phase that would
-		// otherwise re-add it: Phase 3 may have just created the very
-		// user this member name refers to, making it newly resolvable.
+		// The same member list as Phase 2, now that the users this sync
+		// created resolve; a name Phase 2 withheld (and reported) is withheld
+		// again here, against the same pre-sync baseline, without a second
+		// "deferred" result.
 		convertPayload := groupPayload
-		convertPayload.Members, _ = filterDeferredGroupMembers(groupPayload, liveGroupMembers[groupPayload.Name], auth)
-		if len(convertPayload.Members) == 0 {
-			continue
-		}
+		convertPayload.Members = membership.groupMembers(groupPayload, false)
 
 		// Convert with updated UID lookup
 		opnGroup := opnapi.ConvertAPIToGroup(convertPayload, groupPayload.Templates, uidLookup)
+		// Phase 3's writes put each user where userGroups says, which is
+		// where groupMembers puts it too, so a list equal to phase 2's needs
+		// no second write.
+		if membership.alreadySent(groupPayload.Name, opnGroup.Member) {
+			continue
+		}
 
 		if err := client.SetGroup(ctx, existingUUID, opnGroup); err != nil {
 			// This member-update error needs its own result item, distinct
@@ -2976,6 +3163,23 @@ func executeSyncUnbound(
 		"managed_acls", len(currentACLs),
 	)
 
+	// The managed rows by uuid, to skip a write that would change nothing. A row
+	// is compared once: a second snippet with the same uuid always writes, so
+	// the last one wins as it would without the comparison.
+	managedRows := func(rows []map[string]interface{}) map[string]map[string]interface{} {
+		byUUID := make(map[string]map[string]interface{}, len(rows))
+		for _, row := range rows {
+			if uuid, ok := row["uuid"].(string); ok {
+				byUUID[uuid] = row
+			}
+		}
+		return byUUID
+	}
+	hostOverrideRows := managedRows(currentHostOverrides)
+	forwardRows := managedRows(currentForwards)
+	hostAliasRows := managedRows(currentHostAliases)
+	aclRows := managedRows(currentACLs)
+
 	// Build maps of current UUIDs
 	currentHostOverrideUUIDs := make(map[string]bool)
 	for _, ho := range currentHostOverrides {
@@ -3034,7 +3238,14 @@ func executeSyncUnbound(
 		}
 
 		opnOverride := opnapi.ConvertToOPNHostOverride(ho)
-		err := client.SetHostOverride(ctx, ho.UUID, opnOverride)
+		var err error
+		row, ok := hostOverrideRows[ho.UUID]
+		delete(hostOverrideRows, ho.UUID)
+		if ok && opnapi.RowHolds(opnOverride, row) {
+			action = "unchanged"
+		} else {
+			err = client.SetHostOverride(ctx, ho.UUID, opnOverride)
+		}
 
 		itemResult := SyncAPIItemResult{
 			Type:   "host_override",
@@ -3062,7 +3273,14 @@ func executeSyncUnbound(
 		}
 
 		opnForward := opnapi.ConvertToOPNDomainForward(fwd)
-		err := client.SetForward(ctx, fwd.UUID, opnForward)
+		var err error
+		row, ok := forwardRows[fwd.UUID]
+		delete(forwardRows, fwd.UUID)
+		if ok && opnapi.RowHolds(opnForward, row) {
+			action = "unchanged"
+		} else {
+			err = client.SetForward(ctx, fwd.UUID, opnForward)
+		}
 
 		itemResult := SyncAPIItemResult{
 			Type:   "domain_forward",
@@ -3090,7 +3308,14 @@ func executeSyncUnbound(
 		}
 
 		opnACL := opnapi.ConvertToOPNACL(acl)
-		err := client.SetACL(ctx, acl.UUID, opnACL)
+		var err error
+		row, ok := aclRows[acl.UUID]
+		delete(aclRows, acl.UUID)
+		if ok && opnapi.RowHolds(opnACL, row) {
+			action = "unchanged"
+		} else {
+			err = client.SetACL(ctx, acl.UUID, opnACL)
+		}
 
 		itemResult := SyncAPIItemResult{
 			Type:   "unbound_acl",
@@ -3146,7 +3371,14 @@ func executeSyncUnbound(
 		}
 
 		opnAlias := opnapi.ConvertToOPNHostAlias(ha, parentUUID)
-		err := client.SetHostAlias(ctx, ha.UUID, opnAlias)
+		var err error
+		row, ok := hostAliasRows[ha.UUID]
+		delete(hostAliasRows, ha.UUID)
+		if ok && opnapi.RowHolds(opnAlias, row) {
+			action = "unchanged"
+		} else {
+			err = client.SetHostAlias(ctx, ha.UUID, opnAlias)
+		}
 
 		itemResult := SyncAPIItemResult{
 			Type:   "host_alias",

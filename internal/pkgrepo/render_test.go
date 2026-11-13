@@ -1,6 +1,7 @@
 package pkgrepo
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -10,7 +11,7 @@ func fingerprintRepo() Repository {
 		Name:     "mimugmail",
 		URL:      "https://opn-repo.routerperformance.net/repo/${ABI}",
 		Priority: 5,
-		Enabled:  true,
+		Enabled:  enabledAs(true),
 		Signature: Signature{
 			Type: SignatureFingerprints,
 			Fingerprints: []Fingerprint{
@@ -60,7 +61,7 @@ func TestEnabledRendersAsYesNo(t *testing.T) {
 	}
 
 	r := fingerprintRepo()
-	r.Enabled = false
+	r.Enabled = enabledAs(false)
 	off := string(Render(r))
 	if !strings.Contains(off, "enabled: no,") {
 		t.Errorf("enabled=false should render `enabled: no`, got:\n%s", off)
@@ -134,5 +135,27 @@ func TestManagedPathsFollowTheNamespace(t *testing.T) {
 	}
 	if got := PubkeyPath("mimugmail"); got != "/usr/local/etc/pkg/keys/netdefense-mimugmail.pub" {
 		t.Errorf("PubkeyPath = %q", got)
+	}
+}
+
+func enabledAs(b bool) *bool { return &b }
+
+// A repository the snippet leaves enabled out of is enabled, as pkg.conf(5)
+// has it (the operator's rule, 2026-11-12).
+func TestRender_ALeftOutEnabledIsOn(t *testing.T) {
+	r := Repository{Name: "corp", URL: "https://pkg.example/corp", Priority: 10, Signature: Signature{Type: SignatureNone}}
+	if body := string(Render(r)); !strings.Contains(body, "enabled: yes,") {
+		t.Errorf("a left-out enabled rendered as:\n%s", body)
+	}
+	var parsed Repository
+	if err := json.Unmarshal([]byte(`{"name":"corp","url":"https://pkg.example/corp","priority":10,"signature":{"type":"none"}}`), &parsed); err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.IsEnabled() {
+		t.Error("a repository without enabled read as disabled")
+	}
+	var off Repository
+	if err := json.Unmarshal([]byte(`{"name":"corp","enabled":false}`), &off); err != nil || off.IsEnabled() {
+		t.Errorf("an explicit false: %v, enabled %v", err, off.IsEnabled())
 	}
 }

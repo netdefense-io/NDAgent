@@ -21,10 +21,11 @@ import (
 const opnsenseShell = "/usr/local/sbin/opnsense-shell"
 
 // outputDrainTimeout bounds how long run() waits for the PTY-output->client
-// copy to flush the shell's final bytes before sending the stream CLOSE. The
-// drain normally completes in microseconds once the PTY master is closed; the
-// timeout only guards against a wedged relay write so the session can still
-// tear down.
+// copy to flush the shell's final bytes, before it closes the PTY master and
+// sends the stream CLOSE. The copy's read ends by itself within milliseconds
+// once the shell has exited (measured on FreeBSD 15.1); the bound covers a job
+// that outlived the shell and still holds the terminal, and a wedged relay
+// write, so the session can still tear down.
 const outputDrainTimeout = 5 * time.Second
 
 // Control message types for shell-ctl stream
@@ -308,23 +309,23 @@ func (s *ShellSession) run() error {
 		"error", err,
 	)
 
-	// Close the PTY master now that the process is gone. This unblocks the
-	// output copy goroutine (its Read on s.ptmx returns EOF/err) so outputDone
-	// fires, and it unblocks the input copy goroutine's Write on s.ptmx. The
-	// deferred s.ptmx.Close() would also do this, but doing it explicitly here
-	// lets us wait for the output drain below before returning.
-	s.ptmx.Close()
-
-	// Wait for the output copy to finish flushing the shell's final bytes to the
-	// client BEFORE we send the stream CLOSE. Bounded so a wedged relay write
-	// can't hang the session forever (the deferred ptmx.Close + stream Close
-	// still run on timeout).
+	// Wait for the output copy to read and flush everything the shell wrote
+	// BEFORE closing the PTY master and sending the stream CLOSE: its Read of
+	// the master ends by itself once the shell's side of the terminal is closed
+	// and drained, and closing the master first throws away what the copy has
+	// not read yet (a shell that prints and exits at once lost all of it,
+	// NDAgent-go#130). Bounded, for a job that outlived the shell and still
+	// holds the terminal, or a wedged relay write.
 	select {
 	case <-outputDone:
 		s.log.Debugw("Shell output drained to client")
 	case <-time.After(outputDrainTimeout):
 		s.log.Warnw("Timed out draining shell output before close")
 	}
+
+	// Closing the master unblocks the input copy's Write, and the output copy
+	// if the wait above timed out.
+	s.ptmx.Close()
 
 	// Emit the CLOSE frame for both streams UNCONDITIONALLY via SendCloseFrame
 	// (not Close()). On a fast logout the client may have already closed these

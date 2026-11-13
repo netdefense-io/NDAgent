@@ -1631,3 +1631,42 @@ func TestExecuteSyncAPI_UnconfirmedSecondMoveNamesTheFirst(t *testing.T) {
 		t.Errorf("the apply was not withheld: %v", device.writes)
 	}
 }
+
+// Two local rules tied at one sequence move together; when the one OPNsense
+// ranks first holds nothing but the defaults, it cannot move, and that is
+// found before any write (#129). Its tie-mate is written once, to above the
+// PREPEND rule, instead of being moved with it first and pushed again after.
+func TestExecuteSyncAPI_AStuckTieMateIsFoundBeforeAnyWrite(t *testing.T) {
+	const passAll = "0c0c0c0c-0000-4000-8000-0000000000d1"
+	const named = "0c0c0c0c-0000-4000-8000-0000000000d2"
+	stuck := map[string]interface{}{"uuid": passAll}
+	for name, value := range ruleModel26(t).Values() {
+		stuck[name] = value
+	}
+	stuck["sequence"] = "1"
+	other := map[string]interface{}{}
+	for name, value := range stuck {
+		other[name] = value
+	}
+	other["uuid"], other["description"] = named, "Allow the office"
+	device := newFakeRuleDevice(t, ruleTemplate(t), []map[string]interface{}{stuck, other})
+	rule := desiredRule(t, "floating", RulePositionPrepend, 100, `{"uuid":"`+ruleA+`","action":"block","interface":"","description":"Block telnet"}`)
+
+	executeSyncAPI(context.Background(), device.client, nil, []APIRulePayload{rule})
+
+	if w := device.writesTo(passAll); len(w) != 0 {
+		t.Errorf("the rule of defaults was written: %v", w)
+	}
+	if w := device.writesTo(named); len(w) != 1 {
+		t.Errorf("writes to its tie-mate = %v, want one", w)
+	}
+	if got := []int{device.sequenceOf(passAll), device.sequenceOf(ruleA), device.sequenceOf(named)}; got[0] != 1 || got[1] <= got[0] || got[2] <= got[1] {
+		t.Errorf("sequences (defaults, PREPEND, tie-mate) = %v, want them in that order with the rule of defaults still at 1", got)
+	}
+
+	sets := device.setCount()
+	executeSyncAPI(context.Background(), device.client, nil, []APIRulePayload{rule})
+	if device.setCount() != sets {
+		t.Errorf("the next SYNC wrote %d rule(s): %v", device.setCount()-sets, device.writes)
+	}
+}

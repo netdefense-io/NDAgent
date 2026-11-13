@@ -1,6 +1,7 @@
 package pathfinder
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
@@ -26,7 +27,22 @@ const (
 	keyLines     = "a2V5LVNFQ1JFVEtFWUlE|$6$SECRETSALT$SECRETCRYPTHASH\n"
 	pemSecret    = "-----BEGIN PRIVATE KEY-----\\nSECRETPEMSECRETPEMSECRETPEM\\n-----END PRIVATE KEY-----\\n"
 	pemB64Secret = "LS0tLS1CRUdJTiBTRUNSRVQgUEVN"
+
+	// what an import before the one-section check kept: the certificate, or the
+	// signing request, and the private key pasted after it
+	certAndKey = "-----BEGIN CERTIFICATE-----\\nPUBLIC\\n-----END CERTIFICATE-----\\n-----BEGIN RSA PRIVATE KEY-----\\nSECRETAPPENDEDKEY\\n-----END RSA PRIVATE KEY-----\\n"
+	csrAndKey  = "-----BEGIN CERTIFICATE REQUEST-----\\nPUBLIC\\n-----END CERTIFICATE REQUEST-----\\n-----BEGIN ENCRYPTED PRIVATE KEY-----\\nSECRETAPPENDEDKEY\\n-----END ENCRYPTED PRIVATE KEY-----\\n"
 )
+
+var (
+	certAndKeyB64 = storedBase64(certAndKey)
+	csrAndKeyB64  = storedBase64(csrAndKey)
+)
+
+// storedBase64 is the base64 OPNsense stores of a PEM spelled with JSON escapes.
+func storedBase64(escaped string) string {
+	return base64.StdEncoding.EncodeToString([]byte(strings.ReplaceAll(escaped, `\n`, "\n")))
+}
 
 // scrubCases are the routes of the audit, spelled as the UI spells them.
 var scrubCases = []scrubCase{
@@ -206,6 +222,43 @@ var scrubCases = []scrubCase{
 		body:    `{"ca":{"descr":"Lab CA","prv":"` + pemB64Secret + `","prv_payload":"` + pemSecret + `"}}`,
 		secrets: []string{"SECRETPEM", pemB64Secret},
 		keeps:   []string{`"descr":"Lab CA"`},
+	},
+	// a private key stored after the certificate or the signing request
+	{
+		method: "GET", target: "/api/trust/ca/get/ca2",
+		body:    `{"ca":{"descr":"Imported CA","crt":"` + certAndKeyB64 + `","crt_payload":"` + certAndKey + `","prv":"","prv_payload":"","commonname":"Imported CA"}}`,
+		secrets: []string{"SECRETAPPENDEDKEY", certAndKeyB64},
+		keeps:   []string{`"descr":"Imported CA"`, `"commonname":"Imported CA"`, `"crt":""`, `"crt_payload":""`},
+	},
+	{
+		method: "GET", target: "/api/trust/cert/get/c2",
+		body:    `{"cert":{"descr":"Pending","csr":"` + csrAndKeyB64 + `","csr_payload":"` + csrAndKey + `","crt":"","crt_payload":"","action":{"sign_csr":{"value":"Sign","selected":1}}}}`,
+		secrets: []string{"SECRETAPPENDEDKEY", csrAndKeyB64},
+		keeps:   []string{`"descr":"Pending"`, `"sign_csr":{"value":"Sign","selected":1}`, `"csr":""`, `"csr_payload":""`},
+	},
+	{
+		method: "POST", target: "/api/trust/cert/generate_file/c1/crt",
+		body:    `{"status":"ok","descr":"Web GUI","payload":"` + certAndKey + `"}`,
+		secrets: []string{"SECRETAPPENDEDKEY"},
+		keeps:   []string{`"status":"ok"`, `"descr":"Web GUI"`, `"payload":""`},
+	},
+	{
+		method: "POST", target: "/api/trust/cert/generate_file/c2/csr",
+		body:    `{"status":"ok","descr":"Pending","payload":"` + csrAndKey + `"}`,
+		secrets: []string{"SECRETAPPENDEDKEY"},
+		keeps:   []string{`"status":"ok"`, `"payload":""`},
+	},
+	{
+		method: "GET", target: "/api/trust/crl/get/5f1e1a2b3c4d6",
+		body:    `{"crl":{"caref":"5f1e1a2b3c4d6","descr":"Lab CRL","serial":"3","lifetime":"9999","text":"-----BEGIN X509 CRL-----\nPUBLIC\n-----END X509 CRL-----\n-----BEGIN PRIVATE KEY-----\nSECRETAPPENDEDKEY\n-----END PRIVATE KEY-----\n","crlmethod":{"internal":{"value":"Internal","selected":"0"},"existing":{"value":"Import existing","selected":"1"}},"revoked_reason_0":{"5f1e1a2b3c4d7":{"value":"Web GUI","selected":"0"}}}}`,
+		secrets: []string{"SECRETAPPENDEDKEY"},
+		keeps:   []string{`"descr":"Lab CRL"`, `"text":""`, `"existing":{"value":"Import existing","selected":"1"}`, `"revoked_reason_0":{"5f1e1a2b3c4d7":{"value":"Web GUI","selected":"0"}}`},
+	},
+	{
+		method: "POST", target: "/api/trust/ca/generate_file/ca2",
+		body:    `{"status":"ok","descr":"Imported CA","payload":"` + certAndKey + `"}`,
+		secrets: []string{"SECRETAPPENDEDKEY"},
+		keeps:   []string{`"status":"ok"`, `"payload":""`},
 	},
 	// WireGuard
 	{
@@ -435,6 +488,10 @@ func TestScrubRules_ASecretFreeResponseComesBackIdentical(t *testing.T) {
 	for _, tt := range []struct{ method, target, body string }{
 		{"GET", "/api/trust/cert/raw_dump/c1", "{\n    \"text\": \"Certificate:\\n    Data:\\n        Version: 3 (0x2)\",\n    \"issuer\": {\"CN\": \"Lab CA\"}\n}"},
 		{"GET", "/api/trust/cert/ca_list", `{"rows":[{"caref":"5f1e","descr":"Lab CA"}],"count":1}`},
+		{"POST", "/api/trust/cert/generate_file/c1/crt", `{"status":"ok","descr":"Web GUI","payload":"-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n"}`},
+		{"GET", "/api/trust/crl/get/5f1e1a2b3c4d6", `{"crl":{"caref":"5f1e1a2b3c4d6","descr":"Lab CRL","serial":"3","lifetime":"9999","text":"-----BEGIN X509 CRL-----\nPUBLIC\n-----END X509 CRL-----\n","crlmethod":{"internal":{"value":"Internal","selected":"0"},"existing":{"value":"Import existing","selected":"1"}}}}`},
+		{"GET", "/api/trust/cert/get/c3", `{"cert":{"descr":"Pending","csr":"` + storedBase64(`-----BEGIN CERTIFICATE REQUEST-----\nPUBLIC\n-----END CERTIFICATE REQUEST-----\n`) + `","csr_payload":"-----BEGIN CERTIFICATE REQUEST-----\nPUBLIC\n-----END CERTIFICATE REQUEST-----\n","prv":"","prv_payload":""}}`},
+		{"POST", "/api/trust/ca/search", `{"rows":[{"uuid":"ca1","descr":"Lab CA","crt":"` + storedBase64(`-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n`) + `","crt_payload":"-----BEGIN CERTIFICATE-----\nPUBLIC\n-----END CERTIFICATE-----\n","prv":"","prv_payload":""}],"rowCount":1,"total":1,"current":1}`},
 		{"POST", "/api/firewall/alias/list_categories", `{"rows":[{"uuid":"x","name":"servers","color":"ff0000"}]}`},
 		{"GET", "/api/wireguard/client/list_servers", `{"rows":[{"uuid":"s1","name":"wg0"}],"status":"ok"}`},
 		{"POST", "/api/ids/settings/search_installed_rules", `{"rows":[{"sid":"2100498","msg":"GPL ATTACK_RESPONSE id check returned root","value":"kept"}],"total":1}`},

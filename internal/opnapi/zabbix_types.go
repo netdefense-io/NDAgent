@@ -148,8 +148,10 @@ type ToggleZabbixResponse struct {
 // ============================================================================
 
 // APIZabbixSettingsPayload is the portable snippet shape for the Zabbix
-// settings singleton. NDAgent applies it wholesale to /settings/set — no
-// field-level merging with non-managed defaults.
+// settings singleton. BuildZabbixSettings turns it into the full tree
+// /settings/set takes: a field the snippet leaves out takes the plugin's
+// fresh-install value. EnableActiveChecks is a pointer because that value is
+// on.
 type APIZabbixSettingsPayload struct {
 	Hostname             string   `json:"hostname"`
 	Enabled              bool     `json:"enabled"`
@@ -167,7 +169,7 @@ type APIZabbixSettingsPayload struct {
 	BufferSize           string   `json:"buffer_size,omitempty"`
 	MaxLinesPerSecond    string   `json:"max_lines_per_second,omitempty"`
 	Timeout              string   `json:"timeout,omitempty"`
-	EnableActiveChecks   bool     `json:"enable_active_checks,omitempty"`
+	EnableActiveChecks   *bool    `json:"enable_active_checks,omitempty"`
 	ActiveCheckServers   []string `json:"active_check_servers,omitempty"`
 	RefreshActiveChecks  string   `json:"refresh_active_checks,omitempty"`
 	EnableRemoteCommands bool     `json:"enable_remote_commands,omitempty"`
@@ -180,9 +182,10 @@ type APIZabbixSettingsPayload struct {
 
 // APIZabbixUserParameterPayload is the portable snippet shape for a Zabbix
 // UserParameter. Key MUST start with NDAgentZabbixKeyPrefix for the entry to
-// be considered managed.
+// be considered managed. Enabled is a pointer because an entry that leaves it
+// out takes the model's default, on.
 type APIZabbixUserParameterPayload struct {
-	Enabled      bool     `json:"enabled"`
+	Enabled      *bool    `json:"enabled,omitempty"`
 	Key          string   `json:"key"`
 	Command      string   `json:"command"`
 	AcceptParams bool     `json:"accept_params,omitempty"`
@@ -191,9 +194,10 @@ type APIZabbixUserParameterPayload struct {
 
 // APIZabbixAliasPayload is the portable snippet shape for a Zabbix item-key
 // alias. Key MUST start with NDAgentZabbixKeyPrefix and must not contain `.`
-// (OPNsense validator constraint).
+// (OPNsense validator constraint). Enabled is a pointer, as for a
+// UserParameter.
 type APIZabbixAliasPayload struct {
-	Enabled      bool     `json:"enabled"`
+	Enabled      *bool    `json:"enabled,omitempty"`
 	Key          string   `json:"key"`
 	SourceKey    string   `json:"source_key"`
 	AcceptParams bool     `json:"accept_params,omitempty"`

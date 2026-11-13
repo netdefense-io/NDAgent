@@ -50,8 +50,8 @@ func TestParseVPNNetworks(t *testing.T) {
 	if net.Interface.Address != "10.200.0.1/24" {
 		t.Errorf("Address = %s, want 10.200.0.1/24", net.Interface.Address)
 	}
-	if net.Interface.ListenPort != 51820 {
-		t.Errorf("ListenPort = %d, want 51820", net.Interface.ListenPort)
+	if net.Interface.ListenPort == nil || *net.Interface.ListenPort != 51820 {
+		t.Errorf("ListenPort = %v, want 51820", net.Interface.ListenPort)
 	}
 	if net.Interface.MTU == nil || *net.Interface.MTU != 1420 {
 		t.Errorf("MTU = %v, want 1420", net.Interface.MTU)

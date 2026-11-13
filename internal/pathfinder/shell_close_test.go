@@ -1,6 +1,7 @@
 package pathfinder
 
 import (
+	"bytes"
 	"sync"
 	"testing"
 	"time"
@@ -13,6 +14,7 @@ import (
 // flushed and a single CLOSE frame is reliably the final frame on the stream.
 type shellFrameCapture struct {
 	mu      sync.Mutex
+	data    []byte
 	dataLen int  // total DATA bytes seen on the shell stream
 	closes  int  // number of CLOSE frames seen on the shell stream
 	lastWas byte // type of the last frame on the shell stream
@@ -42,6 +44,7 @@ func newShellTestSession(t *testing.T, shellCmd string) (*ShellSession, *shellFr
 		switch frame.Type {
 		case FrameTypeData:
 			cap.dataLen += len(frame.Data)
+			cap.data = append(cap.data, frame.Data...)
 		case FrameTypeClose:
 			cap.closes++
 		}
@@ -86,10 +89,13 @@ func TestShellRun_ImmediateExit_FlushesOutputThenSingleClose(t *testing.T) {
 	// Drive a single command then EOF so the PTY-attached shell prints output
 	// and exits promptly — the immediate-logout window.
 	go func() {
-		sess.shellStream.readBuf <- []byte("printf 'LOGOUT-BANNER\\n'; exit\n")
+		// The banner is joined by the shell, so the PTY's echo of the input line
+		// (which holds "LOGOUT-%s" and "BANNER" apart) cannot pass for it.
+		sess.shellStream.readBuf <- []byte("printf 'LOGOUT-%s\\n' BANNER; exit\n")
 	}()
 
 	done := make(chan struct{})
+	start := time.Now()
 	go func() {
 		_ = sess.run()
 		close(done)
@@ -99,6 +105,12 @@ func TestShellRun_ImmediateExit_FlushesOutputThenSingleClose(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("shell session did not end within 10s")
+	}
+	// The output copy's read ends by itself once the shell has exited; a
+	// session that waits out the drain bound means it no longer does, and every
+	// logout would take that long.
+	if took := time.Since(start); took >= outputDrainTimeout/2 {
+		t.Errorf("the session took %v to end, near the %v drain bound", took, outputDrainTimeout)
 	}
 
 	cap.mu.Lock()
@@ -110,8 +122,8 @@ func TestShellRun_ImmediateExit_FlushesOutputThenSingleClose(t *testing.T) {
 	if cap.lastWas != FrameTypeClose {
 		t.Fatalf("expected CLOSE to be the last frame on the shell stream, last was type 0x%02x", cap.lastWas)
 	}
-	if cap.dataLen == 0 {
-		t.Fatal("expected the shell's banner output to be flushed as DATA before CLOSE, got 0 DATA bytes")
+	if !bytes.Contains(cap.data, []byte("LOGOUT-BANNER")) {
+		t.Fatalf("expected the shell's banner to be flushed as DATA before CLOSE, got %q", cap.data)
 	}
 }
 

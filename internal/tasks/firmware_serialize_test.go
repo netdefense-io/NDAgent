@@ -737,6 +737,13 @@ func TestHandleFirmwareUpgrade_AnAgentStoppedByItsOwnUpgradeLeavesBothRowsDistin
 
 	agent, stopAgent := context.WithCancel(context.Background())
 	defer stopAgent()
+	// A context closes its Done channel before it cancels its children, so a
+	// waiting task can be handed the slot after the agent's context ended
+	// (#143). Many children of the agent's context widen that window.
+	for i := 0; i < 30000; i++ {
+		_, cancel := context.WithCancel(agent)
+		defer cancel()
+	}
 	noReboot := network.Command{TaskID: "98", TaskType: "FIRMWARE_UPGRADE",
 		Payload: map[string]interface{}{"mode": "minor", "reboot": false, "check_first": false}}
 	weekly := network.Command{TaskID: "99", TaskType: "FIRMWARE_UPGRADE",

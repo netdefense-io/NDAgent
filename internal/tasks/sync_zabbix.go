@@ -26,8 +26,7 @@ import (
 // parseAPIZabbixSettings extracts the Zabbix settings singleton from the
 // snippets array. Returns nil if no ZABBIX_SETTINGS snippet is present.
 // If multiple ZABBIX_SETTINGS arrive (admin/template misconfiguration), the
-// last one wins — same precedence the underlying /settings/set wholesale
-// replace would produce if we applied them all.
+// last one wins.
 func parseAPIZabbixSettings(payload map[string]interface{}) (*opnapi.APIZabbixSettingsPayload, error) {
 	snippetsRaw, ok := payload["snippets"]
 	if !ok {
@@ -237,16 +236,10 @@ func executeSyncZabbix(
 		}
 	}
 
-	// Phase 1: Settings (singleton, replace-in-full)
-	//
-	// OPNsense's settings/set rejects payloads where any Required field is
-	// empty — even though we POST the whole tree on every apply, a sparse
-	// snippet (admin only specified the fields they want to change) would
-	// fail validation on tuning.* and main.logFileSize. To keep
-	// wholesale-replace semantics ergonomic, we fetch the device's current
-	// state first and use it as a baseline; any non-empty snippet field
-	// overrides. Net effect: the snippet's value always wins; omitted
-	// fields keep whatever the device currently has.
+	// Phase 1: Settings (singleton, replace-in-full). The body is the plugin's
+	// defaults with the snippet's fields over them (BuildZabbixSettings), so
+	// a field the snippet leaves out takes its default, and none of the
+	// Required fields the plugin refuses empty is ever sent empty.
 	if settings != nil && rejectDangerous {
 		if fields := opnapi.DangerousZabbixSettingsFields(*settings); len(fields) > 0 {
 			log.Warnw("SYNC_API: rejected ZABBIX_SETTINGS snippet carrying dangerous field(s) (reject_dangerous_snippets enabled)",
@@ -266,34 +259,31 @@ func executeSyncZabbix(
 		}
 	}
 	if settings != nil {
-		currentRaw, err := client.GetZabbixSettings(ctx)
-		if err != nil {
-			itemResult := SyncAPIItemResult{
-				Type:   "zabbix_settings",
-				Name:   settings.Hostname,
-				Action: "skipped",
-				Status: "error",
-				Error:  fmt.Sprintf("failed to read current settings: %v", err),
-			}
-			results = append(results, itemResult)
-			errors = append(errors, fmt.Sprintf("Zabbix settings (GET): %v", err))
-		} else {
-			body := opnapi.MergeZabbixSettings(*settings, currentRaw)
-			err := client.SetZabbixSettings(ctx, body)
-			itemResult := SyncAPIItemResult{
-				Type:   "zabbix_settings",
-				Name:   settings.Hostname,
-				Action: "updated",
-			}
-			if err != nil {
-				itemResult.Status = "error"
-				itemResult.Error = err.Error()
-				errors = append(errors, fmt.Sprintf("Zabbix settings: %v", err))
-			} else {
-				itemResult.Status = "success"
-			}
-			results = append(results, itemResult)
+		body := opnapi.BuildZabbixSettings(*settings)
+		itemResult := SyncAPIItemResult{
+			Type:   "zabbix_settings",
+			Name:   settings.Hostname,
+			Action: "updated",
 		}
+		// A settings read that fails only costs the write it would have saved.
+		var err error
+		live, getErr := client.GetZabbixSettings(ctx)
+		if getErr != nil {
+			log.Debugw("SYNC_API: could not read the Zabbix settings to compare; writing them", "error", getErr)
+		}
+		if getErr == nil && opnapi.ZabbixSettingsMatch(body, live) {
+			itemResult.Action = "unchanged"
+		} else {
+			err = client.SetZabbixSettings(ctx, body)
+		}
+		if err != nil {
+			itemResult.Status = "error"
+			itemResult.Error = err.Error()
+			errors = append(errors, fmt.Sprintf("Zabbix settings: %v", err))
+		} else {
+			itemResult.Status = "success"
+		}
+		results = append(results, itemResult)
 	}
 
 	// Phase 2-3: UserParameters.
@@ -313,6 +303,9 @@ func executeSyncZabbix(
 		}
 
 		desiredKeys := make(map[string]bool, len(userParams))
+		// A row is compared once: a second snippet with the same key always
+		// writes, so the last one wins as it would without the comparison.
+		compared := make(map[string]bool, len(userParams))
 		for _, up := range userParams {
 			if err := validateZabbixManagedKey(up.Key); err != nil {
 				itemResult := SyncAPIItemResult{
@@ -354,7 +347,12 @@ func executeSyncZabbix(
 			if existing, ok := currentByKey[up.Key]; ok {
 				action = "updated"
 				uuid, _ = existing["uuid"].(string)
-				applyErr = client.SetZabbixUserParameter(ctx, uuid, wire)
+				if !compared[up.Key] && opnapi.ZabbixUserParameterMatches(wire, existing) {
+					action = "unchanged"
+				} else {
+					applyErr = client.SetZabbixUserParameter(ctx, uuid, wire)
+				}
+				compared[up.Key] = true
 			} else {
 				uuid, applyErr = client.AddZabbixUserParameter(ctx, wire)
 			}
@@ -427,6 +425,7 @@ func executeSyncZabbix(
 		}
 
 		desiredKeys := make(map[string]bool, len(aliases))
+		compared := make(map[string]bool, len(aliases))
 		for _, a := range aliases {
 			if err := validateZabbixManagedKey(a.Key); err != nil {
 				itemResult := SyncAPIItemResult{
@@ -449,7 +448,12 @@ func executeSyncZabbix(
 			if existing, ok := currentByKey[a.Key]; ok {
 				action = "updated"
 				uuid, _ = existing["uuid"].(string)
-				applyErr = client.SetZabbixAlias(ctx, uuid, wire)
+				if !compared[a.Key] && opnapi.ZabbixAliasMatches(wire, existing) {
+					action = "unchanged"
+				} else {
+					applyErr = client.SetZabbixAlias(ctx, uuid, wire)
+				}
+				compared[a.Key] = true
 			} else {
 				uuid, applyErr = client.AddZabbixAlias(ctx, wire)
 			}
@@ -498,6 +502,9 @@ func executeSyncZabbix(
 	// syncs (no settings push, no creates, no updates, no deletes). A
 	// rejected element (Status "blocked") is not a device change, so a
 	// sync consisting only of rejections must not trigger a reconfigure.
+	// An element already as wanted ("unchanged") still reconfigures: a
+	// reconfigure that failed after an earlier write is only retried here,
+	// since nothing records that one is owed.
 	touched := false
 	for _, r := range results {
 		if r.Status == "success" {
@@ -531,7 +538,9 @@ func executeSyncZabbix(
 		}
 		switch r.Type {
 		case "zabbix_settings":
-			settingsApplied++
+			if r.Action == "updated" {
+				settingsApplied++
+			}
 		case "zabbix_userparameter":
 			switch r.Action {
 			case "created":

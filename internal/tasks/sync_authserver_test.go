@@ -1083,8 +1083,9 @@ func TestMapAuthResponseToResult_FacilityBeforeAfterAlwaysSet_AvailableOnlyOnRef
 // must say to remove the server from the login order first (an AUTH_ORDER
 // policy without it, OR a change made directly on the device — the
 // hand-edited-order case has no policy to rewrite), not merely list the
-// consumer. When reject_dangerous_snippets is on, NetDefense cannot rewrite
-// that order itself, so the message must also point at CONNECT (at
+// consumer. When reject_dangerous_snippets is on, NetDefense refuses every
+// order change, removals included (operator ruling, #196), so the message
+// must also say how to turn the gate off, and point at CONNECT (at
 // remote_access_policy=full) or a local edit — omitted when the gate is
 // off, since NetDefense CAN rewrite the order in that case. An ordinary
 // curated consumer (an OpenVPN instance's authmode, an XPath-ish label,
@@ -1105,6 +1106,9 @@ func TestAuthServerBlockedMessage_ConsumerReferencedWebadminRemedy(t *testing.T)
 	msgGated := authServerBlockedMessage(withWebadmin, "26.7", true)
 	if !strings.Contains(msgGated, "CONNECT") || !strings.Contains(msgGated, "remote_access_policy=full") {
 		t.Errorf("message = %q, want the CONNECT/local-edit qualifier when reject_dangerous_snippets is on", msgGated)
+	}
+	if !strings.Contains(msgGated, `turn on "Allow All Snippet Content" (reject_dangerous_snippets=false)`) {
+		t.Errorf("message = %q, want the gate's opt-out named when reject_dangerous_snippets is on", msgGated)
 	}
 
 	withoutWebadmin := authHelperServerResult{
@@ -1466,7 +1470,10 @@ func TestRunAuthServerDecommission_LeftoverMarkerFailsEvenWhenHelperReportsClean
 // -----------------------------------------------------------------
 
 func TestRunHelperSubprocess_NormalExitCapturesOutputAndExitCode(t *testing.T) {
-	stdout, exitCode, err := runHelperSubprocess("/bin/sh", []string{"-c", `cat; exit 7`}, []byte("hello-stdin"), time.Second, time.Second)
+	// A wide ceiling: this test is about a normal exit, and under a loaded test
+	// run starting the shell can take longer than a second, which a 1 s ceiling
+	// turned into a SIGTERM (exit -1, no output).
+	stdout, exitCode, err := runHelperSubprocess("/bin/sh", []string{"-c", `cat; exit 7`}, []byte("hello-stdin"), 30*time.Second, time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1674,5 +1681,31 @@ func TestExecuteSyncAuth_IncompleteReservedSetRefusesToStartHelper(t *testing.T)
 	}
 	if !out.Deferral.Active || !out.Deferral.Blanket {
 		t.Errorf("expected an active blanket deferral (markers exist, AUTH did not complete), got %+v", out.Deferral)
+	}
+}
+
+func TestParseAuthServerContent_ALeftOutMemberOfConstraintIsOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, key string
+		want      bool
+	}{
+		{"left out", ``, true},
+		{"null, read as left out", `,"ldap_sync_memberof_constraint":null`, true},
+		{"true", `,"ldap_sync_memberof_constraint":true`, true},
+		{"false", `,"ldap_sync_memberof_constraint":false`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, err := parseAuthServerContent(`{"name":"Corp AD","type":"ldap","host":"dc.example.com"` + tc.key + `}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if server.LdapSyncMemberofConstraint != tc.want {
+				t.Errorf("constraint %v, want %v", server.LdapSyncMemberofConstraint, tc.want)
+			}
+			fields, err := server.helperFields()
+			if err != nil || fields["ldap_sync_memberof_constraint"] != tc.want {
+				t.Errorf("helper field %v (%v), want %v", fields["ldap_sync_memberof_constraint"], err, tc.want)
+			}
+		})
 	}
 }

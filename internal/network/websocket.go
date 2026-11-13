@@ -647,8 +647,32 @@ func (w *WebSocketClient) runHealthMonitor(ctx context.Context) error {
 	}
 }
 
+// A message's write, which holds the connection's lock, gets sendWriteFloor
+// plus the time it takes at sendWriteMinRate: a 1 MiB frame (the broker's
+// limit) gets about 2.5 minutes, enough for a 64 kbit/s link. A write that
+// cannot finish in that time is on a dead connection: gorilla/websocket fails
+// every later write on it, and the heartbeat's failure reconnects. A deadline
+// a slow link could not meet would fail the same large response at every
+// connect, since the drain sends it again first.
+var (
+	sendWriteFloor   = 30 * time.Second
+	sendWriteMinRate = 8 << 10 // bytes per second
+)
+
+func sendWriteTimeout(size int) time.Duration {
+	return sendWriteFloor + time.Duration(size)*time.Second/time.Duration(sendWriteMinRate)
+}
+
 // SendJSON sends a JSON message over the WebSocket connection.
 func (w *WebSocketClient) SendJSON(v interface{}) error {
+	// The bytes gorilla's WriteJSON sends: json.Encoder's output, with its
+	// trailing newline.
+	data, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+	data = append(data, '\n')
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -656,7 +680,10 @@ func (w *WebSocketClient) SendJSON(v interface{}) error {
 		return fmt.Errorf("websocket not connected")
 	}
 
-	return w.conn.WriteJSON(v)
+	if err := w.conn.SetWriteDeadline(time.Now().Add(sendWriteTimeout(len(data)))); err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 // ReadMessage reads a message from the WebSocket connection.
@@ -782,10 +809,14 @@ func (w *WebSocketClient) CompleteInProgressTaskWithData(taskID, status, message
 	w.drainMu.Lock()
 	defer w.drainMu.Unlock()
 
-	inner := buildTaskResponseInner(status, message, data, logging.Named("websocket"))
-	resultBytes, err := json.Marshal(inner)
+	log := logging.Named("websocket")
+	resultBytes, err := json.Marshal(buildTaskResponseInner(status, message, data, log))
 	if err != nil {
 		return false, fmt.Errorf("marshal inner response: %w", err)
+	}
+	status, message, data, resultBytes, err = fitTaskResponse(taskID, status, message, data, resultBytes, log)
+	if err != nil {
+		return false, err
 	}
 	won, err := w.taskStore.CompleteIfInProgress(taskID, status, message, resultBytes)
 	if err != nil || !won {
@@ -800,11 +831,13 @@ func (w *WebSocketClient) CompleteInProgressTaskWithData(taskID, status, message
 func (w *WebSocketClient) sendTaskResponse(taskID, status, message string, data map[string]interface{}, record bool) error {
 	log := logging.Named("websocket")
 
-	inner := buildTaskResponseInner(status, message, data, log)
-
-	innerBytes, err := json.Marshal(inner)
+	innerBytes, err := json.Marshal(buildTaskResponseInner(status, message, data, log))
 	if err != nil {
 		return fmt.Errorf("marshal inner response: %w", err)
+	}
+	status, message, _, innerBytes, err = fitTaskResponse(taskID, status, message, data, innerBytes, log)
+	if err != nil {
+		return err
 	}
 
 	priv, kid, err := w.devicePrivkey()
@@ -831,13 +864,7 @@ func (w *WebSocketClient) sendTaskResponse(taskID, status, message string, data 
 	// the store — only terminal rows are interesting for replay.
 	isTerminal := status == TaskStatusCompleted || status == TaskStatusFailed
 	if isTerminal && record && w.taskStore != nil {
-		var resultBytes []byte
-		if len(inner) > 0 {
-			if b, mErr := json.Marshal(inner); mErr == nil {
-				resultBytes = b
-			}
-		}
-		if cErr := w.taskStore.Complete(taskID, status, message, resultBytes); cErr != nil {
+		if cErr := w.taskStore.Complete(taskID, status, message, innerBytes); cErr != nil {
 			log.Warnw("taskstore.Complete failed; response will go out unrecorded",
 				"task_id", taskID, "error", cErr,
 			)
@@ -1166,11 +1193,11 @@ var closeFrameWait = 5 * time.Second
 // disconnect was intentional, then closes the connection.
 //
 // It takes the connection from its caller and never waits for w.mu: SendJSON
-// holds w.mu for the whole write, with no deadline, so a write stuck on a peer
-// that stopped reading would hold the shutdown until TCP gives up. gorilla
-// allows WriteControl and Close beside another writer: the frame waits at most
-// closeFrameWait for that write to give way, and Close then fails the stuck
-// write, which releases w.mu.
+// holds w.mu for the whole write, up to its deadline (minutes for a large
+// frame), so a write stuck on a peer that stopped reading would hold the
+// shutdown that long. gorilla allows WriteControl and Close beside another
+// writer: the frame waits at most closeFrameWait for that write to give way,
+// and Close then fails the stuck write, which releases w.mu.
 func closeClean(conn *websocket.Conn) {
 	logging.Named("websocket").Debug("Sending WebSocket close frame")
 	_ = conn.WriteControl(websocket.CloseMessage,

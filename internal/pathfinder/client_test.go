@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -125,6 +126,35 @@ func TestRunFrameLoop_CleanClose_GoingAway(t *testing.T) {
 	}
 	if cleanClose.Reason != reason {
 		t.Errorf("Reason = %q, want %q", cleanClose.Reason, reason)
+	}
+}
+
+// The relay closes a leg that floods it with streams with 1008 "stream flood".
+// That ends the session as a failure, naming the reason, and the client does
+// not dial the relay again: a new session takes a new CONNECT.
+func TestRunFrameLoop_StreamFloodCloseIsAFailureAndNoRedial(t *testing.T) {
+	var connections atomic.Int32
+	client, cleanup := newConnectedTestClient(t, func(conn *websocket.Conn) {
+		connections.Add(1)
+		time.Sleep(20 * time.Millisecond)
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "stream flood"),
+			time.Now().Add(time.Second))
+	})
+	defer cleanup()
+
+	err := client.RunFrameLoop(context.Background())
+	var cleanClose *ErrSessionEndedCleanly
+	if err == nil || errors.As(err, &cleanClose) {
+		t.Fatalf("RunFrameLoop returned %v, want a failure", err)
+	}
+	var closeErr *websocket.CloseError
+	if !errors.As(err, &closeErr) || closeErr.Code != websocket.ClosePolicyViolation || closeErr.Text != "stream flood" {
+		t.Errorf("err = %v, want the 1008 close with its reason", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if n := connections.Load(); n != 1 {
+		t.Errorf("the relay saw %d connections, want 1: the client must not dial again", n)
 	}
 }
 

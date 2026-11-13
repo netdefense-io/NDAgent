@@ -2,10 +2,12 @@ package pathfinder
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"regexp"
 	"strconv"
 	"strings"
 )
@@ -34,6 +36,8 @@ type jsonKey struct {
 	kinds valueKinds
 	// userinfo strips the credentials out of a URL instead of blanking it.
 	userinfo bool
+	// keyMaterial blanks a string only when it holds a private key.
+	keyMaterial bool
 }
 
 // jsonPath names one position in a document: the keys and array indexes from
@@ -64,15 +68,23 @@ type jsonSecrets struct {
 
 // target is what the scrubber does to one value that is a secret.
 type target struct {
-	kinds    valueKinds
-	userinfo bool
+	kinds       valueKinds
+	userinfo    bool
+	keyMaterial bool
 }
 
-func newTarget(kinds valueKinds, userinfo bool) *target {
+func newTarget(kinds valueKinds) *target {
 	if kinds == 0 {
 		kinds = kindsScalar
 	}
-	return &target{kinds: kinds, userinfo: userinfo}
+	return &target{kinds: kinds}
+}
+
+func keyTarget(k jsonKey) *target {
+	t := newTarget(k.kinds)
+	t.userinfo = k.userinfo
+	t.keyMaterial = k.keyMaterial
+	return t
 }
 
 func (t *target) blanks(kind valueKinds) bool {
@@ -175,10 +187,16 @@ func (s *jsonScrubber) value(field *target) error {
 		return fmt.Errorf("unexpected delimiter %q", rune(t))
 	case string:
 		if field.blanks(kindString) {
-			if field.userinfo {
-				s.replace(start, int(s.dec.InputOffset()), stripURLUserinfo(t, s.body[start:int(s.dec.InputOffset())]))
-			} else {
-				s.replace(start, int(s.dec.InputOffset()), `""`)
+			end := int(s.dec.InputOffset())
+			switch {
+			case field.userinfo:
+				s.replace(start, end, stripURLUserinfo(t, s.body[start:end]))
+			case field.keyMaterial:
+				if holdsPrivateKey(t) {
+					s.replace(start, end, `""`)
+				}
+			default:
+				s.replace(start, end, `""`)
 			}
 		}
 	case json.Number:
@@ -255,13 +273,14 @@ func (s *jsonScrubber) fieldFor(key string) *target {
 	if !ok {
 		return byPath
 	}
-	byKey := newTarget(k.kinds, k.userinfo)
+	byKey := keyTarget(k)
 	if byPath == nil {
 		return byKey
 	}
-	merged := &target{kinds: byKey.kinds | byPath.kinds, userinfo: byKey.userinfo}
+	merged := &target{kinds: byKey.kinds | byPath.kinds, userinfo: byKey.userinfo, keyMaterial: byKey.keyMaterial}
 	if byPath.kinds&kindString != 0 {
 		merged.userinfo = false
+		merged.keyMaterial = false
 	}
 	return merged
 }
@@ -274,9 +293,9 @@ func (s *jsonScrubber) pathTarget() *target {
 			continue
 		}
 		if found == nil {
-			found = newTarget(p.kinds, false)
+			found = newTarget(p.kinds)
 		} else {
-			found.kinds |= newTarget(p.kinds, false).kinds
+			found.kinds |= newTarget(p.kinds).kinds
 		}
 	}
 	return found
@@ -316,4 +335,60 @@ func stripURLUserinfo(value string, original []byte) string {
 		return `""`
 	}
 	return string(cleaned)
+}
+
+// privateKeyLabel is the armour line a PEM private key opens with, in any of its
+// types (PRIVATE KEY, RSA PRIVATE KEY, ENCRYPTED PRIVATE KEY, OPENSSH PRIVATE
+// KEY, ...). It is loose on purpose (no dashes, any case): a certificate's base64
+// cannot spell it, and every looser match only blanks more.
+var privateKeyLabel = regexp.MustCompile(`(?i)BEGIN[A-Z0-9 ]*PRIVATE KEY`)
+
+// holdsPrivateKey says whether a value carries a PEM private key, as text or in
+// base64 read any way a client could read it: with what is not in the alphabet
+// skipped, as PHP's base64_decode does, or with - and _ read as the URL-safe
+// alphabet; as one stream past every = sign, as PHP reads it, or as the runs
+// between them; and from each of the four places a group of four can start, so
+// two encodings stored one after the other are both read.
+func holdsPrivateKey(value string) bool {
+	if privateKeyLabel.MatchString(value) {
+		return true
+	}
+	for _, urlSafe := range []bool{false, true} {
+		text := base64Text(value, urlSafe)
+		readings := append(strings.FieldsFunc(text, func(r rune) bool { return r == '=' }), strings.ReplaceAll(text, "=", ""))
+		for _, reading := range readings {
+			for start := 0; start < 4 && start < len(reading); start++ {
+				if privateKeyLabel.Match(decodeBase64(reading[start:])) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// base64Text keeps the characters of value that base64 reads, = included, with -
+// and _ dropped or, for urlSafe, read as + and /.
+func base64Text(value string, urlSafe bool) string {
+	var b strings.Builder
+	for i := 0; i < len(value); i++ {
+		switch c := value[i]; {
+		case 'A' <= c && c <= 'Z', 'a' <= c && c <= 'z', '0' <= c && c <= '9', c == '+', c == '/', c == '=':
+			b.WriteByte(c)
+		case urlSafe && c == '-':
+			b.WriteByte('+')
+		case urlSafe && c == '_':
+			b.WriteByte('/')
+		}
+	}
+	return b.String()
+}
+
+func decodeBase64(s string) []byte {
+	if len(s)%4 == 1 {
+		s = s[:len(s)-1]
+	}
+	decoded := make([]byte, base64.RawStdEncoding.DecodedLen(len(s)))
+	n, _ := base64.RawStdEncoding.Decode(decoded, []byte(s))
+	return decoded[:n]
 }

@@ -83,7 +83,7 @@ func HandlePing(ctx context.Context, ws *network.WebSocketClient, cmd network.Co
 	)
 
 	// Execute ping command
-	cmdExec := exec.CommandContext(ctx, "ping", "-c", strconv.Itoa(count), target)
+	cmdExec := exec.CommandContext(ctx, "ping", pingArgs(count, target)...)
 	output, err := cmdExec.CombinedOutput()
 
 	// Check for context cancellation
@@ -110,4 +110,10 @@ func HandlePing(ctx context.Context, ws *network.WebSocketClient, cmd network.Co
 	)
 	result := NewSuccessResult(string(output))
 	return SendTaskResponse(ws, cmd.TaskID, result)
+}
+
+// pingArgs is ping's command line. "--" ends the options, so the target is read
+// as the host even if it starts with "-" (the validator refuses one already).
+func pingArgs(count int, target string) []string {
+	return []string{"-c", strconv.Itoa(count), "--", target}
 }

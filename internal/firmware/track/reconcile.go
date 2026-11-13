@@ -160,7 +160,7 @@ func (e *Engine) repin(ctx context.Context, st *State, settings opnapi.FirmwareS
 		if oldSeries, _, ok := ParseFlavour(s.PinnedFlavour); !ok || oldSeries != series {
 			// The installed series changed: the record of aborted attempts of an upgrade
 			// to it, and the note of a landing that ended short, belong to the old one.
-			s.HopAborts, s.Landing = nil, nil
+			s.HopAborts, s.Landing, s.HopBootEnvironment = nil, nil, nil
 		}
 		s.PinnedFlavour, s.PinnedVersion = pin, installed
 		s.Pending = nil
@@ -551,13 +551,17 @@ func (e *Engine) Reconcile(ctx context.Context) (result TickResult) {
 		}
 	case pinRepin:
 		e.log.Warnw("The firmware pin needs to be written again: "+a.why, "drift", a.drift)
+		if a.drift {
+			// Recorded before the re-pin starts: a restart in the middle of it is
+			// repaired from the record, which must still say a drift was seen.
+			_, _ = e.store.Update(func(s *State) { s.DriftPending = true })
+		}
 		if err := e.repin(ctx, st, settings, installed, "", a.force, false, nil); err != nil {
 			e.log.Warnw("Cannot write the firmware pin again; trying later", "error", describeErr(err))
 			e.repinAfter = now.Add(repinBackoff)
 			return TickSettled
 		}
 		if a.drift {
-			_, _ = e.store.Update(func(s *State) { s.DriftPending = true })
 			e.noteDriftRepin(now)
 		}
 	}

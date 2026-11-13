@@ -588,86 +588,53 @@ func ZabbixMultiSelectToCSV(raw interface{}) string {
 	return strings.Join(selected, ",")
 }
 
-// MergeZabbixSettings builds the wire-shape body from the snippet payload,
-// using the device's current settings as a baseline. Any non-empty snippet
-// field wins; empty/unset fields keep the device's current value.
-//
-// This is the path executeSyncZabbix uses on the SYNC side. The OPNsense
-// plugin marks several main/tuning fields Required="Y" and rejects empty
-// strings, so a sparse snippet (admin only specified a few fields) would
-// 422 against /settings/set without this overlay. Wholesale-replace
-// semantics are preserved at the wire level — every apply posts a full
-// tree — but the admin's snippet only has to spell out what they want to
-// change.
-func MergeZabbixSettings(p APIZabbixSettingsPayload, currentRaw map[string]interface{}) ZabbixSettingsBody {
-	base := flattenZabbixGet(currentRaw)
-	snippet := ConvertToOPNZabbixSettings(p)
-	return overlayZabbixSettings(base, snippet)
+// zabbixSettingsDefaults are what the os-zabbix-agent plugin configures when
+// it is enabled with nothing set: its model's defaults (model 1.2.4, unchanged
+// through plugin 1.19, models/OPNsense/ZabbixAgent/ZabbixAgent.xml; a copy is
+// in testdata and pins this table), a boolean without one being off. DebugLevel is the bare digit,
+// as overlayZabbixSettings encodes it.
+var zabbixSettingsDefaults = ZabbixSettingsBody{
+	Local: ZabbixLocal{Hostname: "Zabbix agent"},
+	Settings: ZabbixSettings{
+		Main: ZabbixMain{
+			Enabled:      "0",
+			ServerList:   "127.0.0.1",
+			ListenPort:   "10050",
+			ListenIP:     "0.0.0.0",
+			LogFileSize:  "100",
+			SyslogEnable: "0",
+			DebugLevel:   "3",
+			SudoRoot:     "0",
+		},
+		Tuning: ZabbixTuning{
+			StartAgents:       "3",
+			BufferSend:        "5",
+			BufferSize:        "100",
+			MaxLinesPerSecond: "100",
+			Timeout:           "3",
+		},
+		Features: ZabbixFeatures{
+			EnableActiveChecks:   "1",
+			RefreshActiveChecks:  "120",
+			EnableRemoteCommands: "0",
+			LogRemoteCommands:    "0",
+			Encryption:           "0",
+		},
+	},
 }
 
-// flattenZabbixGet converts the GET shape (SelectMultiple dict-of-options,
-// val_N Selection enum keys, raw scalars) into a ZabbixSettingsBody.
-func flattenZabbixGet(raw map[string]interface{}) ZabbixSettingsBody {
-	var out ZabbixSettingsBody
-	za, ok := raw["zabbixagent"].(map[string]interface{})
-	if !ok {
-		return out
-	}
-	if local, ok := za["local"].(map[string]interface{}); ok {
-		out.Local.Hostname, _ = local["hostname"].(string)
-	}
-	settings, ok := za["settings"].(map[string]interface{})
-	if !ok {
-		return out
-	}
-	if main, ok := settings["main"].(map[string]interface{}); ok {
-		getStr := func(k string) string { v, _ := main[k].(string); return v }
-		out.Settings.Main = ZabbixMain{
-			Enabled:       getStr("enabled"),
-			ServerList:    ZabbixMultiSelectToCSV(main["serverList"]),
-			ListenPort:    getStr("listenPort"),
-			ListenIP:      ZabbixMultiSelectToCSV(main["listenIP"]),
-			SourceIP:      getStr("sourceIP"),
-			ListenBacklog: getStr("listenBacklog"),
-			SyslogEnable:  getStr("syslogEnable"),
-			LogFileSize:   getStr("logFileSize"),
-			// debugLevel is returned as a {val_0:...val_5:...} dict on GET;
-			// flatten to the bare digit so MergeZabbixSettings can decide
-			// whether to take it or the snippet's value, then re-encode at
-			// POST time via ZabbixDebugLevelToWire.
-			DebugLevel: ZabbixDebugLevelFromGet(main["debugLevel"]),
-			SudoRoot:   getStr("sudoRoot"),
-		}
-	}
-	if tuning, ok := settings["tuning"].(map[string]interface{}); ok {
-		getStr := func(k string) string { v, _ := tuning[k].(string); return v }
-		out.Settings.Tuning = ZabbixTuning{
-			StartAgents:       getStr("startAgents"),
-			BufferSend:        getStr("bufferSend"),
-			BufferSize:        getStr("bufferSize"),
-			MaxLinesPerSecond: getStr("maxLinesPerSecond"),
-			Timeout:           getStr("timeout"),
-		}
-	}
-	if features, ok := settings["features"].(map[string]interface{}); ok {
-		getStr := func(k string) string { v, _ := features[k].(string); return v }
-		out.Settings.Features = ZabbixFeatures{
-			EnableActiveChecks:   getStr("enableActiveChecks"),
-			ActiveCheckServers:   ZabbixMultiSelectToCSV(features["activeCheckServers"]),
-			RefreshActiveChecks:  getStr("refreshActiveChecks"),
-			EnableRemoteCommands: getStr("enableRemoteCommands"),
-			LogRemoteCommands:    getStr("logRemoteCommands"),
-			Encryption:           getStr("encryption"),
-			EncryptionIdentity:   getStr("encryptionidentity"),
-			EncryptionPSK:        getStr("encryptionpsk"),
-		}
-	}
-	return out
+// BuildZabbixSettings is the body /settings/set gets for the snippet: the
+// plugin's defaults with every field the snippet gives put over them, so a
+// field the snippet leaves out takes the value a fresh install has (the
+// operator's rule, 2026-11-12: the snippet is the source of truth). Every
+// apply posts the full tree, which the plugin requires.
+func BuildZabbixSettings(p APIZabbixSettingsPayload) ZabbixSettingsBody {
+	return overlayZabbixSettings(zabbixSettingsDefaults, ConvertToOPNZabbixSettings(p))
 }
 
 // overlayZabbixSettings returns base with every non-empty field from snippet
-// substituted in. Pure string-level overlay — fields the snippet left empty
-// keep their device-current value.
+// substituted in. Pure string-level overlay: fields the snippet left empty
+// keep base's value.
 func overlayZabbixSettings(base, snippet ZabbixSettingsBody) ZabbixSettingsBody {
 	pick := func(want, fallback string) string {
 		if want == "" {
@@ -690,9 +657,8 @@ func overlayZabbixSettings(base, snippet ZabbixSettingsBody) ZabbixSettingsBody 
 	m.SyslogEnable = pick(sm.SyslogEnable, m.SyslogEnable)
 	m.LogFileSize = pick(sm.LogFileSize, m.LogFileSize)
 	// DebugLevel on the snippet side has already been converted to val_N by
-	// ConvertToOPNZabbixSettings; the base came from the GET via
-	// ZabbixDebugLevelFromGet (bare digit). Re-encode the chosen value to
-	// val_N exactly once, here.
+	// ConvertToOPNZabbixSettings; the base holds the bare digit. Re-encode the
+	// chosen value to val_N exactly once, here.
 	chosenDL := pick(sm.DebugLevel, m.DebugLevel)
 	m.DebugLevel = ZabbixDebugLevelToWire(chosenDL)
 	m.SudoRoot = pick(sm.SudoRoot, m.SudoRoot)
@@ -716,6 +682,19 @@ func overlayZabbixSettings(base, snippet ZabbixSettingsBody) ZabbixSettingsBody 
 	f.EncryptionIdentity = pick(sf.EncryptionIdentity, f.EncryptionIdentity)
 	f.EncryptionPSK = pick(sf.EncryptionPSK, f.EncryptionPSK)
 	return out
+}
+
+// optionalBoolToOPNsense is "1" or "0" for a boolean the snippet gives and
+// empty for one it leaves out, which then takes its default.
+func optionalBoolToOPNsense(b *bool) string {
+	return optionalBoolOr(b, "")
+}
+
+func optionalBoolOr(b *bool, def string) string {
+	if b == nil {
+		return def
+	}
+	return BoolToOPNsense(*b)
 }
 
 // ConvertToOPNZabbixSettings converts the portable snippet payload to the
@@ -747,7 +726,7 @@ func ConvertToOPNZabbixSettings(p APIZabbixSettingsPayload) ZabbixSettingsBody {
 				Timeout:           p.Timeout,
 			},
 			Features: ZabbixFeatures{
-				EnableActiveChecks:   BoolToOPNsense(p.EnableActiveChecks),
+				EnableActiveChecks:   optionalBoolToOPNsense(p.EnableActiveChecks),
 				ActiveCheckServers:   strings.Join(p.ActiveCheckServers, ","),
 				RefreshActiveChecks:  p.RefreshActiveChecks,
 				EnableRemoteCommands: BoolToOPNsense(p.EnableRemoteCommands),
@@ -760,20 +739,26 @@ func ConvertToOPNZabbixSettings(p APIZabbixSettingsPayload) ZabbixSettingsBody {
 	}
 }
 
+// zabbixEntryEnabledDefault is the model's default for the enabled field of a
+// userparameter and an alias.
+const zabbixEntryEnabledDefault = "1"
+
 // ConvertToOPNZabbixUserParameter converts a snippet payload to the wire shape.
+// A field the snippet leaves out takes the model's default.
 func ConvertToOPNZabbixUserParameter(p APIZabbixUserParameterPayload) ZabbixUserParameter {
 	return ZabbixUserParameter{
-		Enabled:      BoolToOPNsense(p.Enabled),
+		Enabled:      optionalBoolOr(p.Enabled, zabbixEntryEnabledDefault),
 		Key:          p.Key,
 		Command:      p.Command,
 		AcceptParams: BoolToOPNsense(p.AcceptParams),
 	}
 }
 
-// ConvertToOPNZabbixAlias converts a snippet payload to the wire shape.
+// ConvertToOPNZabbixAlias converts a snippet payload to the wire shape. A field
+// the snippet leaves out takes the model's default.
 func ConvertToOPNZabbixAlias(p APIZabbixAliasPayload) ZabbixAlias {
 	return ZabbixAlias{
-		Enabled:      BoolToOPNsense(p.Enabled),
+		Enabled:      optionalBoolOr(p.Enabled, zabbixEntryEnabledDefault),
 		Key:          p.Key,
 		SourceKey:    p.SourceKey,
 		AcceptParams: BoolToOPNsense(p.AcceptParams),
@@ -788,8 +773,9 @@ func ConvertZabbixUserParameterToAPI(raw map[string]interface{}) APIZabbixUserPa
 	command, _ := raw["command"].(string)
 	acceptParams, _ := raw["acceptParams"].(string)
 
+	on := OPNsenseToBool(enabled)
 	return APIZabbixUserParameterPayload{
-		Enabled:      OPNsenseToBool(enabled),
+		Enabled:      &on,
 		Key:          key,
 		Command:      command,
 		AcceptParams: OPNsenseToBool(acceptParams),
@@ -804,8 +790,9 @@ func ConvertZabbixAliasToAPI(raw map[string]interface{}) APIZabbixAliasPayload {
 	sourceKey, _ := raw["sourceKey"].(string)
 	acceptParams, _ := raw["acceptParams"].(string)
 
+	on := OPNsenseToBool(enabled)
 	return APIZabbixAliasPayload{
-		Enabled:      OPNsenseToBool(enabled),
+		Enabled:      &on,
 		Key:          key,
 		SourceKey:    sourceKey,
 		AcceptParams: OPNsenseToBool(acceptParams),

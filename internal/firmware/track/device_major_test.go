@@ -638,3 +638,43 @@ func TestReadStageState_ABoxWithNoPackagesMarkerIsReadAndOneWithNoBaseIsNot(t *t
 		t.Error("a box that printed no kernel version was read")
 	}
 }
+
+// The box's state digests config.xml and the installed packages; the order pkg
+// prints them in does not change it, and either changing does.
+func TestSystemDevice_BoxState(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.xml")
+	if err := os.WriteFile(path, []byte("<?xml version=\"1.0\"?>\n<opnsense><system/></opnsense>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	savedPath, savedRun := boxConfigPath, runCommand
+	t.Cleanup(func() { boxConfigPath, runCommand = savedPath, savedRun })
+	boxConfigPath = path
+	packages := "opnsense 26.1.11_10\nos-netdefense 1.30.0\nzabbix7-agent 7.0.1\n"
+	runCommand = func(_ context.Context, _ time.Duration, name string, args ...string) (string, error) {
+		if name != "/usr/sbin/pkg" || strings.Join(args, " ") != "query %n %v" {
+			t.Errorf("ran %s %v", name, args)
+		}
+		return packages, nil
+	}
+	d := &SystemDevice{}
+	first, err := d.BoxState(context.Background())
+	if err != nil || first.ConfigSHA256 == "" || first.PackagesSHA256 == "" {
+		t.Fatalf("BoxState = %+v, %v", first, err)
+	}
+
+	packages = "zabbix7-agent 7.0.1\nopnsense 26.1.11_10\nos-netdefense 1.30.0\n"
+	if again, _ := d.BoxState(context.Background()); again != first {
+		t.Errorf("the order pkg printed changed the digest: %+v vs %+v", again, first)
+	}
+	packages = "opnsense 26.1.11_10\nos-netdefense 1.31.0\nzabbix7-agent 7.0.1\n"
+	if changed, _ := d.BoxState(context.Background()); changed.PackagesSHA256 == first.PackagesSHA256 || changed.ConfigSHA256 != first.ConfigSHA256 {
+		t.Errorf("a package upgrade: %+v vs %+v", changed, first)
+	}
+	packages = "opnsense 26.1.11_10\nos-netdefense 1.30.0\nzabbix7-agent 7.0.1\n"
+	if err := os.WriteFile(path, []byte("<?xml version=\"1.0\"?>\n<opnsense><system><hostname>fw2</hostname></system></opnsense>\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if changed, _ := d.BoxState(context.Background()); changed.ConfigSHA256 == first.ConfigSHA256 || changed.PackagesSHA256 != first.PackagesSHA256 {
+		t.Errorf("a config.xml change: %+v vs %+v", changed, first)
+	}
+}

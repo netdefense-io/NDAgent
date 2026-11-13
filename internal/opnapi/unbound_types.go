@@ -6,13 +6,13 @@ type HostOverride struct {
 	Enabled     string `json:"enabled"`
 	Hostname    string `json:"hostname"`
 	Domain      string `json:"domain"`
-	RR          string `json:"rr"`               // A, AAAA, MX, TXT
-	Server      string `json:"server,omitempty"` // IP for A/AAAA
-	MXPrio      string `json:"mxprio,omitempty"` // MX priority
-	MX          string `json:"mx,omitempty"`     // MX target
-	TTL         string `json:"ttl,omitempty"`    // Optional TTL
-	TXTData     string `json:"txtdata,omitempty"`
-	AddPTR      string `json:"addptr,omitempty"` // "0"/"1"; left out, the device keeps its value (new: on)
+	RR          string `json:"rr"`     // A, AAAA, MX, TXT
+	Server      string `json:"server"` // IP for A/AAAA
+	MXPrio      string `json:"mxprio"` // MX priority
+	MX          string `json:"mx"`     // MX target
+	TTL         string `json:"ttl"`
+	TXTData     string `json:"txtdata"`
+	AddPTR      string `json:"addptr"` // "0"/"1"
 	Description string `json:"description"`
 }
 
@@ -28,10 +28,10 @@ type DomainForward struct {
 	Type               string `json:"type"` // forward, dot
 	Domain             string `json:"domain"`
 	Server             string `json:"server"`
-	Port               string `json:"port,omitempty"`   // Optional custom port
-	Verify             string `json:"verify,omitempty"` // DoT verification
-	ForwardTCPUpstream string `json:"forward_tcp_upstream,omitempty"`
-	ForwardFirst       string `json:"forward_first,omitempty"`
+	Port               string `json:"port"`   // empty: 53, or 853 for DoT
+	Verify             string `json:"verify"` // DoT verification
+	ForwardTCPUpstream string `json:"forward_tcp_upstream"`
+	ForwardFirst       string `json:"forward_first"`
 	Description        string `json:"description"`
 }
 
@@ -85,7 +85,7 @@ type APIHostOverridePayload struct {
 	MX          string   `json:"mx,omitempty"`      // MX target
 	TTL         string   `json:"ttl,omitempty"`     // Optional TTL
 	TXTData     string   `json:"txtdata,omitempty"` // TXT record data
-	AddPTR      string   `json:"addptr,omitempty"`  // "0" or "1"; empty keeps the device's
+	AddPTR      string   `json:"addptr,omitempty"`  // "0" or "1"; empty takes the model's default, on
 	Description string   `json:"description"`
 	Templates   []string `json:"templates,omitempty"`
 
@@ -105,7 +105,7 @@ type APIDomainForwardPayload struct {
 	Type               string   `json:"type"` // forward, dot
 	Domain             string   `json:"domain"`
 	Server             string   `json:"server"`
-	Port               string   `json:"port,omitempty"`   // Optional custom port
+	Port               string   `json:"port,omitempty"`   // empty: 53, or 853 for DoT
 	Verify             string   `json:"verify,omitempty"` // DoT verification
 	ForwardTCPUpstream bool     `json:"forward_tcp_upstream,omitempty"`
 	ForwardFirst       bool     `json:"forward_first,omitempty"`

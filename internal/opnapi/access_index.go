@@ -186,9 +186,9 @@ func BuildAccessIndex(users, groups []map[string]interface{}, policy PrivPolicy,
 // AddPlannedGroup records a group that is about to become administrator-
 // equivalent, because a desired element of the same sync gives it such a
 // privilege. A USER in that sync that names it is judged against what the group
-// will be, not what it is now, and so is every account that will be a member of
+// will be, not what it is now, and so is every account that may be a member of
 // it once applied: the members the element declares, and the ones the group has
-// now, which a sync that declares none leaves as they are.
+// now, which a USER the sync refuses keeps.
 func (ix *AccessIndex) AddPlannedGroup(name string, declaredMembers []string) {
 	key := normalizeAccountName(name)
 	if key == "" {

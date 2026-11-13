@@ -32,7 +32,7 @@ var (
 // first of these sources that yields a release wins:
 //
 //  1. /usr/local/opnsense/version/core, the JSON file the core package ships
-//  2. `opnsense-version -v`, OPNsense's own reader of that file
+//  2. `opnsense-version -n -v`, OPNsense's own reader of that file
 //  3. GET /core/firmware/status, its `product` block
 //
 // The first two need no API credentials and no running web server, so they
@@ -99,18 +99,19 @@ func readReleaseFile(context.Context) (ProductRelease, error) {
 	var meta struct {
 		ProductVersion string `json:"product_version"`
 		ProductSeries  string `json:"product_series"`
+		ProductID      string `json:"product_id"`
 	}
 	if err := json.Unmarshal(data, &meta); err != nil {
 		return ProductRelease{}, fmt.Errorf("decode %s: %w", versionFilePath, err)
 	}
-	return releaseFromFields(meta.ProductVersion, meta.ProductSeries)
+	return releaseOf(meta.ProductVersion, meta.ProductSeries, meta.ProductID)
 }
 
 func readReleaseCommand(ctx context.Context) (ProductRelease, error) {
 	ctx, cancel := context.WithTimeout(ctx, opnsenseVersionTimeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, opnsenseVersionCommand, "-v")
+	cmd := exec.CommandContext(ctx, opnsenseVersionCommand, "-n", "-v")
 	cmd.Env = util.DeviceExecEnv()
 	cmd.WaitDelay = time.Second
 
@@ -119,7 +120,16 @@ func readReleaseCommand(ctx context.Context) (ProductRelease, error) {
 		return ProductRelease{}, err
 	}
 	line, _, _ := strings.Cut(strings.TrimSpace(string(out)), "\n")
-	return releaseFromFields(line, "")
+	// It prints the fields asked for in that order, the package name first;
+	// an empty name leaves the version alone.
+	switch fields := strings.Fields(line); len(fields) {
+	case 1:
+		return releaseOf(fields[0], "", "")
+	case 2:
+		return releaseOf(fields[1], "", fields[0])
+	default:
+		return ProductRelease{}, fmt.Errorf("unexpected output %q", line)
+	}
 }
 
 func (c *Client) readReleaseStatus(ctx context.Context) (ProductRelease, error) {
@@ -134,14 +144,32 @@ func (c *Client) readReleaseStatus(ctx context.Context) (ProductRelease, error) 
 
 	var raw struct {
 		Product struct {
-			Version string `json:"product_version"`
-			Series  string `json:"product_series"`
+			Version  string `json:"product_version"`
+			Series   string `json:"product_series"`
+			ID       string `json:"product_id"`
+			CoreName string `json:"CORE_NAME"`
 		} `json:"product"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return ProductRelease{}, fmt.Errorf("decode: %w", err)
 	}
-	return releaseFromFields(raw.Product.Version, raw.Product.Series)
+	product := raw.Product.ID
+	if strings.TrimSpace(product) == "" {
+		product = raw.Product.CoreName
+	}
+	return releaseOf(raw.Product.Version, raw.Product.Series, product)
+}
+
+// releaseOf is releaseFromFields with the core package's name. The name comes
+// from the source that gave the release: a version file without product_id
+// leaves it empty, and no later source is asked for it.
+func releaseOf(version, series, product string) (ProductRelease, error) {
+	release, err := releaseFromFields(version, series)
+	if err != nil {
+		return ProductRelease{}, err
+	}
+	release.Product = strings.TrimSpace(product)
+	return release, nil
 }
 
 // releaseFromFields prefers the full version and falls back to the series. A

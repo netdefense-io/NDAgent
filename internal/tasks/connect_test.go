@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/gorilla/websocket"
 	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/pathfinder"
@@ -346,6 +347,8 @@ func TestClassifyPathfinderSessionEnd_TransportFailure(t *testing.T) {
 		{"abrupt close 1005", errors.New("read failed: websocket: close 1005 (no status)")},
 		{"network error", errors.New("read failed: read tcp 10.0.0.1:443: connection reset by peer")},
 		{"dial failure", errors.New("connect failed: dial failed: dial tcp: lookup pathfinder.example.com: no such host")},
+		// The relay closes a leg that floods it with streams with 1008.
+		{"stream flood 1008", fmt.Errorf("read failed: %w", &websocket.CloseError{Code: websocket.ClosePolicyViolation, Text: "stream flood"})},
 	}
 
 	for _, tt := range tests {

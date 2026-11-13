@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -106,10 +107,10 @@ func TestParseAPIZabbixUserParameters(t *testing.T) {
 	if len(ups) != 2 {
 		t.Fatalf("expected 2 userparameters, got %d", len(ups))
 	}
-	if ups[0].Key != "nd-cpu-temp" || !ups[0].Enabled {
+	if ups[0].Key != "nd-cpu-temp" || ups[0].Enabled == nil || !*ups[0].Enabled {
 		t.Errorf("up[0] mismatch: %+v", ups[0])
 	}
-	if ups[1].Key != "nd-wan-bw" || ups[1].Enabled {
+	if ups[1].Key != "nd-wan-bw" || ups[1].Enabled == nil || *ups[1].Enabled {
 		t.Errorf("up[1] mismatch: %+v", ups[1])
 	}
 }
@@ -209,11 +210,36 @@ func TestZabbixParsersIgnoreOtherTypes(t *testing.T) {
 	}
 }
 
+// zabbixDeviceSettings serves a device whose every setting differs from what
+// the tests' snippets ask for. The sync reads it only to tell whether a write
+// is needed, and must never carry a device value into what it posts.
+func zabbixDeviceSettings(w http.ResponseWriter, r *http.Request) {
+	_ = json.NewEncoder(w).Encode(map[string]interface{}{"zabbixagent": map[string]interface{}{
+		"local": map[string]interface{}{"hostname": "device-own-name"},
+		"settings": map[string]interface{}{
+			"main": map[string]interface{}{
+				"enabled": "1", "serverList": "192.0.2.50", "listenPort": "20050", "listenIP": "192.0.2.1",
+				"sourceIP": "192.0.2.1", "listenBacklog": "7", "syslogEnable": "1", "logFileSize": "9",
+				"debugLevel": map[string]interface{}{"val_5": map[string]interface{}{"value": "extended debugging (5)", "selected": 1}},
+				"sudoRoot":   "1",
+			},
+			"tuning": map[string]interface{}{
+				"startAgents": "9", "bufferSend": "9", "bufferSize": "9", "maxLinesPerSecond": "9", "timeout": "9",
+			},
+			"features": map[string]interface{}{
+				"enableActiveChecks": "0", "activeCheckServers": "192.0.2.50", "refreshActiveChecks": "60",
+				"enableRemoteCommands": "1", "logRemoteCommands": "1", "encryption": "1",
+				"encryptionidentity": "device", "encryptionpsk": "device",
+			},
+		},
+	}})
+}
+
 // newZabbixTestServer stands up a fake OPNsense zabbixagent API sufficient
 // for executeSyncZabbix's happy path: empty search results (no pre-existing
-// managed rows), settings/get returns an empty baseline, and every mutating
-// endpoint succeeds. Returns the client plus counters/capture slices tests
-// assert on.
+// managed rows), a device whose settings differ from every snippet
+// (zabbixDeviceSettings), and every mutating endpoint succeeds. Returns the
+// client plus counters/capture slices tests assert on.
 func newZabbixTestServer(t *testing.T) (client *opnapi.Client, setSettingsCalls *int, addedUserParamKeys *[]string, reconfigureCalls *int) {
 	t.Helper()
 	var setCalls int
@@ -227,9 +253,7 @@ func newZabbixTestServer(t *testing.T) (client *opnapi.Client, setSettingsCalls 
 	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
 	})
-	mux.HandleFunc("/zabbixagent/settings/get", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{})
-	})
+	mux.HandleFunc("/zabbixagent/settings/get", zabbixDeviceSettings)
 	mux.HandleFunc("/zabbixagent/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		setCalls++
 		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
@@ -497,5 +521,305 @@ func TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePre
 	}
 	if fmt.Sprint(rejected) != fmt.Sprint([]string{dangerous.Key}) {
 		t.Errorf("rejected results = %v, want [%s]", rejected, dangerous.Key)
+	}
+}
+
+// The operator's rule (2026-11-12): a field the ZABBIX_SETTINGS snippet leaves
+// out takes the plugin's default, so SYNC posts defaults for it. The device it
+// reads to compare holds other values everywhere, and none of them may reach
+// the body: the whole posted tree is the built one.
+func TestSyncZabbix_LeftOutFieldsTakeThePluginDefaults(t *testing.T) {
+	var posted map[string]map[string]interface{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/zabbixagent/settings/searchUserparameters/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+	})
+	mux.HandleFunc("/zabbixagent/settings/get", zabbixDeviceSettings)
+	mux.HandleFunc("/zabbixagent/settings/set", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&posted)
+		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
+	})
+	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	settings, err := parseAPIZabbixSettings(map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_SETTINGS", "content": `{"server_list":["zbx.example.com"]}`},
+	}})
+	if err != nil || settings == nil {
+		t.Fatalf("parse: %v %v", settings, err)
+	}
+	if result := executeSyncZabbix(context.Background(), client, settings, nil, nil, false); !result.Success {
+		t.Fatalf("sync failed: %+v", result.Errors)
+	}
+	built, _ := json.Marshal(map[string]interface{}{"zabbixagent": opnapi.BuildZabbixSettings(*settings)})
+	var want map[string]map[string]interface{}
+	_ = json.Unmarshal(built, &want)
+	if !reflect.DeepEqual(posted, want) {
+		t.Errorf("posted %v, want exactly the built body %v", posted, want)
+	}
+	local, _ := posted["zabbixagent"]["local"].(map[string]interface{})
+	s, _ := posted["zabbixagent"]["settings"].(map[string]interface{})
+	main, _ := s["main"].(map[string]interface{})
+	tuning, _ := s["tuning"].(map[string]interface{})
+	features, _ := s["features"].(map[string]interface{})
+	for name, got := range map[string][2]interface{}{
+		"hostname":           {local["hostname"], "Zabbix agent"},
+		"serverList":         {main["serverList"], "zbx.example.com"},
+		"listenPort":         {main["listenPort"], "10050"},
+		"enabled":            {main["enabled"], "0"},
+		"timeout":            {tuning["timeout"], "3"},
+		"enableActiveChecks": {features["enableActiveChecks"], "1"},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("posted %s = %v, want %v", name, got[0], got[1])
+		}
+	}
+}
+
+// A userparameter or alias snippet without `enabled` adds an entry that runs,
+// as adding it in the GUI does; one that says false adds a disabled entry.
+func TestSyncZabbix_AnEntryLeftWithoutEnabledIsOn(t *testing.T) {
+	added := map[string]map[string]interface{}{}
+	mux := http.NewServeMux()
+	for _, list := range []string{"searchUserparameters", "searchAliases"} {
+		mux.HandleFunc("/zabbixagent/settings/"+list+"/", func(w http.ResponseWriter, r *http.Request) {
+			_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
+		})
+	}
+	for _, add := range []string{"addUserparameter", "addAlias"} {
+		mux.HandleFunc("/zabbixagent/settings/"+add, func(w http.ResponseWriter, r *http.Request) {
+			var body map[string]map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, entry := range body {
+				added[entry["key"].(string)] = entry
+			}
+			_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved", UUID: "u-" + addedKey(body)})
+		})
+	}
+	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+	payload := map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_USERPARAMETER", "content": `{"key":"nd-on","command":"uptime"}`},
+		map[string]interface{}{"config_type": "ZABBIX_USERPARAMETER", "content": `{"key":"nd-off","command":"uptime","enabled":false}`},
+		map[string]interface{}{"config_type": "ZABBIX_ALIAS", "content": `{"key":"nd-ping","source_key":"agent.ping"}`},
+	}}
+	ups, err := parseAPIZabbixUserParameters(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := parseAPIZabbixAliases(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result := executeSyncZabbix(context.Background(), client, nil, ups, aliases, false); !result.Success {
+		t.Fatalf("sync failed: %+v", result.Errors)
+	}
+	for key, want := range map[string]string{"nd-on": "1", "nd-off": "0", "nd-ping": "1"} {
+		if got := added[key]["enabled"]; got != want {
+			t.Errorf("%s added with enabled %v, want %q", key, got, want)
+		}
+	}
+}
+
+func addedKey(body map[string]map[string]interface{}) string {
+	for _, e := range body {
+		key, _ := e["key"].(string)
+		return key
+	}
+	return ""
+}
+
+// zabbixNoopServer is a device holding settings, one userparameter and one
+// alias; it counts every write and reconfigure.
+type zabbixNoopServer struct {
+	settings  map[string]interface{}
+	upRow     map[string]interface{}
+	aliasRow  map[string]interface{}
+	writes    []string
+	bodies    []string
+	reconfigs int
+	client    *opnapi.Client
+}
+
+func newZabbixNoopServer(t *testing.T, settings map[string]interface{}, upRow, aliasRow map[string]interface{}) *zabbixNoopServer {
+	t.Helper()
+	s := &zabbixNoopServer{settings: settings, upRow: upRow, aliasRow: aliasRow}
+	mux := http.NewServeMux()
+	rows := func(row map[string]interface{}) opnapi.SearchResponse {
+		if row == nil {
+			return opnapi.SearchResponse{}
+		}
+		return opnapi.SearchResponse{Rows: []map[string]interface{}{row}}
+	}
+	mux.HandleFunc("/zabbixagent/settings/searchUserparameters/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rows(s.upRow))
+	})
+	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(rows(s.aliasRow))
+	})
+	mux.HandleFunc("/zabbixagent/settings/get", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(s.settings)
+	})
+	saved := func(name string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			s.writes = append(s.writes, name)
+			var body map[string]map[string]interface{}
+			_ = json.NewDecoder(r.Body).Decode(&body)
+			for _, fields := range body {
+				for _, key := range []string{"command", "sourceKey"} {
+					if v, ok := fields[key].(string); ok {
+						s.bodies = append(s.bodies, v)
+					}
+				}
+			}
+			_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
+		}
+	}
+	mux.HandleFunc("/zabbixagent/settings/set", saved("settings"))
+	mux.HandleFunc("/zabbixagent/settings/setUserparameter/", saved("userparameter"))
+	mux.HandleFunc("/zabbixagent/settings/setAlias/", saved("alias"))
+	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		s.reconfigs++
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	})
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	s.client = opnapi.NewClient(server.URL, "key", "secret", true)
+	return s
+}
+
+// A sync whose settings, userparameter and alias are already on the device
+// writes nothing and says each is unchanged; a change in any one is written
+// (#195). Both reconfigure: a reconfigure that failed after an earlier write is
+// only ever retried by the next sync.
+func TestSyncZabbix_WhatIsAlreadyOnTheDeviceIsNotWritten(t *testing.T) {
+	payload := map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_SETTINGS", "content": `{"hostname":"fw1","server_list":["zbx.example.com"]}`},
+		map[string]interface{}{"config_type": "ZABBIX_USERPARAMETER", "content": `{"key":"nd-cpu","command":"sysctl -n hw.ncpu"}`},
+		map[string]interface{}{"config_type": "ZABBIX_ALIAS", "content": `{"key":"nd-ping","source_key":"agent.ping"}`},
+	}}
+	settings, err := parseAPIZabbixSettings(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ups, err := parseAPIZabbixUserParameters(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := parseAPIZabbixAliases(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	asStored := func() (map[string]interface{}, map[string]interface{}, map[string]interface{}) {
+		body, _ := json.Marshal(map[string]interface{}{"zabbixagent": opnapi.BuildZabbixSettings(*settings)})
+		var live map[string]interface{}
+		_ = json.Unmarshal(body, &live)
+		return live,
+			map[string]interface{}{"uuid": "u1", "enabled": "1", "key": "nd-cpu", "command": "sysctl -n hw.ncpu", "acceptParams": "0"},
+			map[string]interface{}{"uuid": "a1", "enabled": "1", "key": "nd-ping", "sourceKey": "agent.ping", "acceptParams": "0"}
+	}
+
+	live, upRow, aliasRow := asStored()
+	s := newZabbixNoopServer(t, live, upRow, aliasRow)
+	result := executeSyncZabbix(context.Background(), s.client, settings, ups, aliases, false)
+	if !result.Success {
+		t.Fatalf("sync failed: %+v", result.Errors)
+	}
+	if len(s.writes) != 0 {
+		t.Errorf("an unchanged device was written %v", s.writes)
+	}
+	if s.reconfigs != 1 {
+		t.Errorf("reconfigured %d times, want once: a reconfigure owed by an earlier sync must still run", s.reconfigs)
+	}
+	for _, item := range result.Results {
+		if item.Action != "unchanged" || item.Status != "success" {
+			t.Errorf("item %s %s: %s/%s, want unchanged/success", item.Type, item.Name, item.Action, item.Status)
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		change func(settings, up, alias map[string]interface{})
+		write  string
+	}{
+		{"settings", func(st, _, _ map[string]interface{}) {
+			st["zabbixagent"].(map[string]interface{})["local"].(map[string]interface{})["hostname"] = "other"
+		}, "settings"},
+		{"userparameter", func(_, up, _ map[string]interface{}) { up["command"] = "sysctl -n hw.ncpu.old" }, "userparameter"},
+		{"alias", func(_, _, alias map[string]interface{}) { alias["enabled"] = "0" }, "alias"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			live, upRow, aliasRow := asStored()
+			tc.change(live, upRow, aliasRow)
+			s := newZabbixNoopServer(t, live, upRow, aliasRow)
+			if result := executeSyncZabbix(context.Background(), s.client, settings, ups, aliases, false); !result.Success {
+				t.Fatalf("sync failed: %+v", result.Errors)
+			}
+			if len(s.writes) != 1 || s.writes[0] != tc.write || s.reconfigs != 1 {
+				t.Errorf("writes %v, reconfigures %d; want one %s write and one reconfigure", s.writes, s.reconfigs, tc.write)
+			}
+		})
+	}
+}
+
+// A settings read that fails costs only the write it would have saved.
+func TestSyncZabbix_AnUnreadableDeviceIsWritten(t *testing.T) {
+	settings, err := parseAPIZabbixSettings(map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_SETTINGS", "content": `{"hostname":"fw1","server_list":["zbx.example.com"]}`},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newZabbixNoopServer(t, map[string]interface{}{"result": "failed"}, nil, nil)
+	if result := executeSyncZabbix(context.Background(), s.client, settings, nil, nil, false); !result.Success {
+		t.Fatalf("sync failed: %+v", result.Errors)
+	}
+	if len(s.writes) != 1 || s.reconfigs != 1 {
+		t.Errorf("writes %v, reconfigures %d; want the settings written and reconfigured", s.writes, s.reconfigs)
+	}
+}
+
+// Two userparameter or alias snippets with the same key both write, so the last
+// one wins on every sync. Compared with the row read before the writes, the
+// second would match the old row and be skipped, and the device would flip
+// between the two on alternate syncs.
+func TestSyncZabbix_ASecondSnippetWithTheSameKeyAlwaysWrites(t *testing.T) {
+	payload := map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_USERPARAMETER", "content": `{"key":"nd-cpu","command":"first"}`},
+		map[string]interface{}{"config_type": "ZABBIX_USERPARAMETER", "content": `{"key":"nd-cpu","command":"sysctl -n hw.ncpu"}`},
+		map[string]interface{}{"config_type": "ZABBIX_ALIAS", "content": `{"key":"nd-ping","source_key":"first"}`},
+		map[string]interface{}{"config_type": "ZABBIX_ALIAS", "content": `{"key":"nd-ping","source_key":"agent.ping"}`},
+	}}
+	ups, err := parseAPIZabbixUserParameters(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	aliases, err := parseAPIZabbixAliases(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newZabbixNoopServer(t, nil,
+		map[string]interface{}{"uuid": "u1", "enabled": "1", "key": "nd-cpu", "command": "sysctl -n hw.ncpu", "acceptParams": "0"},
+		map[string]interface{}{"uuid": "a1", "enabled": "1", "key": "nd-ping", "sourceKey": "agent.ping", "acceptParams": "0"})
+	if result := executeSyncZabbix(context.Background(), s.client, nil, ups, aliases, false); !result.Success {
+		t.Fatalf("sync failed: %+v", result.Errors)
+	}
+	if got := fmt.Sprint(s.writes); got != "[userparameter userparameter alias alias]" {
+		t.Errorf("writes %s, want both snippets of each key written", got)
+	}
+	if got := fmt.Sprint(s.bodies); got != "[first sysctl -n hw.ncpu first agent.ping]" {
+		t.Errorf("written content %s, want each key's last snippet written last", got)
 	}
 }

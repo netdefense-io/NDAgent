@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -238,5 +239,110 @@ func TestCheckRegistration_RespectsMinimumSpacing(t *testing.T) {
 	}
 	if slept <= 0 || slept > checkRegistrationMinInterval {
 		t.Fatalf("second check waited %v, want >0 and <= %v", slept, checkRegistrationMinInterval)
+	}
+}
+
+// Every status the wait reads is handed to the hook, so the agent's status file
+// can say what it waits for (#179).
+func TestWaitForRegistration_TellsTheHookEveryStatus(t *testing.T) {
+	var calls int64
+	srv := statusServer(t, []CheckRegistrationResponse{{Status: StatusPending}, {Status: StatusDisabled}, {Status: StatusDisabled}, {Status: StatusEnabled}}, &calls)
+	defer srv.Close()
+
+	origSleep := registrationSleep
+	registrationSleep = func(ctx context.Context, d time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { registrationSleep = origSleep })
+
+	c := testClient(t, srv)
+	var seen []string
+	c.SetWaitStatusHook(func(status string, err error) {
+		if err != nil {
+			status = "error"
+		}
+		seen = append(seen, status)
+	})
+	if err := c.WaitForRegistration(context.Background()); err != nil {
+		t.Fatalf("WaitForRegistration: %v", err)
+	}
+	if got := strings.Join(seen, ","); got != "PENDING,DISABLED,DISABLED,ENABLED" {
+		t.Errorf("hook saw %q, want every status in order", got)
+	}
+}
+
+// A check that fails is handed to the hook as "", so the status file does not
+// keep saying the device waits for an approval while the control plane cannot
+// be reached.
+func TestWaitForRegistration_TellsTheHookOfAFailedCheck(t *testing.T) {
+	var calls int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt64(&calls, 1) == 1 {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(CheckRegistrationResponse{Status: StatusEnabled})
+	}))
+	defer srv.Close()
+
+	origSleep := registrationSleep
+	registrationSleep = func(ctx context.Context, d time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { registrationSleep = origSleep })
+
+	c := testClient(t, srv)
+	var seen []string
+	c.SetWaitStatusHook(func(status string, err error) {
+		if err != nil {
+			status = "error"
+		}
+		seen = append(seen, status)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := c.WaitForRegistration(ctx); err != nil {
+		t.Fatalf("WaitForRegistration: %v", err)
+	}
+	if got := strings.Join(seen, ","); got != "error,ENABLED" {
+		t.Errorf("hook saw %q, want the failed check's error and then ENABLED", got)
+	}
+}
+
+// A start of the registration that fails is handed to the hook too, so a device
+// whose start keeps failing does not read as a fresh "Connecting" for as long
+// as the wait runs.
+func TestWaitForRegistration_TellsTheHookOfAFailedStart(t *testing.T) {
+	var checks int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/start") {
+			http.Error(w, "refused", http.StatusBadRequest)
+			return
+		}
+		reply := CheckRegistrationResponse{Status: StatusUnregistered}
+		if atomic.AddInt64(&checks, 1) > 1 {
+			reply.Status = StatusEnabled
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(reply)
+	}))
+	defer srv.Close()
+
+	origSleep := registrationSleep
+	registrationSleep = func(ctx context.Context, d time.Duration) error { return ctx.Err() }
+	t.Cleanup(func() { registrationSleep = origSleep })
+
+	c := testClient(t, srv)
+	var seen []string
+	c.SetWaitStatusHook(func(status string, err error) {
+		if err != nil {
+			status += "+error"
+		}
+		seen = append(seen, status)
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	if err := c.WaitForRegistration(ctx); err != nil {
+		t.Fatalf("WaitForRegistration: %v", err)
+	}
+	if got := strings.Join(seen, ","); got != "UNREGISTERED,UNREGISTERED+error,ENABLED" {
+		t.Errorf("hook saw %q, want the failed start reported", got)
 	}
 }

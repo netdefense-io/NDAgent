@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -499,4 +500,39 @@ func cloneStatus(st *opnapi.FirmwareUpgradeStatus) *opnapi.FirmwareUpgradeStatus
 	c := *st
 	c.UpgradeSets = append([]opnapi.FirmwareUpgradeSet(nil), st.UpgradeSets...)
 	return &c
+}
+
+// The manual series upgrade makes the track's agent ABI check (#170): without
+// an agent build for the ABI the hop lands on, it is not requested, and the
+// probe is asked for that ABI. A dry run says so too.
+func TestHandleMajor_NoAgentBuildForTheNewABIIsRefused(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		repo  track.AgentRepo
+		err   error
+		extra map[string]interface{}
+		why   string
+	}{
+		{"no tree", track.AgentRepo{Nested: true, Why: "the NetDefense repository has no meta.conf under FreeBSD:15:amd64"}, nil, nil, "no agent build for FreeBSD:15:amd64 that this device could reach (the NetDefense repository has no meta.conf"},
+		{"unreachable", track.AgentRepo{Nested: true, Why: "the NetDefense repository cannot be reached"}, nil, nil, "could reach (the NetDefense repository cannot be reached)"},
+		{"a flat url", track.AgentRepo{Why: "the NetDefense repository url is not laid out per ABI"}, nil, nil, "stay on the FreeBSD:14:amd64 build"},
+		{"the probe fails", track.AgentRepo{}, errors.New("fetch: timeout"), nil, "could not be checked for FreeBSD:15:amd64"},
+		{"a dry run", track.AgentRepo{Nested: true}, nil, map[string]interface{}{"dry_run": true}, "no agent build for FreeBSD:15:amd64"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			requireSlotFree(t)
+			f := newFirmwareFixture(t)
+			var asked []string
+			defer SetMajorAgentRepoProbeForTest(func(_ context.Context, abi string) (track.AgentRepo, error) {
+				asked = append(asked, abi)
+				return tc.repo, tc.err
+			})()
+			c := newMajorClient(majorOfferStatus("an older check"), majorOfferStatus(""))
+			runMajor(t, f, c, tc.extra)
+			assertNotRequested(t, f, c, tc.why)
+			if !reflect.DeepEqual(asked, []string{"FreeBSD:15:amd64"}) {
+				t.Errorf("probe asked for %v, want the hop's target ABI", asked)
+			}
+		})
+	}
 }

@@ -2,9 +2,11 @@ package opnapi
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 )
 
 // SearchUsers searches for users matching the search phrase.
@@ -143,10 +145,8 @@ func (c *Client) SetUser(ctx context.Context, uuid string, user User) error {
 	return nil
 }
 
-// userMembershipsWrapper mirrors UserWrapper but carries only the account's name
-// and a group_memberships with no `omitempty`. User.GroupMemberships needs the
-// tag for every ordinary update (an absent key leaves the memberships alone),
-// and it would silently drop the one value this call exists to send: empty.
+// userMembershipsWrapper carries only the account's name and its
+// group_memberships, so the prune changes nothing else of the user.
 type userMembershipsWrapper struct {
 	User struct {
 		Name             string `json:"name"`
@@ -253,7 +253,7 @@ func ConvertUserToAPI(rawUser map[string]interface{}, groups []map[string]interf
 	groupMemberships, _ := rawUser["group_memberships"].(string)
 	priv, _ := rawUser["priv"].(string)
 	shell, _ := rawUser["shell"].(string)
-	authorizedKeys, _ := rawUser["authorizedkeys"].(string)
+	authorizedKeys := decodeAuthorizedKeys(rawUser["authorizedkeys"])
 	expires, _ := rawUser["expires"].(string)
 	email, _ := rawUser["email"].(string)
 	comment, _ := rawUser["comment"].(string)
@@ -279,6 +279,19 @@ func ConvertUserToAPI(rawUser map[string]interface{}, groups []map[string]interf
 		LandingPage:    landingPage,
 		Templates:      ParseTemplateTags(descr),
 	}
+}
+
+// decodeAuthorizedKeys reads a row's authorizedkeys: OPNsense stores them in
+// base64 (StoreB64Field) and the grid sends the stored value, while a snippet
+// and a write carry the plain text. A value that is not base64, or does not
+// decode to UTF-8 text, is returned as it is.
+func decodeAuthorizedKeys(v interface{}) string {
+	stored, _ := v.(string)
+	plain, err := base64.StdEncoding.DecodeString(stored)
+	if err != nil || !utf8.Valid(plain) {
+		return stored
+	}
+	return string(plain)
 }
 
 // ConvertAPIToUser converts the portable API format to OPNsense User format.

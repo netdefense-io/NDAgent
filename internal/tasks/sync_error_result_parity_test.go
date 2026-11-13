@@ -290,9 +290,7 @@ func TestExecuteSyncZabbix_ReconfigureFailure_HasMatchingResultItem(t *testing.T
 	mux.HandleFunc("/zabbixagent/settings/searchAliases/", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
-	mux.HandleFunc("/zabbixagent/settings/get", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]interface{}{})
-	})
+	mux.HandleFunc("/zabbixagent/settings/get", zabbixDeviceSettings)
 	mux.HandleFunc("/zabbixagent/settings/set", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SetZabbixResponse{Result: "saved"})
 	})
@@ -367,13 +365,19 @@ func TestExecuteSyncUsersGroups_ListGroupsFailure_HasMatchingResultItem(t *testi
 // the same group (which must stay "success").
 func TestExecuteSyncUsersGroups_MemberUpdateFailure_HasMatchingResultItem(t *testing.T) {
 	setCalls := 0
+	added := false
 	mux := http.NewServeMux()
 	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
-			Rows: []map[string]interface{}{
-				{"uuid": "u1", "name": "e2e-tests", "uid": "2004"},
-			},
-		})
+		rows := []map[string]interface{}{{"uuid": "u1", "name": "e2e-tests", "uid": "2004"}}
+		if added {
+			rows = append(rows, map[string]interface{}{"uuid": "u2", "name": "new-member", "uid": "2005"})
+		}
+		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: rows})
+	})
+	// A user this sync creates, so Phase 4 has a member Phase 2 could not resolve.
+	mux.HandleFunc("/auth/user/add", func(w http.ResponseWriter, r *http.Request) {
+		added = true
+		_ = json.NewEncoder(w).Encode(opnapi.SetUserResponse{Result: "saved", UUID: "u2"})
 	})
 	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{
@@ -396,8 +400,8 @@ func TestExecuteSyncUsersGroups_MemberUpdateFailure_HasMatchingResultItem(t *tes
 	defer server.Close()
 	client := opnapi.NewClient(server.URL, "key", "secret", true)
 
-	groupPayload := opnapi.APIGroupPayload{Name: "eng-team", Members: []string{"e2e-tests"}}
-	result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
+	groupPayload := opnapi.APIGroupPayload{Name: "eng-team", Members: []string{"e2e-tests", "new-member"}}
+	result := executeSyncUsersGroups(context.Background(), client, []opnapi.APIUserPayload{{Name: "new-member", Password: "pw"}}, []opnapi.APIGroupPayload{groupPayload}, false, authDeferralInfo{})
 
 	if setCalls != 2 {
 		t.Fatalf("auth/group/set calls = %d, want exactly 2 (Phase 2 create/update + Phase 4 member update)", setCalls)

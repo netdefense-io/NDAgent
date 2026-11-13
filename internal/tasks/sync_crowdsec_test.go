@@ -3,9 +3,15 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"encoding/xml"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -31,11 +37,27 @@ type fakeCrowdsec struct {
 	dropKeys         bool
 	reconfigureBody  string
 	reconfigureAfter string // status the device reaches after a reconfigure
-	blockReconfigure chan struct{}
+	// With settleTo set, the status turns settleTo on the read that follows
+	// settleAfter reads of reconfigureAfter after the last reconfigure.
+	settleTo         string
+	settleAfter      int
+	readsAfterReconf int
 	statusFails      bool
 	failGetAfterSet  bool
 	dropOnly         map[string]bool
 	setDone          bool
+
+	// The engine process, which the plugin's status does not see. With
+	// engineDown it is absent, up again from probe engineUpAt on (0: never).
+	// With engineCrashLoop every probe finds a new process; with
+	// engineUpOnce only the first probe after each reconfigure finds one.
+	engineDown      bool
+	engineUpAt      int
+	engineCrashLoop bool
+	engineUpOnce    bool
+	engineProbeErr  error
+	engineProbes    int
+	probesAfterRec  int
 }
 
 func defaultCrowdsecModel() map[string]string {
@@ -51,11 +73,31 @@ func newFakeCrowdsec(t *testing.T) (*fakeCrowdsec, *opnapi.Client) {
 	t.Helper()
 	f := &fakeCrowdsec{model: defaultCrowdsecModel(), status: "running", reconfigureAfter: "running", reconfigureBody: `{"status":"ok"}`}
 
-	oldPath, oldInt, oldTimeout, oldNow := crowdsecStatePath, crowdsecPollInterval, crowdsecPollTimeout, crowdsecNow
+	oldPath, oldInt, oldTimeout, oldNow, oldEngine, oldSettle := crowdsecStatePath, crowdsecPollInterval, crowdsecPollTimeout, crowdsecNow, crowdsecEnginePID, crowdsecEngineSettle
 	crowdsecStatePath = t.TempDir() + "/crowdsec-apply.json"
-	crowdsecPollInterval, crowdsecPollTimeout = time.Millisecond, 30*time.Millisecond
+	crowdsecPollInterval, crowdsecPollTimeout, crowdsecEngineSettle = time.Millisecond, 30*time.Millisecond, 0
+	crowdsecEnginePID = func(context.Context) (int, error) {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		f.engineProbes++
+		f.probesAfterRec++
+		switch {
+		case f.engineProbeErr != nil:
+			return 0, f.engineProbeErr
+		case f.engineCrashLoop:
+			return 4242 + f.engineProbes, nil
+		case f.engineUpOnce:
+			if f.reconfigures > 0 && f.probesAfterRec == 1 {
+				return 4242 + f.reconfigures, nil
+			}
+			return 0, nil
+		case f.engineDown && (f.engineUpAt == 0 || f.engineProbes < f.engineUpAt):
+			return 0, nil
+		}
+		return 4242, nil
+	}
 	t.Cleanup(func() {
-		crowdsecStatePath, crowdsecPollInterval, crowdsecPollTimeout, crowdsecNow = oldPath, oldInt, oldTimeout, oldNow
+		crowdsecStatePath, crowdsecPollInterval, crowdsecPollTimeout, crowdsecNow, crowdsecEnginePID, crowdsecEngineSettle = oldPath, oldInt, oldTimeout, oldNow, oldEngine, oldSettle
 	})
 
 	mux := http.NewServeMux()
@@ -101,11 +143,10 @@ func newFakeCrowdsec(t *testing.T) (*fakeCrowdsec, *opnapi.Client) {
 		f.mu.Lock()
 		f.reconfigures++
 		f.status = f.reconfigureAfter
-		body, block := f.reconfigureBody, f.blockReconfigure
+		f.readsAfterReconf = 0
+		f.probesAfterRec = 0
+		body := f.reconfigureBody
 		f.mu.Unlock()
-		if block != nil {
-			<-block
-		}
 		_, _ = w.Write([]byte(body))
 	})
 	mux.HandleFunc("/crowdsec/service/status", func(w http.ResponseWriter, r *http.Request) {
@@ -115,6 +156,12 @@ func newFakeCrowdsec(t *testing.T) (*fakeCrowdsec, *opnapi.Client) {
 		if f.statusFails {
 			w.WriteHeader(500)
 			return
+		}
+		if f.settleTo != "" && f.reconfigures > 0 {
+			if f.readsAfterReconf >= f.settleAfter {
+				f.status = f.settleTo
+			}
+			f.readsAfterReconf++
 		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": f.status})
 	})
@@ -237,7 +284,9 @@ func TestSyncCrowdsec_NoSnippetTouchesNothing(t *testing.T) {
 	}
 }
 
-func TestSyncCrowdsec_PluginAbsentIsASkippedNoOp(t *testing.T) {
+// An assigned snippet on a device without the plugin is a warning: it is not
+// applied, and the task still succeeds.
+func TestSyncCrowdsec_PluginAbsentIsAWarning(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
 	f.notFound = true
 	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "1"}))
@@ -246,8 +295,8 @@ func TestSyncCrowdsec_PluginAbsentIsASkippedNoOp(t *testing.T) {
 		t.Fatalf("not a no-op: %+v", r)
 	}
 	items := csItemsOf(r, "crowdsec_settings")
-	if len(items) != 1 || items[0].Status != "skipped" || items[0].Name != "cs" || !strings.Contains(items[0].Error, "not installed") {
-		t.Errorf("skipped item = %+v", items)
+	if len(items) != 1 || items[0].Status != "warning" || items[0].Name != "cs" || !strings.Contains(items[0].Error, `snippet "cs" was not applied: os-crowdsec is not installed`) {
+		t.Errorf("item = %+v, want a warning naming the snippet", items)
 	}
 	if len(f.sets) != 0 || f.reconfigures != 0 {
 		t.Error("nothing may be written")
@@ -486,16 +535,15 @@ func TestSyncCrowdsec_StatusMismatchAfterReconfigureFails(t *testing.T) {
 func TestSyncCrowdsec_StatusIsPolledUntilItSettles(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
 	f.reconfigureAfter = "stopped"
-	go func() {
-		time.Sleep(8 * time.Millisecond)
-		f.mu.Lock()
-		f.status = "running"
-		f.mu.Unlock()
-	}()
+	f.settleTo, f.settleAfter = "running", 2
+	crowdsecPollTimeout = time.Minute
 	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
 	checkCrowdsecResult(t, r)
 	if !r.Success {
 		t.Errorf("a service that comes up within the poll window is fine: %+v", r)
+	}
+	if f.readsAfterReconf != 3 {
+		t.Errorf("status read %d times after the reconfigure, want 3: two that are stopped, then the one that is running", f.readsAfterReconf)
 	}
 }
 
@@ -508,11 +556,46 @@ func TestSyncCrowdsec_DisablingEverythingExpectsDisabled(t *testing.T) {
 	}
 }
 
+// reconfigureAnswerLost delivers every request to the fake device and, for
+// the reconfigure, gives the client a timeout once the device has run it: the
+// work was done, the answer never arrived.
+type reconfigureAnswerLost struct{ base http.RoundTripper }
+
+func (rt reconfigureAnswerLost) RoundTrip(r *http.Request) (*http.Response, error) {
+	resp, err := rt.base.RoundTrip(r)
+	if err != nil || !strings.HasSuffix(r.URL.Path, "/crowdsec/service/reconfigure") {
+		return resp, err
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return nil, answerTimeout{}
+}
+
+type answerTimeout struct{}
+
+func (answerTimeout) Error() string   { return "timeout awaiting the reconfigure answer" }
+func (answerTimeout) Timeout() bool   { return true }
+func (answerTimeout) Temporary() bool { return true }
+
+func loseReconfigureAnswer(t *testing.T, client *opnapi.Client) {
+	t.Helper()
+	base := &http.Transport{}
+	t.Cleanup(base.CloseIdleConnections)
+	client.SetTransport(reconfigureAnswerLost{base: base})
+}
+
+func reconfigureWarned(r SyncAPIResult) bool {
+	for _, it := range csItemsOf(r, "crowdsec_apply") {
+		if it.Status == "warning" {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSyncCrowdsec_ReconfigureTimeoutIsVerifiedWithStatus(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
-	f.blockReconfigure = make(chan struct{})
-	t.Cleanup(func() { close(f.blockReconfigure) })
-	client.SetHTTPTimeout(60 * time.Millisecond)
+	loseReconfigureAnswer(t, client)
 	f.reconfigureAfter = "running"
 
 	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
@@ -523,26 +606,26 @@ func TestSyncCrowdsec_ReconfigureTimeoutIsVerifiedWithStatus(t *testing.T) {
 	if f.reconfigures != 1 {
 		t.Errorf("a timeout must not be retried: %d", f.reconfigures)
 	}
-	var warned bool
-	for _, it := range csItemsOf(r, "crowdsec_apply") {
-		warned = warned || it.Status == "warning"
-	}
-	if !warned {
+	if !reconfigureWarned(r) {
 		t.Errorf("the unknown outcome must be visible: %+v", r.Results)
 	}
 }
 
 func TestSyncCrowdsec_ReconfigureTimeoutWithWrongStatusFails(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
-	f.blockReconfigure = make(chan struct{})
-	t.Cleanup(func() { close(f.blockReconfigure) })
-	client.SetHTTPTimeout(60 * time.Millisecond)
+	loseReconfigureAnswer(t, client)
 	f.reconfigureAfter = "stopped"
 
 	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
 	checkCrowdsecResult(t, r)
 	if r.Success || f.reconfigures != 1 {
 		t.Errorf("%+v reconfigures=%d", r, f.reconfigures)
+	}
+	if !reconfigureWarned(r) {
+		t.Errorf("the timeout must be what this run went through: %+v", r.Results)
+	}
+	if len(r.Errors) == 0 || !strings.Contains(r.Errors[0], `"stopped"`) {
+		t.Errorf("the failure must come from the status read after the timeout: %+v", r.Errors)
 	}
 }
 
@@ -581,11 +664,282 @@ func TestSyncCrowdsec_FailedHealIsNotRepeated(t *testing.T) {
 	}
 }
 
+// #183: the plugin's status reads the daemon(8) supervisor, which stays up
+// while it retries an engine that cannot start.
+func TestSyncCrowdsec_EngineDownAfterReconfigureFails(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineDown = true
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if r.Success || f.reconfigures != 1 {
+		t.Fatalf("an apply whose engine is not running is not a success: %+v reconfigures=%d", r, f.reconfigures)
+	}
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "engine is not running") {
+		t.Errorf("the failure must name the engine: %+v", r.Errors)
+	}
+
+	r = executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if r.Success || f.reconfigures != 1 || len(r.Errors) == 0 || !strings.Contains(r.Errors[0], "previous apply failed") {
+		t.Errorf("the failed apply must be remembered: %+v reconfigures=%d", r, f.reconfigures)
+	}
+}
+
+func TestSyncCrowdsec_EngineThatComesUpWithinThePollIsFine(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineDown, f.engineUpAt = true, 3
+	crowdsecPollTimeout = time.Minute
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || f.engineProbes != 3 {
+		t.Errorf("%+v probes=%d, want the pre-apply probe and two polls", r, f.engineProbes)
+	}
+}
+
+func TestSyncCrowdsec_HealRestartsAServiceWhoseEngineIsDown(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineDown, f.engineUpAt = true, 2
+	crowdsecPollTimeout = time.Minute
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || f.reconfigures != 1 || len(f.sets) != 0 || len(csItemsOf(r, crowdsecItemType)) != 1 || csItemsOf(r, crowdsecItemType)[0].Action != "restarted" {
+		t.Errorf("a matching model with a dead engine is healed once: %+v reconfigures=%d sets=%d", r, f.reconfigures, len(f.sets))
+	}
+}
+
+// A bouncer that uses a remote LAPI runs no engine here; "running" is its own.
+func TestSyncCrowdsec_EngineIsNotProbedWhenTheModelRunsNone(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["agent_enabled"], f.model["lapi_enabled"], f.model["lapi_manual_configuration"] = "0", "0", "1"
+	f.engineDown = true
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd", "agent_enabled": "0", "lapi_enabled": "0"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || f.reconfigures != 1 || f.engineProbes != 0 {
+		t.Errorf("%+v reconfigures=%d probes=%d", r, f.reconfigures, f.engineProbes)
+	}
+}
+
+func TestSyncCrowdsec_AnEngineProbeThatCannotRunKeepsThePluginStatus(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineProbeErr = errors.New("pgrep: not found")
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || f.engineProbes == 0 {
+		t.Errorf("%+v probes=%d", r, f.engineProbes)
+	}
+}
+
+func TestSyncCrowdsec_EngineThatKeepsRestartingFails(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineCrashLoop = true
+	crowdsecEngineSettle = 5 * time.Millisecond
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if r.Success || len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "did not stay up") {
+		t.Errorf("an engine that is a new process at every look did not stay up: %+v", r)
+	}
+}
+
+// An engine first seen when the poll's deadline is near still gets its settle
+// time; a slow start is not a crash loop.
+func TestSyncCrowdsec_AnEngineThatStartsLateCanStillSettle(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineDown, f.engineUpAt = true, 25
+	crowdsecPollTimeout, crowdsecEngineSettle = 30*time.Second, 11*time.Second
+	// The clock moves a second per probe: the engine is first seen 24 s into
+	// a 30 s poll.
+	base := time.Now()
+	crowdsecNow = func() time.Time {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		return base.Add(time.Duration(f.engineProbes) * time.Second)
+	}
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success {
+		t.Errorf("%+v probes=%d", r, f.engineProbes)
+	}
+}
+
+func TestSyncCrowdsec_AnEngineThatStartsAndDiesIsNamedSo(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineUpOnce = true
+	crowdsecEngineSettle = 5 * time.Millisecond
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if r.Success || len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "started after the reconfigure but did not stay up") {
+		t.Errorf("%+v", r)
+	}
+}
+
+func TestSyncCrowdsec_EngineThatStaysUpPasses(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	crowdsecEngineSettle = 5 * time.Millisecond
+	crowdsecPollTimeout = time.Minute
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || f.probesAfterRec < 2 {
+		t.Errorf("the same engine seen again after the settle time is up: %+v probes after the reconfigure=%d", r, f.probesAfterRec)
+	}
+}
+
+// An engine up only right after each restart reads as healed; it is still
+// restarted only once per crowdsecRetryAfter, whatever the status reads.
+func TestSyncCrowdsec_HealRunsAtMostOncePerWindow(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineUpOnce = true
+	var offset time.Duration
+	crowdsecNow = func() time.Time { return time.Now().Add(offset) }
+	desired := desiredOf("cs", map[string]string{"rules_log": "0"})
+
+	r := executeSyncCrowdsec(context.Background(), client, desired)
+	checkCrowdsecResult(t, r)
+	if f.reconfigures != 1 {
+		t.Fatalf("first SYNC heals: %+v reconfigures=%d", r, f.reconfigures)
+	}
+
+	r = executeSyncCrowdsec(context.Background(), client, desired)
+	checkCrowdsecResult(t, r)
+	if f.reconfigures != 1 || r.Success || len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "not restarted again yet") {
+		t.Fatalf("a second heal within the window: %+v reconfigures=%d", r, f.reconfigures)
+	}
+
+	offset = crowdsecRetryAfter + time.Minute
+	executeSyncCrowdsec(context.Background(), client, desired)
+	if f.reconfigures != 2 {
+		t.Errorf("the window has passed: reconfigures=%d", f.reconfigures)
+	}
+}
+
+func TestSyncCrowdsec_AVerifiedApplyKeepsTheHealRecord(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.engineUpOnce = true
+	_ = executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	if f.reconfigures != 1 {
+		t.Fatalf("reconfigures=%d", f.reconfigures)
+	}
+	f.engineUpOnce = false
+	if r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_tag": "nd"})); !r.Success {
+		t.Fatalf("%+v", r)
+	}
+	if heals := loadCrowdsecMemory().Heals; len(heals) != 1 {
+		t.Errorf("a verified apply must not forget the restart of the window: %+v", heals)
+	}
+}
+
+func TestProcessesNamed(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep is not installed")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	pids, err := processesNamed(context.Background(), "sleep")
+	if err != nil || !containsInt(pids, cmd.Process.Pid) {
+		t.Errorf("a running sleep: pids=%v err=%v", pids, err)
+	}
+	if pids, err := processesNamed(context.Background(), "sle"); err != nil || len(pids) != 0 {
+		t.Errorf("a prefix of a name is not the name: pids=%v err=%v", pids, err)
+	}
+}
+
+// The engine's stand-in for TestSupervisedCrowdsecPID: this test binary,
+// copied under the name crowdsec, sleeping.
+func TestCrowdsecStandIn(t *testing.T) {
+	if os.Getenv("NDAGENT_CROWDSEC_STAND_IN") != "1" {
+		t.Skip("runs only as TestSupervisedCrowdsecPID's stand-in")
+	}
+	time.Sleep(30 * time.Second)
+}
+
+func TestSupervisedCrowdsecPID(t *testing.T) {
+	if _, err := exec.LookPath("pgrep"); err != nil {
+		t.Skip("pgrep is not installed")
+	}
+	self, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := os.ReadFile(self)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/crowdsec", bin, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(dir+"/crowdsec", "-test.run=^TestCrowdsecStandIn$")
+	cmd.Env = append(os.Environ(), "NDAGENT_CROWDSEC_STAND_IN=1")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+
+	old := crowdsecEnginePidfile
+	crowdsecEnginePidfile = dir + "/crowdsec.pid"
+	t.Cleanup(func() { crowdsecEnginePidfile = old })
+	write := func(content string) {
+		t.Helper()
+		if err := os.WriteFile(crowdsecEnginePidfile, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if _, err := supervisedCrowdsecPID(context.Background()); err == nil {
+		t.Error("no pidfile is a layout the check does not know: want an error, so the plugin's answer stands")
+	}
+	write(fmt.Sprintf("%d\n", cmd.Process.Pid))
+	if pid, err := supervisedCrowdsecPID(context.Background()); err != nil || pid != cmd.Process.Pid {
+		t.Errorf("the supervised engine: pid=%d err=%v, want %d", pid, err, cmd.Process.Pid)
+	}
+	write(fmt.Sprintf("%d\n", os.Getpid()))
+	if pid, err := supervisedCrowdsecPID(context.Background()); err != nil || pid != 0 {
+		t.Errorf("a pidfile naming a process that is not crowdsec: pid=%d err=%v", pid, err)
+	}
+	gone := exec.Command("true")
+	if err := gone.Run(); err != nil {
+		t.Fatal(err)
+	}
+	write(fmt.Sprintf("%d\n", gone.Process.Pid))
+	if pid, err := supervisedCrowdsecPID(context.Background()); err != nil || pid != 0 {
+		t.Errorf("a pidfile naming a process that has exited: pid=%d err=%v", pid, err)
+	}
+	write("")
+	if pid, err := supervisedCrowdsecPID(context.Background()); err != nil || pid != 0 {
+		t.Errorf("the empty pidfile daemon(8) leaves when the engine dies: pid=%d err=%v", pid, err)
+	}
+	write("garbage")
+	if pid, err := supervisedCrowdsecPID(context.Background()); err != nil || pid != 0 {
+		t.Errorf("an unreadable pidfile: pid=%d err=%v", pid, err)
+	}
+}
+
+func containsInt(list []int, v int) bool {
+	for _, x := range list {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
 func TestSyncCrowdsec_NoHealWhenEverythingIsOff(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
 	f.model["agent_enabled"], f.model["lapi_enabled"], f.model["firewall_bouncer_enabled"] = "0", "0", "0"
 	f.status = "disabled"
-	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0", "agent_enabled": "0", "lapi_enabled": "0", "firewall_bouncer_enabled": "0"}))
 	if !r.Success || f.reconfigures != 0 {
 		t.Errorf("%+v", r)
 	}
@@ -608,7 +962,7 @@ func TestSyncCrowdsec_EnrollmentIsReportedAsRequestedWithoutTheKey(t *testing.T)
 		t.Fatalf("%+v", r)
 	}
 	items := csItemsOf(r, "crowdsec_enrollment")
-	if len(items) != 1 || items[0].Action != "requested" || !strings.Contains(items[0].Error, "CrowdSec Console") {
+	if len(items) != 1 || items[0].Action != "requested" || !strings.Contains(items[0].Error, "CrowdSec Console") || !strings.Contains(items[0].Error, "not verified") {
 		t.Errorf("enrollment item = %+v", items)
 	}
 
@@ -644,11 +998,13 @@ func TestPullCrowdsecSettings(t *testing.T) {
 	}
 }
 
-func TestPullCrowdsecSettingsPluginAbsentIsNotFound(t *testing.T) {
+// A PULL on a device without os-crowdsec says the plugin is missing, as the
+// SYNC's skipped item does, not that the snippet is (#187).
+func TestPullCrowdsecSettingsPluginAbsentNamesThePlugin(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
 	f.notFound = true
 	content, err := pullCrowdsecSettings(context.Background(), client)
-	if err != nil || content != nil {
+	if content != nil || !errors.Is(err, errCrowdsecNotInstalled) || !strings.Contains(err.Error(), "os-crowdsec is not installed") {
 		t.Errorf("got %v, %v", content, err)
 	}
 }
@@ -694,7 +1050,7 @@ func TestSyncCrowdsec_HealIsRefusedWhenItWouldLeaveLAPIOff(t *testing.T) {
 	f, client := newFakeCrowdsec(t)
 	f.model["lapi_enabled"] = "0"
 	f.status = "stopped"
-	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0", "lapi_enabled": "0"}))
 	checkCrowdsecResult(t, r)
 	if !r.Success || f.reconfigures != 0 {
 		t.Fatalf("%+v reconfigures=%d", r, f.reconfigures)
@@ -719,5 +1075,149 @@ func TestSyncCrowdsecFromPayload_BadSnippetFailsOnlyThisSection(t *testing.T) {
 	ok := syncCrowdsecFromPayload(context.Background(), client, crowdsecPayload(crowdsecSnippet("a", `{"rules_tag":"nd"}`)))
 	if !ok.Success || len(f.sets) != 1 {
 		t.Errorf("a valid payload applies: %+v", ok)
+	}
+}
+
+// A key the snippet leaves out takes os-crowdsec's default (the operator's
+// rule, 2026-11-12), and one the installed plugin does not have is skipped
+// without a warning, since the snippet never named it.
+func TestSyncCrowdsec_ALeftOutKeyTakesTheDefault(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["rules_log"], f.model["crowdsec_firewall_verbose"], f.model["rules_tag"] = "1", "1", "byhand"
+	delete(f.model, "enroll_key")
+
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_enabled": "1"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || len(f.sets) != 1 {
+		t.Fatalf("%+v sets=%v", r, f.sets)
+	}
+	want := map[string]string{"rules_log": "0", "crowdsec_firewall_verbose": "0", "rules_tag": ""}
+	if !reflect.DeepEqual(f.sets[0], want) {
+		t.Errorf("sent %v, want %v", f.sets[0], want)
+	}
+	if items := csItemsOf(r, crowdsecItemType); len(items) != 1 || items[0].Status != "success" {
+		t.Errorf("items %+v, want one success and no warning for enroll_key", items)
+	}
+
+	f.sets = nil
+	r = executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{}))
+	if !r.Success || len(f.sets) != 0 {
+		t.Errorf("a device at the defaults was written again: %+v sets=%v", r, f.sets)
+	}
+}
+
+// crowdsecDefaults is os-crowdsec's own model (testdata/crowdsec, SOURCE.md):
+// every snippet key has the model's default, a boolean's is "0" or "1", and
+// each reads back unchanged, so a left-out key never shows as changed.
+func TestCrowdsecDefaultsAreTheModels(t *testing.T) {
+	data, err := os.ReadFile("testdata/crowdsec/General.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Items struct {
+			Fields []struct {
+				XMLName xml.Name
+				Type    string `xml:"type,attr"`
+				Default string `xml:"Default"`
+			} `xml:",any"`
+		} `xml:"items"`
+	}
+	if err := xml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+	fields := map[string][2]string{}
+	for _, f := range doc.Items.Fields {
+		fields[f.XMLName.Local] = [2]string{f.Type, strings.TrimSpace(f.Default)}
+	}
+	if len(crowdsecDefaults) != len(crowdsecKeys) {
+		t.Errorf("%d defaults for %d keys", len(crowdsecDefaults), len(crowdsecKeys))
+	}
+	for _, key := range crowdsecKeys {
+		f, ok := fields[key]
+		if !ok {
+			t.Errorf("%s is not in the model", key)
+			continue
+		}
+		def, ok := crowdsecDefaults[key]
+		if !ok {
+			t.Errorf("%s has no default", key)
+			continue
+		}
+		if def != f[1] {
+			t.Errorf("%s: default %q, the model's is %q", key, def, f[1])
+		}
+		if (f[0] == "BooleanField") != crowdsecBoolKeys[key] {
+			t.Errorf("%s: model type %s, boolean key %v", key, f[0], crowdsecBoolKeys[key])
+		}
+		if got := normalizeCrowdsecValue(key, def); got != def {
+			t.Errorf("%s: default %q reads back as %q", key, def, got)
+		}
+	}
+}
+
+func TestSyncCrowdsec_ALeftOutEnablementKeyIsWrittenOnAndApplied(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["rules_enabled"] = "0"
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || len(f.sets) != 1 || !reflect.DeepEqual(f.sets[0], map[string]string{"rules_enabled": "1"}) || f.reconfigures != 1 {
+		t.Errorf("%+v sets=%v reconfigures=%d", r, f.sets, f.reconfigures)
+	}
+}
+
+func TestSyncCrowdsec_AnEnrollKeySetByHandIsClearedWithoutEnrolling(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["enroll_key"] = "byhand"
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || len(f.sets) != 1 || !reflect.DeepEqual(f.sets[0], map[string]string{"enroll_key": ""}) {
+		t.Errorf("%+v sets=%v", r, f.sets)
+	}
+	if items := csItemsOf(r, "crowdsec_enrollment"); len(items) != 0 {
+		t.Errorf("an empty key requested an enrollment: %+v", items)
+	}
+}
+
+// On a device whose agent and bouncer use a remote LAPI, a left-out
+// lapi_enabled still takes the default, on (the operator's rule), and the
+// result says so once, when it turns the local LAPI on.
+func TestSyncCrowdsec_ADefaultedLAPIBesideARemoteOneIsWarned(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["lapi_enabled"], f.model["lapi_manual_configuration"] = "0", "1"
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	checkCrowdsecResult(t, r)
+	if !r.Success || len(f.sets) != 1 || f.sets[0]["lapi_enabled"] != "1" {
+		t.Fatalf("%+v sets=%v", r, f.sets)
+	}
+	warned := 0
+	for _, it := range csItemsOf(r, crowdsecItemType) {
+		if it.Status == "warning" && strings.Contains(it.Error, "lapi_enabled") && strings.Contains(it.Error, "remote") {
+			warned++
+		}
+	}
+	if warned != 1 {
+		t.Errorf("items %+v, want one warning about the local LAPI", r.Results)
+	}
+
+	r = executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"rules_log": "0"}))
+	for _, it := range r.Results {
+		if it.Status == "warning" {
+			t.Errorf("the next sync warned again: %+v", it)
+		}
+	}
+}
+
+// A guard refusal names the enablement keys that came from a default, so the
+// user sees that the snippet left them out.
+func TestSyncCrowdsec_AGuardRefusalNamesTheDefaultedKeys(t *testing.T) {
+	f, client := newFakeCrowdsec(t)
+	f.model["agent_enabled"] = "0"
+	r := executeSyncCrowdsec(context.Background(), client, desiredOf("cs", map[string]string{"lapi_enabled": "0", "firewall_bouncer_enabled": "0"}))
+	if r.Success || len(f.sets) != 0 {
+		t.Fatalf("%+v sets=%v", r, f.sets)
+	}
+	if len(r.Errors) != 1 || !strings.Contains(r.Errors[0], "agent_enabled=true") || !strings.Contains(r.Errors[0], "agent_enabled left out of the snippet") {
+		t.Errorf("errors %v", r.Errors)
 	}
 }

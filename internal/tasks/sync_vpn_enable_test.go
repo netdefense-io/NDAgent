@@ -77,7 +77,7 @@ func testVPNNetworks() []VPNNetwork {
 		Interface: VPNInterface{
 			PrivateKey: testWireGuardPrivateKey,
 			Address:    "10.221.0.1/24",
-			ListenPort: 51820,
+			ListenPort: portOf(51820),
 		},
 		Peers: []VPNPeer{{
 			PeerName:   "peer-1",
@@ -547,7 +547,7 @@ func TestExecuteSyncVPN_MalformedPayloadDoesNotEnable(t *testing.T) {
 
 	bad := []VPNNetwork{{
 		NetworkName: "broken",
-		Interface:   VPNInterface{PrivateKey: "not-a-valid-key", Address: "10.0.0.1/24", ListenPort: 51820},
+		Interface:   VPNInterface{PrivateKey: "not-a-valid-key", Address: "10.0.0.1/24", ListenPort: portOf(51820)},
 	}}
 
 	result := executeSyncVPN(context.Background(), client, bad)
@@ -574,7 +574,7 @@ func TestExecuteSyncVPN_PartiallyValidPayloadStillEnables(t *testing.T) {
 
 	networks := append([]VPNNetwork{{
 		NetworkName: "broken",
-		Interface:   VPNInterface{PrivateKey: "not-a-valid-key", Address: "10.0.0.1/24", ListenPort: 51820},
+		Interface:   VPNInterface{PrivateKey: "not-a-valid-key", Address: "10.0.0.1/24", ListenPort: portOf(51820)},
 	}}, testVPNNetworks()...)
 
 	result := executeSyncVPN(context.Background(), client, networks)

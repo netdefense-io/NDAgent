@@ -1,11 +1,18 @@
 package tasks
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
+	"strings"
+	"time"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
@@ -37,7 +44,18 @@ import (
 // the two, but they should agree to keep the failure path predictable.
 var softwarePackageNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]*$`)
 
+// softwarePackageVersionPattern is a pkg(8) version: digits, letters and the
+// separators its versions use (1.2.3_1,1), with no glob character and no "-",
+// which separates a name from its version. A version is compared with what pkg
+// reports as it is, so one in another form never matches.
+// A version of letters alone ("latest") passes: it names no build, and the
+// archive's own version is compared instead (installExternal).
+var softwarePackageVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._,+]*$`)
+
 const softwarePackageNameMaxLen = 100
+
+// softwarePackageVersionMaxLen bounds a version as a name is bounded.
+const softwarePackageVersionMaxLen = softwarePackageNameMaxLen
 
 // softwarePayload is the parsed shape of the "software" key.
 type softwarePayload struct {
@@ -71,9 +89,9 @@ type externalPackage struct {
 }
 
 // parseSoftwarePayload extracts the "software" bucket from a SYNC_API
-// payload. Returns (nil, nil) when the key is absent or doesn't contain
-// anything actionable — that matches the "no software policy attached"
-// case, where executeSyncSoftware is a no-op.
+// payload. Returns (nil, nil) when the key is absent or null: NDManager sends
+// no section only when no software policy applies to the device, and
+// syncSoftwareSection then removes the repositories a policy wrote.
 func parseSoftwarePayload(payload map[string]interface{}) (*softwarePayload, error) {
 	raw, ok := payload["software"]
 	if !ok || raw == nil {
@@ -133,8 +151,6 @@ func parseSoftwarePayload(payload map[string]interface{}) (*softwarePayload, err
 	// forever once it was dropped from the policy, with no way to remove it
 	// through the product.
 	//
-	// An absent `software` key still returns nil: that is a server which sent
-	// no software section at all, and it must not be read as "prune".
 	return out, nil
 }
 
@@ -196,6 +212,44 @@ func parseExternal(raw interface{}) ([]externalPackage, error) {
 	return out, nil
 }
 
+// syncSoftwareSection runs the software pass for a SYNC. A SYNC with no
+// software section has no policy attached: it removes the repository files a
+// policy wrote (pkgrepo.Prune keeps only marked files, so an administrator's
+// own repository stays) and does nothing else. In particular, no pkg command
+// runs, so a device without a policy makes no catalog fetch on every SYNC, and
+// no package is removed.
+func syncSoftwareSection(ctx context.Context, sp *softwarePayload, configXMLPath string) SyncAPIResult {
+	if sp != nil {
+		return executeSyncSoftware(ctx, sp, configXMLPath)
+	}
+	result := SyncAPIResult{Success: true}
+	pruneRepositories(nil, &result)
+	return result
+}
+
+// pruneRepositories removes the managed repositories not named in keep and
+// reports each removal, or the failure, in result. It returns whether any
+// was removed and whether the prune succeeded.
+func pruneRepositories(keep []string, result *SyncAPIResult) (removedAny, ok bool) {
+	removed, err := pkgrepo.Prune(keep)
+	if err != nil {
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
+			Status: "error", Error: err.Error(),
+		})
+		result.Errors = append(result.Errors, fmt.Sprintf("repository prune: %v", err))
+		result.Success = false
+		return false, false
+	}
+	for _, name := range removed {
+		result.Results = append(result.Results, SyncAPIItemResult{
+			Type: "REPOSITORY", Name: name,
+			Action: string(pkgmgr.ActionRepoRemoved), Status: "success",
+		})
+	}
+	return len(removed) > 0, true
+}
+
 // executeSyncSoftware runs pkg(8) to reconcile the desired present/absent
 // state. Returns a SyncAPIResult that joins the broader SYNC_API result —
 // any non-success per-package action flips overall Success to false, same
@@ -216,8 +270,11 @@ func parseExternal(raw interface{}) ([]externalPackage, error) {
 //     otherwise.
 //  5. For each `present` name: if installed, ALREADY_PRESENT (no-op). Else
 //     shadow-check, then `pkg install -y`.
-//  6. For each `external` entry: if the declared name+version is installed
-//     and force is unset, ALREADY_PRESENT with no download. Else `pkg add`.
+//  6. For each `external` entry: a version that is not a pkg version, and
+//     without the organization's opt-in a URL that is not https, is refused
+//     (externalPermitted) before anything else.
+//     If the declared name+version is installed and force is unset,
+//     ALREADY_PRESENT with no download. Else `pkg add`.
 //  7. OPNsense's plugin list follows the os-* packages of the pass
 //     (syncPluginRegistry).
 //
@@ -457,25 +514,11 @@ func reconcileRepositories(
 	}
 	changed := pkgrepo.AnyChanged(written)
 
-	removed, err := pkgrepo.Prune(names)
-	if err != nil {
-		result.Results = append(result.Results, SyncAPIItemResult{
-			Type: "REPOSITORY", Action: string(pkgmgr.ActionError),
-			Status: "error", Error: err.Error(),
-		})
-		result.Errors = append(result.Errors, fmt.Sprintf("repository prune: %v", err))
-		result.Success = false
+	removedAny, ok := pruneRepositories(names, result)
+	if !ok {
 		return changed, false
 	}
-	// Removing a repository from the device is a change the operator should
-	// see, not something that happens silently.
-	for _, name := range removed {
-		changed = true
-		result.Results = append(result.Results, SyncAPIItemResult{
-			Type: "REPOSITORY", Name: name,
-			Action: string(pkgmgr.ActionRepoRemoved), Status: "success",
-		})
-	}
+	changed = changed || removedAny
 
 	// Per entry, not one flag for the batch: a single new repository used to
 	// make every sibling report as freshly configured.
@@ -491,49 +534,193 @@ func reconcileRepositories(
 	return changed, true
 }
 
-// installExternal runs phase 6.
+// installExternal runs phase 6. An entry externalPermitted refuses gets a
+// refused item and fails the task, whatever is installed, and the others go on.
 //
-// The declared name+version is the identity, because `pkg add` records no
-// repository origin and the URL alone cannot answer "already satisfied".
-// Checking first means a settled device performs no download at all.
+// `pkg add` records no repository origin, so the URL alone cannot answer
+// "already satisfied"; the installed version is read by the package's exact
+// name (pkgmgr.InstalledVersion, no pattern). A version that names a build is
+// compared as it is, so a settled device downloads nothing. A version without
+// a digit (latest) names no build: the archive is fetched and its own version
+// read (NDAgent-go#262), and the add is skipped when that version is installed.
+// Before any add the archive is read too, and one that holds another package,
+// or another build than the version the entry names, is refused.
 func installExternal(ctx context.Context, sp *softwarePayload, result *SyncAPIResult) {
 	for _, e := range sp.External {
 		item := SyncAPIItemResult{Type: "SOFTWARE", Name: e.Name}
+		fail := func(action pkgmgr.SoftwareAction, msg string) {
+			item.Action = string(action)
+			item.Status = "error"
+			item.Error = msg
+			result.Results = append(result.Results, item)
+			result.Errors = append(result.Errors, fmt.Sprintf("external %s from %s: %s", e.Name, e.URL, msg))
+			result.Success = false
+		}
+		present := func() {
+			item.Action = string(pkgmgr.ActionAlreadyPresent)
+			item.Status = "success"
+			result.Results = append(result.Results, item)
+		}
 
-		if !e.Force {
-			// pkg identifies an exact build as name-version.
-			installed, err := pkgmgr.IsInstalled(ctx, e.Name+"-"+e.Version)
+		if err := externalPermitted(e, sp.AllowUnverified); err != nil {
+			item.Action = "refused"
+			item.Status = "error"
+			item.Error = err.Error()
+			result.Results = append(result.Results, item)
+			result.Errors = append(result.Errors, err.Error())
+			result.Success = false
+			continue
+		}
+
+		namesBuild := strings.ContainsAny(e.Version, "0123456789")
+		if !e.Force && namesBuild {
+			installed, err := pkgmgr.InstalledVersion(ctx, e.Name)
 			if err != nil {
-				item.Action = string(pkgmgr.ActionError)
-				item.Status = "error"
-				item.Error = err.Error()
-				result.Results = append(result.Results, item)
-				result.Errors = append(result.Errors,
-					fmt.Sprintf("external %s: pkg info: %v", e.Name, err))
-				result.Success = false
+				fail(pkgmgr.ActionError, fmt.Sprintf("the installed version could not be read: %v", err))
 				continue
 			}
-			if installed {
-				item.Action = string(pkgmgr.ActionAlreadyPresent)
-				item.Status = "success"
-				result.Results = append(result.Results, item)
+			if installed == e.Version {
+				present()
+				continue
+			}
+		}
+
+		archiveName, archiveVersion, err := readExternalArchive(ctx, e.URL)
+		if err != nil {
+			fail(pkgmgr.ActionError, fmt.Sprintf("the archive could not be read: %v", err))
+			continue
+		}
+		if archiveName != e.Name {
+			fail("refused", fmt.Sprintf("the archive holds the package %s, not %s; nothing was installed", archiveName, e.Name))
+			continue
+		}
+		if namesBuild && archiveVersion != e.Version {
+			fail("refused", fmt.Sprintf("the archive holds %s-%s, not the version %s the policy names; nothing was installed", archiveName, archiveVersion, e.Version))
+			continue
+		}
+		if !e.Force && !namesBuild {
+			installed, err := pkgmgr.InstalledVersion(ctx, e.Name)
+			if err != nil {
+				fail(pkgmgr.ActionError, fmt.Sprintf("the installed version could not be read: %v", err))
+				continue
+			}
+			if installed == archiveVersion {
+				present()
 				continue
 			}
 		}
 
 		out := pkgmgr.AddURL(ctx, e.URL, e.Force)
-		item.Action = string(out.Action)
 		if out.Action == pkgmgr.ActionInstalled {
-			item.Status = "success"
-		} else {
-			item.Status = "error"
-			item.Error = out.ErrMsg
-			result.Errors = append(result.Errors,
-				fmt.Sprintf("external %s from %s: %s", e.Name, e.URL, out.ErrMsg))
-			result.Success = false
+			out = confirmExternalAdded(ctx, e, archiveVersion)
 		}
-		result.Results = append(result.Results, item)
+		if out.Action == pkgmgr.ActionInstalled {
+			item.Action = string(out.Action)
+			item.Status = "success"
+			result.Results = append(result.Results, item)
+			continue
+		}
+		fail(out.Action, out.ErrMsg)
 	}
+}
+
+// confirmExternalAdded checks, after a `pkg add` that succeeded, that the
+// archive's version is the installed one (NDAgent-go#142). pkg 2.3.1 (OPNsense
+// 26.1) answers an add over another installed version with "already
+// installed", installs nothing and exits 0; -f would replace it but also skips
+// pkg's ABI check, so the agent does not add it on its own.
+func confirmExternalAdded(ctx context.Context, e externalPackage, version string) pkgmgr.MutateOutcome {
+	installed, err := pkgmgr.InstalledVersion(ctx, e.Name)
+	if err != nil {
+		return pkgmgr.MutateOutcome{Action: pkgmgr.ActionError, ErrMsg: fmt.Sprintf("pkg add finished, but the installed version of %s could not be read: %v", e.Name, err)}
+	}
+	if installed == version {
+		return pkgmgr.MutateOutcome{Action: pkgmgr.ActionInstalled}
+	}
+	if e.Force {
+		return pkgmgr.MutateOutcome{Action: pkgmgr.ActionError, ErrMsg: fmt.Sprintf("pkg add -f finished, but %s-%s is not installed (installed: %q)", e.Name, version, installed)}
+	}
+	return pkgmgr.MutateOutcome{Action: pkgmgr.ActionError, ErrMsg: fmt.Sprintf("pkg add finished, but %s-%s is not installed (installed: %q): pkg add left the installed version in place; set force to replace it", e.Name, version, installed)}
+}
+
+// readExternalArchive fetches an external package's archive and reads the
+// name and version it holds. Overridable by tests.
+var readExternalArchive = fetchAndReadArchive
+
+// externalFetchTimeout bounds the download as pkg add's own is bounded.
+const externalFetchTimeout = 900 * time.Second
+
+// pkgURL reports whether pkg add reads s as a URL to download, by its own
+// three prefixes (pkg 2.3.1 src/add.c is_url); it reads anything else as a
+// path on the box.
+func pkgURL(s string) bool {
+	for _, prefix := range []string{"http://", "https://", "file://"} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// externalTempDir holds the downloaded archive: /var/tmp, not /tmp, which
+// OPNsense can mount as a memory disk.
+var externalTempDir = "/var/tmp"
+
+// fetchAndReadArchive downloads the archive with fetch(1) into a temporary
+// directory it removes after the read, in the environment pkg gives its own
+// downloads (pkg.conf's PKG_ENV: proxies, CA file, timeouts), so it goes the
+// way `pkg add <url>` would. A path is read in place, as pkg reads it.
+func fetchAndReadArchive(ctx context.Context, rawURL string) (string, string, error) {
+	path := rawURL
+	if pkgURL(rawURL) {
+		fetchEnv, err := pkgmgr.FetchEnv(ctx)
+		if err != nil {
+			return "", "", err
+		}
+		dir, err := os.MkdirTemp(externalTempDir, "ndagent-external-")
+		if err != nil {
+			return "", "", err
+		}
+		defer os.RemoveAll(dir)
+		path = filepath.Join(dir, "archive.pkg")
+		fctx, cancel := context.WithTimeout(ctx, externalFetchTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(fctx, "/usr/bin/fetch", "-q", "-o", path, "--", rawURL)
+		cmd.Env = append(DeviceExecEnv(), fetchEnv...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			if msg := strings.TrimSpace(stderr.String()); msg != "" {
+				return "", "", fmt.Errorf("fetch: %s", strings.SplitN(msg, "\n", 2)[0])
+			}
+			return "", "", fmt.Errorf("fetch: %w", err)
+		}
+	}
+	return pkgmgr.ArchiveNameVersion(ctx, path)
+}
+
+// externalPermitted is the agent's own check of an external package entry. Its
+// version must be a pkg version (softwarePackageVersionPattern), since it is
+// compared with the installed and the archive's versions as written. `pkg add`
+// installs what it fetches with no repository signature over it, so without
+// the organization's opt-in only an https URL is allowed. The prefix is
+// matched as pkg matches it, case and all: pkg reads anything that does not
+// start with a literal "https://" (or "http://", "file://") as a local path.
+func externalPermitted(e externalPackage, allowUnverified bool) error {
+	if len(e.Version) > softwarePackageVersionMaxLen || !softwarePackageVersionPattern.MatchString(e.Version) {
+		return fmt.Errorf("external %s: %q is not a package version", e.Name, e.Version)
+	}
+	if strings.HasPrefix(e.URL, "-") {
+		return fmt.Errorf("external %s: %q starts with \"-\", which pkg would read as an option", e.Name, e.URL)
+	}
+	if allowUnverified {
+		return nil
+	}
+	parsed, err := url.Parse(e.URL)
+	if err != nil || !strings.HasPrefix(e.URL, "https://") || parsed.Host == "" {
+		return fmt.Errorf("external %s: %q is not an https URL, which this device's organization requires for packages installed outside a repository", e.Name, e.URL)
+	}
+	return nil
 }
 
 func validSoftwareName(name string) bool {

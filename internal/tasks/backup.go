@@ -103,9 +103,21 @@ func backupConfig(ctx context.Context, configPath, encryptionKey string) TaskRes
 		"encoded_size", len(encodedContent),
 	)
 
-	// Return base64-encoded encrypted config in response
-	return NewSuccessResultWithData("Backup completed successfully", map[string]interface{}{
+	const doneMessage = "Backup completed successfully"
+	data := map[string]interface{}{
 		"content":     encodedContent,
 		"config_size": len(configData),
-	})
+	}
+	if size, err := network.TaskResponseFrameSize(network.TaskStatusCompleted, doneMessage, data); err == nil && size > network.MaxTaskResponseFrame {
+		log.Errorw("config.xml is too large for a backup to reach the control plane",
+			"config_size", len(configData), "frame_bytes", size, "limit", network.MaxTaskResponseFrame)
+		return NewFailureResult(fmt.Sprintf("config.xml is %d bytes: its encrypted backup would be about %d bytes once signed and encoded, "+
+			"over the %d-byte limit of one message to the control plane, so it cannot be delivered (a config.xml of up to about %d KiB fits)",
+			len(configData), size, network.MaxTaskResponseFrame, maxBackupConfigKiB))
+	}
+	return NewSuccessResultWithData(doneMessage, data)
 }
+
+// maxBackupConfigKiB is about the largest config.xml whose backup fits in
+// network.MaxTaskResponseFrame: the response is about 2.41 times the file.
+const maxBackupConfigKiB = 425

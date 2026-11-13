@@ -106,6 +106,20 @@ func TestAdminEquivalenceGate_UserElements(t *testing.T) {
 					return
 				}
 
+				// A cleared element passes the gate; one that names a group
+				// the device does not have, spelled exactly, is refused next.
+				wantUnknown := map[string]bool{
+					"membership in admins, other case":          true,
+					"membership in admins, padded":              true,
+					"membership in admins, packed in one entry": true,
+				}[tt.name]
+				if namesUnknownGroup(user, groups) != wantUnknown {
+					t.Fatalf("the fixture names a group the device does not have: %v, want %v", !wantUnknown, wantUnknown)
+				}
+				if wantUnknown {
+					assertRefusedForUnknownGroup(t, f, result, tt.user.Name)
+					return
+				}
 				if items := refusedItems(result); len(items) != 0 {
 					t.Fatalf("unexpected refusal: %+v", items)
 				}
@@ -403,11 +417,11 @@ func TestAdminEquivalenceGate_SameSyncGroupThenUser(t *testing.T) {
 			false,
 		)
 		items := refusedItems(result)
-		if len(items) != 1 || items[0].Type != "group" {
-			t.Fatalf("refused items = %+v, want only the group", items)
+		if len(items) != 2 || items[0].Type != "group" || items[0].Code != adminEquivalentCode || items[1].Name != "svc" || items[1].Code != userGroupUnknownCode {
+			t.Fatalf("refused items = %+v, want the group by the gate and the user, which names it, as naming a group that is not there", items)
 		}
-		if f.wroteAnythingFor("group", "new-ops") || !f.wrote("add", "user", "svc") {
-			t.Errorf("the group is refused and the user, which joins nothing, is applied; writes = %v", f.writes)
+		if f.wroteAnythingFor("group", "new-ops") || f.wroteAnythingFor("user", "svc") {
+			t.Errorf("neither may be written; writes = %v", f.writes)
 		}
 	})
 }
@@ -662,6 +676,14 @@ func TestLocalPolicy_RefusesAdministratorEquivalentMembership(t *testing.T) {
 
 		t.Run(tt.name+"/cleared, policy off", func(t *testing.T) {
 			f, result := run(true, false)
+			wantUnknown := tt.name == "admins, other case"
+			if _, groups := liveAccounts(); namesUnknownGroup(opnapi.APIUserPayload{Groups: tt.groups}, groups) != wantUnknown {
+				t.Fatalf("the fixture names a group the device does not have: %v, want %v", !wantUnknown, wantUnknown)
+			}
+			if wantUnknown {
+				assertRefusedForUnknownGroup(t, f, result, "svc")
+				return
+			}
 			if len(refusedItems(result)) != 0 || !f.wrote("add", "user", "svc") {
 				t.Errorf("a cleared element is applied with the policy off: items %+v, writes %v", refusedItems(result), f.writes)
 			}
@@ -735,13 +757,20 @@ func TestLocalPolicy_RefusedMembershipNeverDeletesWhatIsThere(t *testing.T) {
 	}
 }
 
-// useInstalledRelease makes the device report the release; "" leaves it
-// unreadable, which the gates read as below the floor.
+// useInstalledRelease makes the device report the community release; ""
+// leaves it unreadable, which the gates read as below the floor.
 func useInstalledRelease(t *testing.T, version string) {
+	t.Helper()
+	useInstalledReleaseOf(t, version, "opnsense")
+}
+
+// useInstalledReleaseOf is useInstalledRelease with the core package's name,
+// "" for a version file that does not give it.
+func useInstalledReleaseOf(t *testing.T, version, product string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "core")
 	if version != "" {
-		if err := os.WriteFile(path, []byte(`{"product_version":"`+version+`"}`), 0o644); err != nil {
+		if err := os.WriteFile(path, []byte(`{"product_version":"`+version+`","product_id":"`+product+`"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -840,5 +869,37 @@ func TestDangerousSnippetGate_FloorDependentPrivFollowsTheRelease(t *testing.T) 
 				t.Errorf("rejected = %v, want %v (errors %v)", rejected, tt.reject, result.Errors)
 			}
 		})
+	}
+}
+
+// namesUnknownGroup says whether the USER names a group that none of the live
+// groups is called, spelled exactly as OPNsense spells it.
+func namesUnknownGroup(u opnapi.APIUserPayload, live []row) bool {
+	names := map[string]bool{}
+	for _, g := range live {
+		if name, _ := g["name"].(string); name != "" {
+			names[name] = true
+		}
+	}
+	for _, g := range u.Groups {
+		if !names[g] {
+			return true
+		}
+	}
+	return false
+}
+
+func assertRefusedForUnknownGroup(t *testing.T, f *fakeAccounts, result SyncAPIResult, name string) {
+	t.Helper()
+	items := refusedItems(result)
+	if len(items) != 1 || items[0].Name != name || items[0].Code != userGroupUnknownCode {
+		t.Fatalf("refused items = %+v, want %q refused for naming a group the device does not have", items, name)
+	}
+	if result.Success {
+		t.Error("the refusal must fail the task")
+	}
+	assertErrorHasMatchingResultItem(t, "unknown group", result.Errors, result.Results)
+	if f.wroteAnythingFor("user", name) {
+		t.Errorf("the refused user reached OPNsense: %v", f.writes)
 	}
 }

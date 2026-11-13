@@ -80,6 +80,13 @@ type State struct {
 	// and at enroll.
 	HopAborts *HopAborts `json:"hop_aborts,omitempty"`
 
+	// HopBootEnvironment is the boot environment the agent made for a series
+	// upgrade, from which release and over which config.xml and package set. An
+	// attempt that aborted changed nothing, so a retry of the same upgrade from
+	// a box still in that state reuses it rather than making another (#136).
+	// Cleared with HopAborts.
+	HopBootEnvironment *HopBootEnvironment `json:"hop_boot_environment,omitempty"`
+
 	// Landing is the note a series upgrade leaves when it ended FAILED because the
 	// system it left is mixed (the core at the new series, a set or a marker short
 	// of it). While it stands a re-pin on that series runs majorLanded first and a
@@ -98,6 +105,18 @@ type HopAborts struct {
 	Series string `json:"series"`
 	At     int64  `json:"at"`
 	Streak int    `json:"streak"`
+}
+
+// HopBootEnvironment is a boot environment the agent made before a series
+// upgrade: for which series, from which release, and which environment.
+type HopBootEnvironment struct {
+	Series string `json:"series"`
+	From   string `json:"from"`
+	Name   string `json:"name"`
+	UUID   string `json:"uuid,omitempty"`
+	// Box is the box's state when the environment was made: a retry reuses the
+	// environment only while it is the same.
+	Box BoxState `json:"box"`
 }
 
 // Landing is the note of a hop that ended FAILED on the landing test.

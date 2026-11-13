@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -130,6 +133,68 @@ func NewClient(serverURL, sessionKey, deviceID string, tlsConfig *tls.Config) *C
 	}
 }
 
+// A relay at its cap of connections that have not registered yet answers 503
+// with a Retry-After (NDPathFinder, 15 s). Connect dials again for such an
+// answer of at most relayBusyMaxWait, up to relayBusyRetries times, and never
+// past the context's deadline.
+const (
+	relayBusyRetries = 2
+	relayBusyMaxWait = 30 * time.Second
+)
+
+// relayBusySleep waits d or until ctx ends. Overridable by tests.
+var relayBusySleep = func(ctx context.Context, d time.Duration) error {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// relayBusyWait is the wait a dial answered 503 with a Retry-After of whole
+// seconds, at most relayBusyMaxWait, asks for; false for any other answer.
+func relayBusyWait(resp *http.Response) (time.Duration, bool) {
+	if resp == nil || resp.StatusCode != http.StatusServiceUnavailable {
+		return 0, false
+	}
+	secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After")))
+	if err != nil || secs < 0 {
+		return 0, false
+	}
+	wait := time.Duration(secs) * time.Second
+	if wait > relayBusyMaxWait {
+		return 0, false
+	}
+	return wait, true
+}
+
+// relayAnswered names the HTTP answer of a refused upgrade, and its
+// Retry-After when it is whole seconds, for the dial error: "websocket: bad
+// handshake" alone reads the same for a 429, a 403, a 502 or a wrong path.
+// The form is matched by clients, so keep it: "the relay answered HTTP <code>"
+// then, when present, " (Retry-After: <seconds>)", then ": ". A 101 with bad
+// handshake headers is no refusal, and an HTTP-date Retry-After would bring
+// ": " and "," into a text clients split, so neither is named.
+func relayAnswered(resp *http.Response) string {
+	if resp == nil || resp.StatusCode == http.StatusSwitchingProtocols {
+		return ""
+	}
+	out := fmt.Sprintf("the relay answered HTTP %d", resp.StatusCode)
+	if secs, err := strconv.Atoi(strings.TrimSpace(resp.Header.Get("Retry-After"))); err == nil && secs >= 0 {
+		out += fmt.Sprintf(" (Retry-After: %d)", secs)
+	}
+	return out + ": "
+}
+
+// beforeDeadline reports whether a wait of d still ends before ctx's deadline.
+func beforeDeadline(ctx context.Context, d time.Duration) bool {
+	deadline, ok := ctx.Deadline()
+	return !ok || time.Until(deadline) > d
+}
+
 // Connect establishes a WebSocket connection and registers as an agent.
 func (c *Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
@@ -148,15 +213,34 @@ func (c *Client) Connect(ctx context.Context) error {
 		HandshakeTimeout: 30 * time.Second,
 	}
 
-	conn, resp, err := dialer.DialContext(ctx, c.serverURL, nil)
-	if err != nil {
+	var conn *websocket.Conn
+	for attempt := 0; ; attempt++ {
+		var resp *http.Response
+		var err error
+		conn, resp, err = dialer.DialContext(ctx, c.serverURL, nil)
+		if err == nil {
+			break
+		}
 		if resp != nil {
 			c.log.Errorw("Pathfinder dial failed",
 				"status", resp.StatusCode,
 				"error", err,
 			)
 		}
-		return fmt.Errorf("dial failed: %w", err)
+		wait, busy := relayBusyWait(resp)
+		if !busy || attempt >= relayBusyRetries || !beforeDeadline(ctx, wait) {
+			return fmt.Errorf("dial failed: %s%w", relayAnswered(resp), err)
+		}
+		c.log.Infow("Relay is busy; dialling again", "retry_after", wait, "attempt", attempt+1)
+		if err := relayBusySleep(ctx, wait); err != nil {
+			return fmt.Errorf("dial failed: %w", err)
+		}
+		c.mu.Lock()
+		closed := c.closed
+		c.mu.Unlock()
+		if closed {
+			return errors.New("client is closed")
+		}
 	}
 
 	c.mu.Lock()

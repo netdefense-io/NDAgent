@@ -161,3 +161,38 @@ func TestClearUserGroupMemberships_ReportsFailures(t *testing.T) {
 		})
 	}
 }
+
+// Every field a USER snippet may leave out is on the wire, so it takes the
+// model's default, and the password is sent only when there is one.
+func TestUserWireSendsTheLeftOutFields(t *testing.T) {
+	body, err := json.Marshal(User{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sent map[string]interface{}
+	if err := json.Unmarshal(body, &sent); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"shell", "authorizedkeys", "expires", "email", "comment", "language", "landing_page", "group_memberships", "priv"} {
+		if v, ok := sent[key]; !ok || v != "" {
+			t.Errorf("%s: %v (present %v), want an empty string", key, v, ok)
+		}
+	}
+	if _, ok := sent["password"]; ok {
+		t.Error("an empty password is sent")
+	}
+}
+
+func TestDecodeAuthorizedKeys(t *testing.T) {
+	for in, want := range map[interface{}]string{
+		"c3NoLWVkMjU1MTkgQUFBQQ==": "ssh-ed25519 AAAA",
+		"":                         "",
+		"ssh-ed25519 AAAA plain":   "ssh-ed25519 AAAA plain",
+		nil:                        "",
+		"//79":                     "//79",
+	} {
+		if got := decodeAuthorizedKeys(in); got != want {
+			t.Errorf("%v: %q, want %q", in, got, want)
+		}
+	}
+}

@@ -227,6 +227,6 @@ func TestMajorLanded_ReadsNoLogAndNoRepository(t *testing.T) {
 	}
 	whole.UpdateLog = LogFile{}
 	if !majorLanded(whole, "26.7") {
-		t.Fatal("a landing that leaves no .update.log is still a landing (Part 9's left none)")
+		t.Fatal("a landing that leaves no .update.log is still a landing (the lab run of the 26.1 to 26.7 upgrade left none)")
 	}
 }

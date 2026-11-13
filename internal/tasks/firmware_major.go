@@ -129,6 +129,14 @@ func handleMajor(ctx context.Context, ws *network.WebSocketClient, cmd network.C
 		return notRequested(why)
 	}
 
+	if why, ok := agentBuildForTheHop(ctx, series, target); !ok {
+		if ctx.Err() != nil {
+			return leftBeforeTheTrigger(ctx, log, cmd, marked)
+		}
+		log.Warnw("Series upgrade not requested: the agent has no build for the new ABI", "task_id", cmd.TaskID, "why", why)
+		return notRequested(why)
+	}
+
 	offer := majorOffer{checked: checked, series: series, target: target, from: from, checkFirstIgnored: ignored}
 	if payload.DryRun {
 		return result(map[string]interface{}{
@@ -147,6 +155,32 @@ func handleMajor(ctx context.Context, ws *network.WebSocketClient, cmd network.C
 		})
 	}
 	return handleMajorWithReboot(ctx, ws, cmd, client, offer)
+}
+
+// majorAgentRepoProbe is the track's own check of the NetDefense repository for
+// the ABI a hop lands on. Overridable by tests.
+var majorAgentRepoProbe = track.ProbeAgentRepo
+
+// agentBuildForTheHop is the track's agent ABI guard (A4.4) for the manual
+// major (#170): after a hop that changes the ABI, pkg expands ${ABI} in the
+// NetDefense repository's url to the new one, and a repository without that
+// tree leaves the agent package the old ABI's build, listed by OPNsense as to
+// be reinstalled and failing every update of it. A hop that keeps its ABI
+// needs no check.
+func agentBuildForTheHop(ctx context.Context, series, target string) (string, bool) {
+	hop, ok := track.HopBetween(series, target)
+	if !ok || !hop.ABIChanges() {
+		return "", true
+	}
+	repo, err := majorAgentRepoProbe(ctx, hop.TargetABI)
+	if err != nil {
+		return fmt.Sprintf("the NetDefense repository could not be checked for %s (%v)", hop.TargetABI, err), false
+	}
+	if !repo.Nested || !repo.Tree {
+		return fmt.Sprintf("the NetDefense repository has no agent build for %s that this device could reach (%s), so the agent would stay on the %s build after the upgrade",
+			hop.TargetABI, repo.Why, hop.SourceABI), false
+	}
+	return "", true
 }
 
 // stillStands reads the status and the installed release again, right before

@@ -77,8 +77,15 @@ type Repository struct {
 	Name      string    `json:"name"`
 	URL       string    `json:"url"`
 	Priority  int       `json:"priority"`
-	Enabled   bool      `json:"enabled"`
+	Enabled   *bool     `json:"enabled"`
 	Signature Signature `json:"signature"`
+}
+
+// IsEnabled is the repository's enabled setting, or pkg.conf(5)'s default, on,
+// when the snippet leaves it out or sends null (the operator's rule,
+// 2026-11-12: a field a snippet leaves out takes the default).
+func (r Repository) IsEnabled() bool {
+	return r.Enabled == nil || *r.Enabled
 }
 
 // ConfPath is where this repository's config lives.
@@ -122,7 +129,7 @@ func Render(r Repository) []byte {
 	fmt.Fprintf(&b, "%s: {\n", r.Name)
 	fmt.Fprintf(&b, "  url: %q,\n", r.URL)
 	fmt.Fprintf(&b, "  priority: %d,\n", r.Priority)
-	fmt.Fprintf(&b, "  enabled: %s,\n", uclBool(r.Enabled))
+	fmt.Fprintf(&b, "  enabled: %s,\n", uclBool(r.IsEnabled()))
 
 	fmt.Fprintf(&b, "  signature_type: %q", string(r.Signature.Type))
 	switch r.Signature.Type {

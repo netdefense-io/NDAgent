@@ -603,7 +603,23 @@ func (c *Client) ReconfigureUnbound(ctx context.Context) error {
 // Conversion Functions
 // ============================================================================
 
-// ConvertToOPNHostOverride converts APIHostOverridePayload to HostOverride.
+// hostOverrideAddPTRDefault is the model's default for a host override's
+// addptr (Unbound.xml): a PTR record is made.
+const hostOverrideAddPTRDefault = "1"
+
+// hostOverrideAddPTR is the snippet's addptr, or the model's default when the
+// snippet leaves it out.
+func hostOverrideAddPTR(addPTR string) string {
+	if addPTR == "" {
+		return hostOverrideAddPTRDefault
+	}
+	return addPTR
+}
+
+// ConvertToOPNHostOverride converts APIHostOverridePayload to HostOverride. It
+// sends every field, so a field the snippet leaves out takes the model's
+// default (the operator's rule, 2026-11-12): empty for the record fields and
+// the TTL, and on for addptr.
 func ConvertToOPNHostOverride(payload APIHostOverridePayload) HostOverride {
 	enabled := "0"
 	if payload.Enabled {
@@ -626,12 +642,14 @@ func ConvertToOPNHostOverride(payload APIHostOverridePayload) HostOverride {
 		MX:          payload.MX,
 		TTL:         payload.TTL,
 		TXTData:     payload.TXTData,
-		AddPTR:      payload.AddPTR,
+		AddPTR:      hostOverrideAddPTR(payload.AddPTR),
 		Description: strings.TrimSpace(desc),
 	}
 }
 
 // ConvertToOPNDomainForward converts APIDomainForwardPayload to DomainForward.
+// It sends every field, so a port or verify name the snippet leaves out takes
+// the model's default, empty.
 func ConvertToOPNDomainForward(payload APIDomainForwardPayload) DomainForward {
 	enabled := "0"
 	if payload.Enabled {

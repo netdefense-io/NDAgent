@@ -39,6 +39,31 @@ func TestTick_PutsBackAResetFlavourAndFlagsTheDriftForTheNextResult(t *testing.T
 	}
 }
 
+// A drift the round has seen is recorded before its re-pin starts, so a re-pin
+// that is cut short (here its write fails; a restart in the middle is finished
+// later by the repair, from the record) still reports the drift (#135).
+func TestTick_ADriftIsRecordedBeforeItsRePinStarts(t *testing.T) {
+	r := enrolledRig(t)
+	r.dev.do(func(d *simDevice) {
+		d.flavour = ""
+		d.setFailures = 1
+	})
+	r.eng.Tick(context.Background())
+	if st := r.state(); !st.DriftPending {
+		t.Fatalf("a re-pin cut short lost the drift it was making: record %+v", st)
+	}
+
+	r.eng.repinAfter = time.Time{}
+	r.eng.Tick(context.Background())
+	if st := r.state(); st.Pending != nil || !st.DriftPending || r.dev.Flavour() != "26.7/MINT/26.7.3/latest" {
+		t.Fatalf("after the re-pin: flavour %q, record %+v", r.dev.Flavour(), st)
+	}
+	res := wantResult(t, r.run(advancePayload(TrackFast, true, map[string]string{"26.7": "26.7.3"})), OutcomeNoop, ReasonPinDrift)
+	if !res.Drift {
+		t.Error("the drift was not reported")
+	}
+}
+
 // The repository file is generated from the pin, so after a major upgrade made
 // outside NetDefense it still names the old series: the series to pin is the
 // installed release's, and the periodic round must manage it all the same.

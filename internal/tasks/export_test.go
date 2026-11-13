@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/firmware"
+	"github.com/netdefense-io/ndagent/internal/firmware/track"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/pkgmgr"
 	"github.com/netdefense-io/ndagent/internal/taskstore"
@@ -184,4 +185,12 @@ func SetFirmwareProbesForTest(f func(client firmwareOPNAPIClient) firmware.Probe
 	old := newFirmwareProbes
 	newFirmwareProbes = f
 	return func() { newFirmwareProbes = old }
+}
+
+// SetMajorAgentRepoProbeForTest replaces the NetDefense repository probe of the
+// manual series upgrade.
+func SetMajorAgentRepoProbeForTest(f func(ctx context.Context, abi string) (track.AgentRepo, error)) (restore func()) {
+	prev := majorAgentRepoProbe
+	majorAgentRepoProbe = f
+	return func() { majorAgentRepoProbe = prev }
 }

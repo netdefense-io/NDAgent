@@ -254,11 +254,19 @@ func newFakeTrust(t *testing.T) *fakeTrust {
 	return f
 }
 
-// useTrustRelease makes the device's OPNsense release read as version.
+// useTrustRelease makes the device's OPNsense release read as version, of the
+// community edition.
 func useTrustRelease(t *testing.T, version string) {
 	t.Helper()
+	useTrustReleaseOf(t, version, "opnsense")
+}
+
+// useTrustReleaseOf is useTrustRelease with the core package's name, "" for a
+// version file that does not give it.
+func useTrustReleaseOf(t *testing.T, version, product string) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "core")
-	if err := os.WriteFile(path, []byte(`{"product_version":"`+version+`"}`), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"product_version":"`+version+`","product_id":"`+product+`"}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(opnapi.SetVersionFileForTest(path))

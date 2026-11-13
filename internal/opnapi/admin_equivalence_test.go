@@ -246,13 +246,17 @@ func TestElevationSwitchIsOn(t *testing.T) {
 }
 
 func TestPrivPolicyForRelease(t *testing.T) {
-	release := func(raw string) ProductRelease {
+	releaseOf := func(raw, product string) ProductRelease {
 		r, err := ParseProductRelease(raw)
 		if err != nil {
 			t.Fatalf("ParseProductRelease(%q): %v", raw, err)
 		}
+		r.Product = product
 		return r
 	}
+	release := func(raw string) ProductRelease { return releaseOf(raw, "opnsense") }
+	business := func(raw string) ProductRelease { return releaseOf(raw, "opnsense-business") }
+	unknownEdition := func(raw string) ProductRelease { return releaseOf(raw, "") }
 
 	tests := []struct {
 		name    string
@@ -267,6 +271,17 @@ func TestPrivPolicyForRelease(t *testing.T) {
 		{"first release of the series", release("26.1"), true, true},
 		{"older series", release("25.7.11_9"), true, true},
 		{"unreadable", ProductRelease{}, false, true},
+		{"development build at the floor", releaseOf("26.1.11", "opnsense-devel"), true, false},
+		{"Business 26.4, built on 26.1.6", business("26.4"), true, true},
+		{"Business 26.4.1, built on 26.1.9", business("26.4.1"), true, true},
+		{"Business 26.4.2, built on 26.1.11", business("26.4.2"), true, false},
+		{"Business 26.10, built on 26.7.7", business("26.10"), true, false},
+		{"Business 25.10, built on 25.7.5", business("25.10"), true, true},
+		{"edition unknown at the community floor", unknownEdition("26.1.11"), true, true},
+		{"edition unknown at Business 26.4.1", unknownEdition("26.4.1"), true, true},
+		{"edition unknown at the Business floor", unknownEdition("26.4.2"), true, false},
+		{"edition unknown on the next series", unknownEdition("26.7.5"), true, false},
+		{"a core package this agent does not know", releaseOf("26.1.11", "opnsense-new"), true, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

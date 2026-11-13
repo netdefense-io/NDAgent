@@ -11,8 +11,10 @@ import (
 	"io/fs"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,11 +37,23 @@ const (
 	crowdsecRetryAfter = time.Hour
 )
 
-// crowdsecKeys are the settings a snippet may carry, in a stable order.
+// crowdsecKeys are the settings a snippet may carry, in a stable order. A key
+// added here needs its default in crowdsecDefaults.
 var crowdsecKeys = []string{
 	"agent_enabled", "lapi_enabled", "firewall_bouncer_enabled",
 	"rules_enabled", "rules_log", "rules_tag", "crowdsec_firewall_verbose",
 	"enroll_key",
+}
+
+// crowdsecDefaults are os-crowdsec's model defaults (General.xml 1.0.12) for
+// the snippet's keys, in the wire form. A key the snippet leaves out takes its
+// default (the operator's rule, 2026-11-12), when the installed plugin has it.
+// enroll_key is a TextField, so the plugin's get returns it as stored and a
+// key set by hand reads as changed against the empty default.
+var crowdsecDefaults = map[string]string{
+	"agent_enabled": "1", "lapi_enabled": "1", "firewall_bouncer_enabled": "1",
+	"rules_enabled": "1", "rules_log": "0", "crowdsec_firewall_verbose": "0",
+	"rules_tag": "", "enroll_key": "",
 }
 
 var crowdsecBoolKeys = map[string]bool{
@@ -52,7 +66,12 @@ var crowdsecBoolKeys = map[string]bool{
 var (
 	crowdsecStatePath    = "/var/db/ndagent/crowdsec-apply.json"
 	crowdsecPollInterval = time.Second
-	crowdsecPollTimeout  = 20 * time.Second
+	crowdsecPollTimeout  = 30 * time.Second
+	// crowdsecEngineSettle is how long the engine has to stay the same process
+	// for an apply to count: longer than daemon(8)'s 10 s restart delay. An
+	// engine that crashes later than that passes; the one heal per
+	// crowdsecRetryAfter bounds what it costs.
+	crowdsecEngineSettle = 11 * time.Second
 	crowdsecNow          = time.Now
 )
 
@@ -70,6 +89,8 @@ type crowdsecSnippetContent struct {
 
 // crowdsecDesired is the parsed CROWDSEC_SETTINGS snippet; Values holds only
 // the keys it sets, in the plugin's wire form ("0"/"1" for booleans).
+// The defaults of the keys it leaves out are filled in by executeSyncCrowdsec,
+// not here, which skips silently a key the installed plugin does not have.
 type crowdsecDesired struct {
 	Name   string
 	Values map[string]string
@@ -202,6 +223,10 @@ type crowdsecFailure struct {
 
 type crowdsecFailureFile struct {
 	Failures []crowdsecFailure `json:"failures"`
+	// Heals are the restarts of a matching model, keyed without the status:
+	// at most one per crowdsecRetryAfter, whatever the status reads, since
+	// each is a hub pass against CrowdSec's servers.
+	Heals []crowdsecFailure `json:"heals,omitempty"`
 }
 
 // crowdsecStateHash identifies a (desired content, device state) pair; the
@@ -227,43 +252,80 @@ func crowdsecStateHash(desired, model map[string]string, status string) string {
 
 // SYNC tasks run one at a time (the per-agent FIFO), so the memory file needs
 // no lock.
-func loadCrowdsecFailures() []crowdsecFailure {
+func loadCrowdsecMemory() crowdsecFailureFile {
 	data, err := os.ReadFile(crowdsecStatePath)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
 			logging.Named("SYNC_API").Warnw("CrowdSec: could not read the failed-apply memory", "error", err)
 		}
-		return nil
+		return crowdsecFailureFile{}
 	}
 	var f crowdsecFailureFile
 	if err := json.Unmarshal(data, &f); err != nil {
 		logging.Named("SYNC_API").Warnw("CrowdSec: ignoring an unreadable failed-apply memory", "error", err)
-		return nil
+		return crowdsecFailureFile{}
 	}
-	return f.Failures
+	return f
 }
 
-func crowdsecRecentlyFailed(hash string) bool {
-	for _, f := range loadCrowdsecFailures() {
-		if f.Hash == hash && crowdsecNow().Sub(f.At) < crowdsecRetryAfter {
+func recentlyAt(entries []crowdsecFailure, hash string) bool {
+	for _, e := range entries {
+		if e.Hash == hash && crowdsecNow().Sub(e.At) < crowdsecRetryAfter {
 			return true
 		}
 	}
 	return false
 }
 
+func recentOnly(entries []crowdsecFailure) []crowdsecFailure {
+	var kept []crowdsecFailure
+	for _, e := range entries {
+		if crowdsecNow().Sub(e.At) < crowdsecRetryAfter {
+			kept = append(kept, e)
+		}
+	}
+	return kept
+}
+
+func crowdsecRecentlyFailed(hash string) bool {
+	return recentlyAt(loadCrowdsecMemory().Failures, hash)
+}
+
+func crowdsecRecentlyHealed(hash string) bool {
+	return recentlyAt(loadCrowdsecMemory().Heals, hash)
+}
+
 func rememberCrowdsecFailure(hashes ...string) {
-	var f crowdsecFailureFile
+	f := loadCrowdsecMemory()
+	f.Failures = nil
 	now := crowdsecNow()
 	for _, h := range hashes {
 		f.Failures = append(f.Failures, crowdsecFailure{Hash: h, At: now})
 	}
+	f.Heals = recentOnly(f.Heals)
 	if err := writeCrowdsecFailures(f); err != nil {
 		logging.Named("SYNC_API").Warnw("CrowdSec: could not record the failed apply", "error", err)
 	}
 }
 
+func rememberCrowdsecHeal(hash string) {
+	f := loadCrowdsecMemory()
+	f.Heals = append(recentOnly(f.Heals), crowdsecFailure{Hash: hash, At: crowdsecNow()})
+	if err := writeCrowdsecFailures(f); err != nil {
+		logging.Named("SYNC_API").Warnw("CrowdSec: could not record the restart", "error", err)
+	}
+}
+
+// clearCrowdsecFailures forgets the failed applies after a verified one; the
+// heals of the last crowdsecRetryAfter stay.
 func clearCrowdsecFailures() {
+	heals := recentOnly(loadCrowdsecMemory().Heals)
+	if len(heals) > 0 {
+		if err := writeCrowdsecFailures(crowdsecFailureFile{Heals: heals}); err != nil {
+			logging.Named("SYNC_API").Warnw("CrowdSec: could not clear the failed-apply memory", "error", err)
+		}
+		return
+	}
 	if err := os.Remove(crowdsecStatePath); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		logging.Named("SYNC_API").Warnw("CrowdSec: could not clear the failed-apply memory", "error", err)
 	}
@@ -317,6 +379,92 @@ func isCrowdsecTimeout(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
+// crowdsecEngineDown is the status of a service whose supervisor runs while
+// the crowdsec engine does not.
+const crowdsecEngineDown = "engine not running"
+
+// crowdsecEnginePidfile is the pidfile daemon(8) writes for the engine it
+// supervises (os-crowdsec's rc script runs it with -p /var/run/crowdsec.pid).
+var crowdsecEnginePidfile = "/var/run/crowdsec.pid"
+
+// crowdsecEnginePID returns the pid of the running crowdsec engine, 0 when it
+// does not run. Tests replace it.
+var crowdsecEnginePID = supervisedCrowdsecPID
+
+// supervisedCrowdsecPID is the pid in the engine's pidfile when a process of
+// that pid is named exactly crowdsec, so neither a stale pidfile nor another
+// crowdsec run (a config test, one started by hand) counts. The bouncer's
+// process name only starts with "crowdsec".
+func supervisedCrowdsecPID(ctx context.Context) (int, error) {
+	// daemon(8) keeps the file for as long as it supervises: it empties it
+	// when the engine dies (FreeBSD 14.3 and later; earlier releases leave the
+	// dead pid in it), so an empty file is an engine that is down. No file at
+	// all is a layout this check does not know, so it decides nothing.
+	data, err := os.ReadFile(crowdsecEnginePidfile)
+	if err != nil {
+		return 0, err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, nil
+	}
+	pids, err := processesNamed(ctx, "crowdsec")
+	if err != nil {
+		return 0, err
+	}
+	for _, p := range pids {
+		if p == pid {
+			return pid, nil
+		}
+	}
+	return 0, nil
+}
+
+// processesNamed returns the pids of the processes named exactly name: pgrep
+// exits 0 when there are some and 1 when there are none. It is /bin/pgrep, on
+// the rc.d PATH.
+func processesNamed(ctx context.Context, name string) ([]int, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "pgrep", "-x", name).Output()
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var pids []int
+	for _, field := range strings.Fields(string(out)) {
+		if pid, err := strconv.Atoi(field); err == nil {
+			pids = append(pids, pid)
+		}
+	}
+	return pids, nil
+}
+
+// crowdsecServiceStatus is the plugin's service status, checked against the
+// engine, and the engine's pid when it was checked. The plugin answers from
+// the pid of the daemon(8) that supervises crowdsec, which stays "running"
+// while it retries an engine that cannot start, so a "running" for a model
+// that runs the engine (agent or LAPI on) also needs the engine itself. A
+// probe that cannot run leaves the plugin's answer, with no pid.
+func crowdsecServiceStatus(ctx context.Context, client *opnapi.Client, model map[string]string) (string, int, error) {
+	status, err := client.CrowdsecServiceStatus(ctx)
+	if err != nil || status != "running" || (model["agent_enabled"] != "1" && model["lapi_enabled"] != "1") {
+		return status, 0, err
+	}
+	pid, probeErr := crowdsecEnginePID(ctx)
+	if probeErr != nil {
+		logging.Named("SYNC_API").Warnw("Could not check the CrowdSec engine process; taking the plugin's status", "error", probeErr)
+		return status, 0, nil
+	}
+	if pid == 0 {
+		return crowdsecEngineDown, 0, nil
+	}
+	return status, pid, nil
+}
+
 type crowdsecRun struct {
 	client  *opnapi.Client
 	name    string
@@ -363,13 +511,34 @@ func (r *crowdsecRun) reconfigure(ctx context.Context, model map[string]string) 
 		})
 	}
 
+	// An engine that crashes and is started again every few seconds reads as
+	// up between two restarts, so the same engine has to be seen again once
+	// crowdsecEngineSettle has passed. An engine first seen late gets the time
+	// to settle past the poll's deadline; ceiling bounds a crash loop, which
+	// shows a new engine at every restart.
 	deadline := crowdsecNow().Add(crowdsecPollTimeout)
+	ceiling := deadline.Add(crowdsecEngineSettle + 2*crowdsecPollInterval)
 	var status string
 	var statusErr error
+	var seenPID, engines int
+	var seenAt time.Time
 	for {
-		status, statusErr = r.client.CrowdsecServiceStatus(ctx)
+		var pid int
+		status, pid, statusErr = crowdsecServiceStatus(ctx, r.client, model)
 		if statusErr == nil && status == want {
-			return true
+			if pid == 0 || crowdsecEngineSettle <= 0 || (pid == seenPID && crowdsecNow().Sub(seenAt) >= crowdsecEngineSettle) {
+				return true
+			}
+			if pid != seenPID {
+				seenPID, seenAt = pid, crowdsecNow()
+				engines++
+				if settled := seenAt.Add(crowdsecEngineSettle + crowdsecPollInterval); settled.After(deadline) {
+					deadline = settled
+					if deadline.After(ceiling) {
+						deadline = ceiling
+					}
+				}
+			}
 		}
 		if ctx.Err() != nil || !crowdsecNow().Before(deadline) {
 			break
@@ -378,6 +547,14 @@ func (r *crowdsecRun) reconfigure(ctx context.Context, model map[string]string) 
 	}
 	if statusErr != nil {
 		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: could not read the service status after the reconfigure: %v", r.name, statusErr))
+	} else if status == crowdsecEngineDown && engines > 0 {
+		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: the crowdsec engine started after the reconfigure but did not stay up for %s; see /var/log/crowdsec/crowdsec.log on the device", r.name, crowdsecEngineSettle))
+	} else if status == crowdsecEngineDown {
+		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: the crowdsec engine is not running after the reconfigure, though its supervisor is; see /var/log/crowdsec/crowdsec.log on the device", r.name))
+	} else if status == want && engines > 1 {
+		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: the crowdsec engine did not stay up for %s after the reconfigure: it keeps being restarted; see /var/log/crowdsec/crowdsec.log on the device", r.name, crowdsecEngineSettle))
+	} else if status == want {
+		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: the crowdsec engine could not be seen running for %s before the poll ended", r.name, crowdsecEngineSettle))
 	} else {
 		r.applyFail(fmt.Sprintf("CrowdSec settings snippet %q: the service status is %q after the reconfigure, expected %q", r.name, status, want))
 	}
@@ -386,7 +563,9 @@ func (r *crowdsecRun) reconfigure(ctx context.Context, model map[string]string) 
 
 // executeSyncCrowdsec applies the CROWDSEC_SETTINGS snippet. Without a
 // snippet it does nothing at all; removing the snippet leaves the device as
-// it is, because the plugin's defaults turn protection on.
+// it is, because the plugin's defaults turn protection on. With one, every key
+// it leaves out is set to its default (crowdsecDefaults): an empty snippet
+// puts the device at the plugin's defaults.
 func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *crowdsecDesired) SyncAPIResult {
 	if desired == nil {
 		return SyncAPIResult{Success: true, Message: "No changes applied"}
@@ -397,10 +576,13 @@ func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *cr
 	current, err := client.GetCrowdsecGeneral(ctx)
 	if err != nil {
 		if opnapi.IsNotFound(err) {
-			log.Debug("os-crowdsec is not installed on this device; skipping crowdsec sync")
+			// An assigned snippet that cannot apply is a warning, not a
+			// neutral skip, so the console shows it; it does not fail the
+			// task, because the device lacks the plugin, not the sync.
+			msg := fmt.Sprintf("CrowdSec settings snippet %q was not applied: os-crowdsec is not installed on this device (install it, for example with a software policy)", desired.Name)
+			log.Warnw("SYNC_API: " + msg)
 			run.results = append(run.results, SyncAPIItemResult{
-				Type: crowdsecItemType, Name: desired.Name, Action: "skipped", Status: "skipped",
-				Error: "os-crowdsec is not installed",
+				Type: crowdsecItemType, Name: desired.Name, Action: "skipped", Status: "warning", Error: msg,
 			})
 			return run.result()
 		}
@@ -410,14 +592,22 @@ func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *cr
 	}
 
 	// Keys the installed plugin does not have are reported and not sent: the
-	// device would drop them and still answer "saved".
+	// device would drop them and still answer "saved". A key the snippet
+	// leaves out is sent as its default, and silently skipped when the plugin
+	// does not have it.
 	wanted := map[string]string{}
+	defaulted := map[string]bool{}
 	for _, key := range crowdsecKeys {
 		value, set := desired.Values[key]
+		_, known := current[key]
 		if !set {
+			if known {
+				wanted[key] = crowdsecDefaults[key]
+				defaulted[key] = true
+			}
 			continue
 		}
-		if _, known := current[key]; !known {
+		if !known {
 			run.results = append(run.results, SyncAPIItemResult{
 				Type: crowdsecItemType, Name: desired.Name, Action: "skipped", Status: "warning",
 				Error: fmt.Sprintf("setting %q is not known to the installed os-crowdsec plugin and was not sent", key),
@@ -440,7 +630,7 @@ func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *cr
 		}
 	}
 
-	status, statusErr := client.CrowdsecServiceStatus(ctx)
+	status, _, statusErr := crowdsecServiceStatus(ctx, client, normalized)
 	if statusErr != nil {
 		status = ""
 	}
@@ -466,10 +656,25 @@ func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *cr
 	}
 	if enablementChanged {
 		if msg := crowdsecGuardViolation(merged); msg != "" {
+			var fromDefault []string
+			for _, key := range []string{"agent_enabled", "lapi_enabled", "firewall_bouncer_enabled"} {
+				if defaulted[key] {
+					fromDefault = append(fromDefault, key)
+				}
+			}
+			if len(fromDefault) > 0 {
+				msg += fmt.Sprintf("; %s left out of the snippet, so at the plugin's default", strings.Join(fromDefault, ", "))
+			}
 			run.fail(SyncAPIItemResult{Type: crowdsecItemType, Name: desired.Name, Action: "refused"},
 				fmt.Sprintf("CrowdSec settings snippet %q: %s", desired.Name, msg))
 			return run.result()
 		}
+	}
+	if defaulted["lapi_enabled"] && changed["lapi_enabled"] == "1" && normalized["lapi_manual_configuration"] == "1" {
+		run.results = append(run.results, SyncAPIItemResult{
+			Type: crowdsecItemType, Name: desired.Name, Action: "updated", Status: "warning",
+			Error: fmt.Sprintf("CrowdSec settings snippet %q leaves out lapi_enabled, which takes the plugin's default and starts a local LAPI on this device, whose agent and bouncer use a remote one (lapi_manual_configuration); set lapi_enabled to false to keep it off", desired.Name),
+		})
 	}
 
 	if crowdsecRecentlyFailed(preHash) {
@@ -538,14 +743,14 @@ func executeSyncCrowdsec(ctx context.Context, client *opnapi.Client, desired *cr
 		// Both digests are kept: the pre-set one blocks a repeat when the
 		// device drifts back to this state, the post-set one blocks the heal
 		// the next SYNC would run on the settings this apply left behind.
-		postStatus, _ := client.CrowdsecServiceStatus(ctx)
+		postStatus, _, _ := crowdsecServiceStatus(ctx, client, effective)
 		rememberCrowdsecFailure(preHash, crowdsecStateHash(wanted, effective, postStatus))
 	}
 
 	if key, ok := changed["enroll_key"]; ok && key != "" && verified && !droppedSet["enroll_key"] {
 		run.results = append(run.results, SyncAPIItemResult{
 			Type: "crowdsec_enrollment", Name: "enroll_key", Action: "requested", Status: "success",
-			Error: "Enrollment was requested; accept the engine in the CrowdSec Console to complete it",
+			Error: "Enrollment was requested and is not verified: the agent cannot see whether the CrowdSec Console accepts the key, or whether an engine already enrolled takes it. Accept the engine in the Console to complete it",
 		})
 	}
 	return run.result()
@@ -578,7 +783,14 @@ func (r *crowdsecRun) heal(ctx context.Context, model, wanted map[string]string,
 		})
 		return
 	}
+	healKey := crowdsecStateHash(wanted, model, "")
+	if crowdsecRecentlyHealed(healKey) {
+		r.fail(SyncAPIItemResult{Type: "crowdsec_apply", Name: "reconfigure", Action: "skipped"},
+			fmt.Sprintf("CrowdSec settings snippet %q: the service status is %q again; it was restarted less than %s ago, so it is not restarted again yet", r.name, status, crowdsecRetryAfter))
+		return
+	}
 	logging.Named("SYNC_API").Infow("CrowdSec settings match but the service is not running; reconfiguring once", "status", status)
+	rememberCrowdsecHeal(healKey)
 	if r.reconfigure(ctx, model) {
 		clearCrowdsecFailures()
 		r.results = append(r.results, SyncAPIItemResult{
@@ -586,7 +798,7 @@ func (r *crowdsecRun) heal(ctx context.Context, model, wanted map[string]string,
 		})
 		return
 	}
-	postStatus, _ := r.client.CrowdsecServiceStatus(ctx)
+	postStatus, _, _ := crowdsecServiceStatus(ctx, r.client, model)
 	rememberCrowdsecFailure(hash, crowdsecStateHash(wanted, model, postStatus))
 }
 

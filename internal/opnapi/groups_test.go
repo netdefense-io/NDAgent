@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -29,8 +30,8 @@ func TestConvertAPIToGroup_ExternalMembersNeverSendsMember(t *testing.T) {
 
 	group := ConvertAPIToGroup(payload, nil, uidLookup)
 
-	if group.Member != "" {
-		t.Errorf("Member = %q, want empty for an external group", group.Member)
+	if group.Member != nil {
+		t.Errorf("Member = %q, want none for an external group", *group.Member)
 	}
 	if group.Priv != "page-status-interfaces" {
 		t.Errorf("Priv = %q, want the resolved priv CSV", group.Priv)
@@ -70,8 +71,21 @@ func TestConvertAPIToGroup_MemberManagedResolvesMembers(t *testing.T) {
 
 	group := ConvertAPIToGroup(payload, nil, uidLookup)
 
-	if group.Member != "1001,1002" {
-		t.Errorf("Member = %q, want \"1001,1002\"", group.Member)
+	if group.Member == nil || *group.Member != "1001,1002" {
+		t.Errorf("Member = %v, want \"1001,1002\"", group.Member)
+	}
+}
+
+// A member-managed GROUP with no members sends an explicit empty list, which
+// takes every member out; leaving the key out would keep them.
+func TestConvertAPIToGroup_NoMembersIsAnExplicitEmptyList(t *testing.T) {
+	group := ConvertAPIToGroup(APIGroupPayload{Name: "eng"}, nil, map[string]string{"alice": "1001"})
+	b, err := json.Marshal(GroupWrapper{Group: group})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), `"member":""`) {
+		t.Errorf("wire JSON = %s, want an explicit empty member list", b)
 	}
 }
 

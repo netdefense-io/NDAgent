@@ -63,3 +63,24 @@ func SetInstalledVersionsFunc(f func(context.Context) (map[string]string, error)
 	installedVersionsFunc = f
 	return prev
 }
+
+// SetInstalledVersionFunc — same pattern for InstalledVersion.
+func SetInstalledVersionFunc(f func(context.Context, string) (string, error)) func(context.Context, string) (string, error) {
+	prev := installedVersionFunc
+	installedVersionFunc = f
+	return prev
+}
+
+// SetArchiveNameVersionFunc — same pattern for ArchiveNameVersion.
+func SetArchiveNameVersionFunc(f func(context.Context, string) (string, string, error)) func(context.Context, string) (string, string, error) {
+	prev := archiveNameVersionFunc
+	archiveNameVersionFunc = f
+	return prev
+}
+
+// SetFetchEnvFunc — same pattern for FetchEnv.
+func SetFetchEnvFunc(f func(context.Context) ([]string, error)) func(context.Context) ([]string, error) {
+	prev := fetchEnvFunc
+	fetchEnvFunc = f
+	return prev
+}

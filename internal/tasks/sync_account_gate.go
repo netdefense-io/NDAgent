@@ -40,6 +40,7 @@ package tasks
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"go.uber.org/zap"
@@ -104,6 +105,17 @@ type accountGate struct {
 	// whole sync, by normalized name, whether or not each is applied.
 	clearedUsers  map[string]clearedSnippet
 	clearedGroups map[string]clearedSnippet
+
+	// syncUserGroups is, for every USER element of the sync by its exact name,
+	// the groups it names, matched exactly as the membership plan matches them.
+	syncUserGroups map[string][]string
+	// plannedElevated is every account a GROUP of the sync with an
+	// administrator-equivalent privilege declares, by normalized name: it will
+	// be administrator-equivalent once that GROUP applies.
+	plannedElevated map[string]bool
+	// liveMembers is each live group's members as the group row lists them, by
+	// exact names: what the GROUP's member write replaces.
+	liveMembers map[string]map[string]bool
 }
 
 func newAccountGate(policy opnapi.PrivPolicy, rejectDangerous bool, log *zap.SugaredLogger) *accountGate {
@@ -136,6 +148,30 @@ func (g *accountGate) noteCleared(users []opnapi.APIUserPayload, groups []opnapi
 			}
 		}
 	}
+}
+
+// noteSyncElements records what the GROUP member check needs from the whole
+// sync: the groups each USER names, and the accounts an elevated GROUP declares.
+func (g *accountGate) noteSyncElements(users []opnapi.APIUserPayload, groups []opnapi.APIGroupPayload) {
+	g.syncUserGroups = make(map[string][]string, len(users))
+	for _, u := range users {
+		g.syncUserGroups[u.Name] = append(g.syncUserGroups[u.Name], u.Groups...)
+	}
+	g.plannedElevated = map[string]bool{}
+	for _, group := range groups {
+		// An uncleared GROUP with such a privilege is refused, so it elevates
+		// nobody.
+		if group.SuperuserCleared && g.policy.HasAdminEquivalentPriv(group.Priv) {
+			for _, m := range group.Members {
+				g.plannedElevated[opnapi.AccountNameKey(m)] = true
+			}
+		}
+	}
+}
+
+// useLiveMembers gives the gate each live group's members as its row lists them.
+func (g *accountGate) useLiveMembers(live map[string]map[string]bool) {
+	g.liveMembers = live
 }
 
 // useLiveRows gives the gate what only the device knows: its rows, and the
@@ -420,7 +456,70 @@ func (g *accountGate) groupClauses(group opnapi.APIGroupPayload) []string {
 	if live, reasons := g.groupElevationReasons(group.Name); len(reasons) > 0 {
 		clauses = append(clauses, fmt.Sprintf("would modify existing administrator-equivalent group %q%s", live, g.elevationNote(reasons)))
 	}
+	if len(clauses) == 0 {
+		clauses = g.memberChangeClauses(group)
+	}
 	return clauses
+}
+
+// memberChangeClauses names the administrator-equivalent accounts the GROUP's
+// member write would add or take out, judged from what that write does: the
+// group of that exact name as its row lists its members, and names matched
+// exactly. An account counts when it is administrator-equivalent now, or a GROUP
+// of the sync with such a privilege declares it. A member the GROUP does not
+// declare stays only when it is a USER of the sync that names the group itself
+// (its own write keeps it, or the gate refuses it and it stays put); any other
+// leaves through the GROUP's write or its own. Adding or removing such an
+// account changes it, which needs clearance. An external group's members are
+// never written, and the first pass, without rows, judges none.
+func (g *accountGate) memberChangeClauses(group opnapi.APIGroupPayload) []string {
+	if group.ExternalMembers || g.index == nil || g.liveMembers == nil {
+		return nil
+	}
+	live := g.liveMembers[group.Name]
+	declared := map[string]bool{}
+	var clauses []string
+	for _, m := range group.Members {
+		if m == "" || declared[m] {
+			continue
+		}
+		declared[m] = true
+		if live[m] {
+			continue
+		}
+		// Only a name that is the account's own spelling is added: the write
+		// resolves names exactly.
+		if name, reasons := g.accountElevation(m); len(reasons) > 0 && name == m {
+			clauses = append(clauses, fmt.Sprintf("would add administrator-equivalent user %q as a member%s", name, g.elevationNote(reasons)))
+		}
+	}
+	var removed []string
+	for name := range live {
+		if declared[name] || containsName(g.syncUserGroups[name], group.Name) {
+			continue
+		}
+		if _, reasons := g.accountElevation(name); len(reasons) > 0 {
+			removed = append(removed, name)
+		}
+	}
+	sort.Strings(removed)
+	for _, name := range removed {
+		shown, reasons := g.accountElevation(name)
+		clauses = append(clauses, fmt.Sprintf("would take administrator-equivalent user %q out of the group%s", shown, g.elevationNote(reasons)))
+	}
+	return clauses
+}
+
+// accountElevation is ElevatedUser, plus an account an elevated GROUP of the sync
+// declares.
+func (g *accountGate) accountElevation(name string) (string, []string) {
+	if shown, reasons := g.index.ElevatedUser(name); len(reasons) > 0 {
+		return shown, reasons
+	}
+	if g.plannedElevated[opnapi.AccountNameKey(name)] {
+		return name, []string{"planned"}
+	}
+	return name, nil
 }
 
 // privClause names the administrator-equivalent privileges of a priv list. Only

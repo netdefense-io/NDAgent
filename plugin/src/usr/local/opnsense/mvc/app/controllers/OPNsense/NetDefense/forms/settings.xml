@@ -79,7 +79,7 @@
         <id>settings.allowAllSnippetContent</id>
         <label>Allow All Snippet Content</label>
         <type>checkbox</type>
-        <help>Off by default: broad privileges, system scope, interactive shells, SSH keys and Zabbix sudo are refused. See https://netdefense.io/docs/ndagent/configuration/#allow-all-snippet-content</help>
+        <help>Off by default: broad privileges, system scope, interactive shells, SSH keys, Zabbix sudo, adding or changing authentication servers, the login order, and adding or updating certificates and CAs are refused. See https://netdefense.io/docs/ndagent/configuration/#allow-all-snippet-content</help>
         <advanced>true</advanced>
     </field>
     <field>

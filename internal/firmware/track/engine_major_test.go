@@ -7,8 +7,9 @@ import (
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
 
-// The proof's hop, end to end in the simulator: a device at the final build of
-// 26.1, pinned there, offered the 26.7 upgrade, asked for it by a window.
+// The hop of the lab run of the 26.1 to 26.7 upgrade, end to end in the
+// simulator: a device at the final build of 26.1, pinned there, offered the
+// 26.7 upgrade, asked for it by a window.
 func TestMajor_TheHopLandsAndTheAgentThatComesBackAnswersAndRepins(t *testing.T) {
 	for name, approved := range map[string]map[string]string{
 		"the target is the pin's directory":        approveFinal,

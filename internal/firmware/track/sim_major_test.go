@@ -10,7 +10,7 @@ import (
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 )
 
-// The series upgrade's side of the simulated box. It models what the proof of the
+// The series upgrade's side of the simulated box. It models what the lab run of the
 // 26.1 to 26.7 hop measured on a real 26.1.11_10 device and nothing more: the offer
 // (three sets, sizes as strings on the wire), the target ABI's tree, a request that
 // stage 0 turns into markers and a reboot (the new ABI, the new core, base, kernel
@@ -46,6 +46,8 @@ type simHop struct {
 	beAddErr      error
 	beFindErr     error
 	bes           []BootEnvironment
+	box           BoxState
+	boxErr        error
 	disk          Disk
 	diskErr       error
 	workDirBytes  int64 // what a leftover work directory holds, until it is cleared
@@ -244,6 +246,19 @@ func (d *simDevice) CreateBootEnvironment(_ context.Context, name, note string) 
 	return nil
 }
 
+func (d *simDevice) BoxState(_ context.Context) (BoxState, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.record("box-state")
+	if d.hop.boxErr != nil {
+		return BoxState{}, d.hop.boxErr
+	}
+	if d.hop.box == (BoxState{}) {
+		return BoxState{ConfigSHA256: "config-1", PackagesSHA256: "packages-1"}, nil
+	}
+	return d.hop.box, nil
+}
+
 func (d *simDevice) FindBootEnvironment(_ context.Context, name string) (BootEnvironment, bool, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -420,7 +435,7 @@ var (
 )
 
 // finalBuild26 makes the box a community 26.1.11_10 on FreeBSD:14, the final build of
-// its series: the series upgrade is on offer (with the sets the proof measured), the
+// its series: the series upgrade is on offer (with the sets the lab run measured), the
 // 26.1.11 directory holds what is installed, and the 26.7.1 directory of the new ABI
 // holds what the hop lands on.
 func finalBuild26(d *simDevice) {

@@ -77,6 +77,9 @@ type Device interface {
 	SnapshotSupported(ctx context.Context) (bool, error)
 	CreateBootEnvironment(ctx context.Context, name, note string) error
 	FindBootEnvironment(ctx context.Context, name string) (BootEnvironment, bool, error)
+	// BoxState is what a boot environment preserves of the box beyond its
+	// release: config.xml and the installed packages, as digests.
+	BoxState(ctx context.Context) (BoxState, error)
 
 	// Catalog reads the catalog pkg cached for OPNsense's repository: what the
 	// last check was made against.

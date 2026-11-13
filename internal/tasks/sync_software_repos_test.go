@@ -3,7 +3,11 @@ package tasks
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -64,8 +68,34 @@ func stubPkg(t *testing.T, log *orderLog, installed map[string]bool) {
 	})
 	prevAdd := pkgmgr.SetAddURLFunc(func(ctx context.Context, url string, force bool) pkgmgr.MutateOutcome {
 		log.add("addurl:" + url)
+		// A real add installs the archive's own name-version; the test URLs
+		// name the file after it.
+		installed[strings.TrimSuffix(path.Base(url), ".pkg")] = true
 		return pkgmgr.MutateOutcome{Action: pkgmgr.ActionInstalled}
 	})
+	// The installed version of a name is read from a "<name>-<version>" key, as
+	// pkg's database would answer it.
+	prevVersion := pkgmgr.SetInstalledVersionFunc(func(ctx context.Context, name string) (string, error) {
+		for key, ok := range installed {
+			if ok && strings.HasPrefix(key, name+"-") {
+				return strings.TrimPrefix(key, name+"-"), nil
+			}
+		}
+		return "", nil
+	})
+	// An archive holds the name-version its file is named after.
+	prevArchive := readExternalArchive
+	readExternalArchive = func(ctx context.Context, url string) (string, string, error) {
+		log.add("fetch:" + url)
+		base := strings.TrimSuffix(path.Base(url), ".pkg")
+		i := strings.LastIndex(base, "-")
+		if i < 0 {
+			// pkg query -F always answers a version; a file named without
+			// one is an archive that cannot be read.
+			return "", "", fmt.Errorf("%s: no version in the file name", base)
+		}
+		return base[:i], base[i+1:], nil
+	}
 	prevOffered := pkgmgr.SetOfferedByFunc(func(ctx context.Context, name string) ([]string, error) {
 		log.add("offeredby:" + name)
 		return []string{"OPNsense"}, nil
@@ -77,6 +107,8 @@ func stubPkg(t *testing.T, log *orderLog, installed map[string]bool) {
 		pkgmgr.SetRemoveFunc(prevRemove)
 		pkgmgr.SetAddURLFunc(prevAdd)
 		pkgmgr.SetOfferedByFunc(prevOffered)
+		pkgmgr.SetInstalledVersionFunc(prevVersion)
+		readExternalArchive = prevArchive
 	})
 	t.Cleanup(pkgrepo.SetRootForTest(t.TempDir()))
 }
@@ -378,7 +410,7 @@ func TestEmptiedPolicyPrunesManagedRepositories(t *testing.T) {
 		Name:      "feature-check",
 		URL:       "https://example.invalid/repo",
 		Priority:  9,
-		Enabled:   false,
+		Enabled:   enabledAs(false),
 		Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone},
 	}
 	if _, err := pkgrepo.Apply([]pkgrepo.Repository{configured}, true); err != nil {
@@ -427,11 +459,11 @@ func TestPruneKeepsEveryRepositoryInTheMergedPayload(t *testing.T) {
 
 	// Three managed repositories already on the device.
 	seed := []pkgrepo.Repository{
-		{Name: "alpha", URL: "https://example.invalid/a", Priority: 1, Enabled: true,
+		{Name: "alpha", URL: "https://example.invalid/a", Priority: 1, Enabled: enabledAs(true),
 			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
-		{Name: "bravo", URL: "https://example.invalid/b", Priority: 2, Enabled: true,
+		{Name: "bravo", URL: "https://example.invalid/b", Priority: 2, Enabled: enabledAs(true),
 			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
-		{Name: "stale", URL: "https://example.invalid/s", Priority: 3, Enabled: true,
+		{Name: "stale", URL: "https://example.invalid/s", Priority: 3, Enabled: enabledAs(true),
 			Signature: pkgrepo.Signature{Type: pkgrepo.SignatureNone}},
 	}
 	if _, err := pkgrepo.Apply(seed, true); err != nil {
@@ -459,5 +491,365 @@ func TestPruneKeepsEveryRepositoryInTheMergedPayload(t *testing.T) {
 	}
 	if _, err := os.Stat(pkgrepo.ConfPath("stale")); !os.IsNotExist(err) {
 		t.Error("a repository no policy contributes should have been removed")
+	}
+}
+
+// An external package is installed with `pkg add` and no repository signature
+// over it: without the organization's opt-in only an https URL is fetched, and
+// a refused entry fails the task without stopping its siblings.
+func TestExternalPackageNeedsHTTPSWithoutTheOptIn(t *testing.T) {
+	for _, u := range []string{"http://x.example/ext-1.0.pkg", "HTTP://x.example/ext-1.0.pkg", "HTTPS://x.example/ext-1.0.pkg", "Https://x.example/ext-1.0.pkg", " https://x.example/ext-1.0.pkg", "ftp://x.example/ext-1.0.pkg", "/tmp/ext-1.0.pkg", "file:///tmp/ext-1.0.pkg", "https:/ext-1.0.pkg", "x.example/ext-1.0.pkg"} {
+		t.Run(u, func(t *testing.T) {
+			log := &orderLog{}
+			stubPkg(t, log, nil)
+			sp := payloadWith(t, `{"software":{"present":["p"],"absent":[],
+				"external":[{"name":"ext","version":"1.0","url":"`+u+`","force":false},
+				            {"name":"ok","version":"2.0","url":"https://x.example/ok-2.0.pkg","force":true}],
+				"allow_unverified":false}}`)
+
+			res := executeSyncSoftware(context.Background(), sp, "")
+			if res.Success {
+				t.Fatal("an external package from a non-https URL was accepted without the opt-in")
+			}
+			if log.indexOf("addurl:"+u) >= 0 {
+				t.Errorf("pkg add ran for the refused URL: %v", log.all())
+			}
+			if log.indexOf("addurl:https://x.example/ok-2.0.pkg") < 0 || log.indexOf("install:p") < 0 {
+				t.Errorf("the rest of the policy should still apply: %v", log.all())
+			}
+			if item := findAction(res, "refused"); item == nil || item.Name != "ext" || !strings.Contains(item.Error, u) {
+				t.Errorf("want a refused item for ext naming the URL: %+v", res.Results)
+			}
+		})
+	}
+
+	// A URL that pkg would read as an option is refused whatever the opt-in.
+	for _, allow := range []bool{false, true} {
+		log := &orderLog{}
+		stubPkg(t, log, nil)
+		sp := payloadWith(t, `{"software":{"present":[],"absent":[],
+			"external":[{"name":"ext","version":"1.0","url":"-f","force":false}],
+			"allow_unverified":`+fmt.Sprint(allow)+`}}`)
+		res := executeSyncSoftware(context.Background(), sp, "")
+		if res.Success || log.indexOf("addurl:-f") >= 0 {
+			t.Errorf("allow_unverified %v: an option-like URL was accepted or fetched: %v", allow, log.all())
+		}
+		if item := findAction(res, "refused"); item == nil || !strings.Contains(item.Error, "read as an option") {
+			t.Errorf("allow_unverified %v: want a refused item saying why: %+v", allow, res.Results)
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		installed bool
+		force     bool
+	}{{"already installed", true, false}, {"forced", false, true}, {"already installed and forced", true, true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &orderLog{}
+			stubPkg(t, log, map[string]bool{"ext-1.0": tc.installed})
+			sp := payloadWith(t, fmt.Sprintf(`{"software":{"present":[],"absent":[],
+				"external":[{"name":"ext","version":"1.0","url":"http://x.example/ext-1.0.pkg","force":%v}],
+				"allow_unverified":false}}`, tc.force))
+			res := executeSyncSoftware(context.Background(), sp, "")
+			if res.Success || findAction(res, "refused") == nil || log.indexOf("addurl:http://x.example/ext-1.0.pkg") >= 0 {
+				t.Errorf("want the entry refused before the installed check and force: %+v %v", res.Results, log.all())
+			}
+		})
+	}
+
+	t.Run("permitted when the org opted in", func(t *testing.T) {
+		log := &orderLog{}
+		stubPkg(t, log, nil)
+		sp := payloadWith(t, `{"software":{"present":[],"absent":[],
+			"external":[{"name":"ext","version":"1.0","url":"http://x.example/ext-1.0.pkg","force":false}],
+			"allow_unverified":true}}`)
+		if res := executeSyncSoftware(context.Background(), sp, ""); !res.Success || log.indexOf("addurl:http://x.example/ext-1.0.pkg") < 0 {
+			t.Fatalf("should be installed when the org opted in: %v %v", res.Errors, log.all())
+		}
+	})
+}
+
+// An external package's version is a pkg version and nothing else: `pkg info
+// name-version` matches a glob, so "*" would read any installed build as the
+// one asked for and skip the add. A bad version refuses that entry only; the
+// rest of the policy applies.
+func TestExternalPackage_TheVersionIsAPkgVersion(t *testing.T) {
+	for _, v := range []string{"1.0", "2.3.1_1", "1.2.3_1,1", "0.9.0.a1", "26.1.11+git", "latest", strings.Repeat("1", 100)} {
+		if err := externalPermitted(externalPackage{Name: "ext", Version: v, URL: "https://x.example/ext.pkg"}, false); err != nil {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+	for _, v := range []string{"*", "1.*", "1.[0-9]", "1.0?", "1.{0,1}", "1.0 2.0", "-1.0", ".1", "1.0-2", strings.Repeat("1", 101)} {
+		log := &orderLog{}
+		stubPkg(t, log, nil)
+		sp := payloadWith(t, `{"software":{"present":["p"],"absent":[],
+			"external":[{"name":"ext","version":"`+v+`","url":"https://x.example/ext.pkg","force":false}],
+			"allow_unverified":false}}`)
+		res := executeSyncSoftware(context.Background(), sp, "")
+		if res.Success || log.indexOf("addurl:https://x.example/ext.pkg") >= 0 {
+			t.Errorf("%q: accepted or fetched: %v", v, log.all())
+		}
+		if item := findAction(res, "refused"); item == nil || !strings.Contains(item.Error, "not a package version") {
+			t.Errorf("%q: want a refused item naming the version: %+v", v, res.Results)
+		}
+		if log.indexOf("install:p") < 0 {
+			t.Errorf("%q: the rest of the policy should still apply: %v", v, log.all())
+		}
+	}
+}
+
+// externalCase runs one external entry against a device that has the given
+// version of "ext" installed ("" for none) and an archive at the URL that holds
+// archive (name-version). A pkg add installs what addInstalls says, "" being
+// pkg 2.3.1's "already installed" that installs nothing.
+func externalCase(t *testing.T, installed, archive, addInstalls, version string, force bool, readErr error) (SyncAPIResult, *orderLog) {
+	t.Helper()
+	log := &orderLog{}
+	stubPkg(t, log, nil)
+	current := installed
+	prevVersion := pkgmgr.SetInstalledVersionFunc(func(ctx context.Context, name string) (string, error) {
+		log.add("query:" + name)
+		if readErr != nil && log.indexOf("addurl:https://x.example/ext.pkg") >= 0 {
+			return "", readErr
+		}
+		if name != "ext" {
+			return "", nil
+		}
+		return current, nil
+	})
+	prevAdd := pkgmgr.SetAddURLFunc(func(ctx context.Context, url string, force bool) pkgmgr.MutateOutcome {
+		log.add("addurl:" + url)
+		if addInstalls != "" {
+			current = addInstalls
+		}
+		return pkgmgr.MutateOutcome{Action: pkgmgr.ActionInstalled}
+	})
+	prevArchive := readExternalArchive
+	readExternalArchive = func(ctx context.Context, url string) (string, string, error) {
+		log.add("fetch:" + url)
+		i := strings.LastIndex(archive, "-")
+		return archive[:i], archive[i+1:], nil
+	}
+	t.Cleanup(func() {
+		pkgmgr.SetInstalledVersionFunc(prevVersion)
+		pkgmgr.SetAddURLFunc(prevAdd)
+		readExternalArchive = prevArchive
+	})
+	forceJSON := "false"
+	if force {
+		forceJSON = "true"
+	}
+	sp := payloadWith(t, `{"software":{"present":[],"absent":[],
+		"external":[{"name":"ext","version":"`+version+`","url":"https://x.example/ext.pkg","force":`+forceJSON+`}],
+		"allow_unverified":false}}`)
+	return executeSyncSoftware(context.Background(), sp, ""), log
+}
+
+func externalItem(res SyncAPIResult) *SyncAPIItemResult {
+	for i := range res.Results {
+		if res.Results[i].Name == "ext" {
+			return &res.Results[i]
+		}
+	}
+	return nil
+}
+
+// A version that names a build is compared by the package's exact name, so a
+// settled device downloads nothing, and a package named "ext-1.0" does not
+// stand in for ext 1.0 (#262 point 2).
+func TestExternalPackage_APinnedVersionIsComparedByExactName(t *testing.T) {
+	res, log := externalCase(t, "1.0", "ext-1.0", "1.0", "1.0", false, nil)
+	if item := externalItem(res); !res.Success || item == nil || item.Action != string(pkgmgr.ActionAlreadyPresent) {
+		t.Fatalf("%+v", res.Results)
+	}
+	if log.indexOf("fetch:https://x.example/ext.pkg") >= 0 || log.indexOf("addurl:https://x.example/ext.pkg") >= 0 {
+		t.Errorf("a settled pinned entry fetched or added: %v", log.all())
+	}
+
+	res, log = externalCase(t, "", "ext-1.0", "1.0", "1.0", false, nil)
+	if !res.Success || log.indexOf("addurl:https://x.example/ext.pkg") < 0 {
+		t.Errorf("a missing package was not added: %+v %v", res.Results, log.all())
+	}
+}
+
+// A version without a digit names no build: the archive's own version decides,
+// and the add is skipped when that version is installed (#262 point 1).
+func TestExternalPackage_ABuildlessVersionUsesTheArchivesVersion(t *testing.T) {
+	res, log := externalCase(t, "2.0", "ext-2.0", "2.0", "latest", false, nil)
+	if item := externalItem(res); !res.Success || item == nil || item.Action != string(pkgmgr.ActionAlreadyPresent) {
+		t.Fatalf("%+v", res.Results)
+	}
+	if log.indexOf("fetch:https://x.example/ext.pkg") < 0 || log.indexOf("addurl:https://x.example/ext.pkg") >= 0 {
+		t.Errorf("latest at the archive's version: want a fetch and no add, got %v", log.all())
+	}
+
+	res, log = externalCase(t, "1.0", "ext-2.0", "2.0", "latest", false, nil)
+	if item := externalItem(res); !res.Success || item == nil || item.Action != string(pkgmgr.ActionInstalled) || log.indexOf("addurl:https://x.example/ext.pkg") < 0 {
+		t.Errorf("latest behind the archive: want an add, got %+v %v", res.Results, log.all())
+	}
+}
+
+// Before any add, an archive that holds another package, or another build than
+// the version the entry names, is refused, and nothing is installed.
+func TestExternalPackage_AnArchiveThatIsNotTheEntryIsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, archive, version, want string }{
+		{"another package", "other-1.0", "1.0", "holds the package other, not ext"},
+		{"another build", "ext-1.1", "1.0", "holds ext-1.1, not the version 1.0"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, log := externalCase(t, "", tc.archive, "", tc.version, false, nil)
+			item := externalItem(res)
+			if res.Success || item == nil || item.Action != "refused" || !strings.Contains(item.Error, tc.want) {
+				t.Errorf("item %+v, want refused with %q", item, tc.want)
+			}
+			if log.indexOf("addurl:https://x.example/ext.pkg") >= 0 {
+				t.Errorf("the add ran: %v", log.all())
+			}
+		})
+	}
+}
+
+func enabledAs(b bool) *bool { return &b }
+
+// A repository whose snippet leaves out enabled, or sends null, arrives through
+// the task's own parse and is written enabled; an explicit false is written
+// disabled.
+func TestSoftwareRepository_ALeftOutEnabledIsWrittenOn(t *testing.T) {
+	for _, tc := range []struct {
+		name, enabled, want string
+	}{
+		{"left out", ``, "enabled: yes,"},
+		{"null", `"enabled": null,`, "enabled: yes,"},
+		{"false", `"enabled": false,`, "enabled: no,"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			log := &orderLog{}
+			stubPkg(t, log, nil)
+			repo := strings.Replace(repoJSON, `"enabled": true,`, tc.enabled, 1)
+			sp := payloadWith(t, `{"software":{"present":[],"absent":[],"repositories":[`+repo+`],"external":[],"allow_unverified":false}}`)
+			if res := executeSyncSoftware(context.Background(), sp, ""); !res.Success {
+				t.Fatalf("sync failed: %v", res.Errors)
+			}
+			body, err := os.ReadFile(pkgrepo.ConfPath("mimugmail"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(body), tc.want) {
+				t.Errorf("want %q in:\n%s", tc.want, body)
+			}
+		})
+	}
+}
+
+// A `pkg add` that exits 0 but leaves the archive's build uninstalled is an
+// error (#142): pkg 2.3.1 does that over another installed version.
+func TestExternalPackage_AnAddThatInstallsNothingIsAnError(t *testing.T) {
+	for _, tc := range []struct {
+		name, version string
+		force         bool
+		readErr       error
+		want          string
+	}{
+		{"another version left in place", "1.1", false, nil, "left the installed version in place; set force"},
+		{"forced, nothing installed", "1.1", true, nil, "pkg add -f finished, but ext-1.1 is not installed"},
+		{"the check cannot read pkg", "1.1", false, errors.New("pkg: database locked"), "could not be read"},
+		{"latest, another version left in place", "latest", false, nil, "left the installed version in place"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			res, _ := externalCase(t, "1.0", "ext-1.1", "", tc.version, tc.force, tc.readErr)
+			item := externalItem(res)
+			if res.Success || item == nil || item.Status != "error" || !strings.Contains(item.Error, tc.want) {
+				t.Errorf("item %+v, want an error with %q", item, tc.want)
+			}
+		})
+	}
+}
+
+// Only pkg add's own URL prefixes are downloaded (pkg src/add.c is_url);
+// anything else is a path on the box, read where it is, as pkg reads it.
+func TestFetchAndReadArchive_DownloadsOnlyWhatPkgReadsAsAURL(t *testing.T) {
+	for s, want := range map[string]bool{
+		"https://x.example/ext-1.0.pkg": true,
+		"http://x.example/ext-1.0.pkg":  true,
+		"file:///tmp/ext-1.0.pkg":       true,
+		"ftp://x.example/ext-1.0.pkg":   false,
+		"pkg+https://x.example/ext.pkg": false,
+		"HTTPS://x.example/ext-1.0.pkg": false,
+		"/tmp/ext-1.0.pkg":              false,
+	} {
+		if got := pkgURL(s); got != want {
+			t.Errorf("%q: %v, want %v", s, got, want)
+		}
+	}
+
+	var read string
+	prevArchive := pkgmgr.SetArchiveNameVersionFunc(func(ctx context.Context, path string) (string, string, error) {
+		read = path
+		return "ext", "1.0", nil
+	})
+	prevEnv := pkgmgr.SetFetchEnvFunc(func(ctx context.Context) ([]string, error) {
+		t.Error("a path on the box asked for pkg's fetch environment")
+		return nil, nil
+	})
+	t.Cleanup(func() {
+		pkgmgr.SetArchiveNameVersionFunc(prevArchive)
+		pkgmgr.SetFetchEnvFunc(prevEnv)
+	})
+	name, version, err := fetchAndReadArchive(context.Background(), "/tmp/ext-1.0.pkg")
+	if err != nil || name != "ext" || version != "1.0" || read != "/tmp/ext-1.0.pkg" {
+		t.Errorf("got %q %q %v, read %q", name, version, err, read)
+	}
+}
+
+// A SYNC with no software section has no policy attached: the repository files
+// a policy wrote are removed, an administrator's own file stays, and no pkg
+// command runs (no catalog fetch, no package removed).
+func TestSyncSoftwareSection_NoPolicyRemovesOnlyTheManagedRepositories(t *testing.T) {
+	log := &orderLog{}
+	stubPkg(t, log, nil)
+	sp := payloadWith(t, `{"software":{"present":[],"absent":[],"repositories":[`+repoJSON+`],"external":[],"allow_unverified":false}}`)
+	if res := syncSoftwareSection(context.Background(), sp, ""); !res.Success {
+		t.Fatalf("policy sync failed: %v", res.Errors)
+	}
+	if _, err := os.Stat(pkgrepo.ConfPath("mimugmail")); err != nil {
+		t.Fatalf("the policy's repository was not written: %v", err)
+	}
+	if _, err := os.Stat(pkgrepo.FingerprintDir("mimugmail")); err != nil {
+		t.Fatalf("the policy's fingerprints were not written: %v", err)
+	}
+	foreign := filepath.Join(pkgrepo.ReposDirForTest(), "own.conf")
+	if err := os.WriteFile(foreign, []byte("own: {\n  url: \"https://x.example\"\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := len(log.all())
+
+	res := syncSoftwareSection(context.Background(), nil, "")
+	if !res.Success {
+		t.Fatalf("no-policy sync failed: %v", res.Errors)
+	}
+	if _, err := os.Stat(pkgrepo.ConfPath("mimugmail")); !os.IsNotExist(err) {
+		t.Errorf("the managed repository survived a SYNC without a policy: %v", err)
+	}
+	if _, err := os.Stat(pkgrepo.FingerprintDir("mimugmail")); !os.IsNotExist(err) {
+		t.Errorf("the managed repository's fingerprints survived a SYNC without a policy: %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Errorf("an administrator's own repository file was removed: %v", err)
+	}
+	removed := false
+	for _, it := range res.Results {
+		if it.Type == "REPOSITORY" && it.Name == "mimugmail" && it.Action == string(pkgmgr.ActionRepoRemoved) {
+			removed = true
+		}
+	}
+	if !removed {
+		t.Errorf("results %+v, want the removal reported", res.Results)
+	}
+	if calls := log.all()[before:]; len(calls) != 0 {
+		t.Errorf("a SYNC without a policy ran pkg: %v", calls)
+	}
+
+	if res := syncSoftwareSection(context.Background(), nil, ""); !res.Success || len(res.Results) != 0 {
+		t.Errorf("the next SYNC without a policy: %+v", res)
 	}
 }

@@ -255,6 +255,10 @@ const KindMajor = "major"
 // of tokens. They are all the contract carries about a repository or a package,
 // never a name. The third-party ones are a warning and never a hold.
 const (
+	// NoteBootEnvironmentMade says that a pre-upgrade boot environment of the
+	// box as it is now exists for this upgrade: this attempt made it, or an
+	// earlier attempt made it from the same release, config.xml and installed
+	// packages, and this one reuses it.
 	NoteBootEnvironmentMade          = "boot_environment_made"
 	NoteBootEnvironmentSkippedNoRoom = "boot_environment_skipped_no_room"
 	NoteBootEnvironmentOff           = "boot_environment_off"

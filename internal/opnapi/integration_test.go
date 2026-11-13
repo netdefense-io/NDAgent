@@ -872,6 +872,8 @@ func TestIntegration_CreateAndDeleteHostOverride(t *testing.T) {
 		RR:          "A",
 		Server:      "192.168.1.100",
 		Description: "Integration test host override [nd-template:test]",
+		// The wire struct sends every field, and the model requires addptr.
+		AddPTR: hostOverrideAddPTRDefault,
 	}
 
 	t.Log("Creating test host override...")
@@ -926,6 +928,9 @@ func TestIntegration_CreateAndDeleteDomainForward(t *testing.T) {
 		Domain:      "nd-integration-test.local",
 		Server:      "10.0.0.1",
 		Description: "Integration test domain forward [nd-template:test]",
+		// The wire struct sends every field, and the model requires both.
+		ForwardTCPUpstream: "0",
+		ForwardFirst:       "0",
 	}
 
 	t.Log("Creating test domain forward...")
@@ -979,6 +984,7 @@ func TestIntegration_CreateAndDeleteHostAlias(t *testing.T) {
 		RR:          "A",
 		Server:      "192.168.1.101",
 		Description: "Parent host for alias test [nd-template:test]",
+		AddPTR:      hostOverrideAddPTRDefault,
 	}
 
 	t.Log("Creating parent host override...")

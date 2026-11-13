@@ -468,10 +468,21 @@ func TestHostOverrideAddPTR(t *testing.T) {
 		t.Errorf("addptr is not sent: %s", raw)
 	}
 
+	// A field the snippet leaves out takes the model's default: on for
+	// addptr, empty for the rest (the operator's rule, 2026-11-12).
 	unset := ConvertToOPNHostOverride(APIHostOverridePayload{Hostname: "nas", Domain: "lan", RR: "A", Server: "192.0.2.5"})
 	raw, _ = json.Marshal(HostOverrideWrapper{Host: unset})
-	if strings.Contains(string(raw), "addptr") {
-		t.Errorf("an unset addptr is sent, which would overwrite the device's: %s", raw)
+	for _, want := range []string{`"addptr":"1"`, `"ttl":""`, `"mx":""`, `"mxprio":""`, `"txtdata":""`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("a left-out field is not sent with its default %s: %s", want, raw)
+		}
+	}
+	fwd := ConvertToOPNDomainForward(APIDomainForwardPayload{Type: "dot", Domain: "corp.example", Server: "192.0.2.53"})
+	raw, _ = json.Marshal(fwd)
+	for _, want := range []string{`"port":""`, `"verify":""`} {
+		if !strings.Contains(string(raw), want) {
+			t.Errorf("a forward's left-out field is not sent empty %s: %s", want, raw)
+		}
 	}
 
 	pulled := ConvertHostOverrideToAPI(map[string]interface{}{"uuid": "x", "hostname": "nas", "domain": "lan", "addptr": "0"})

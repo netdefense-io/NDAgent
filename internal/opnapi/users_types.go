@@ -36,15 +36,17 @@ type User struct {
 	Disabled         string `json:"disabled"`
 	Scope            string `json:"scope"`
 	Descr            string `json:"descr"`
-	GroupMemberships string `json:"group_memberships,omitempty"` // Comma-separated GIDs
-	Priv             string `json:"priv,omitempty"`              // Comma-separated privileges
-	Shell            string `json:"shell,omitempty"`
-	AuthorizedKeys   string `json:"authorizedkeys,omitempty"`
-	Expires          string `json:"expires,omitempty"`
-	Email            string `json:"email,omitempty"`
-	Comment          string `json:"comment,omitempty"`
-	Language         string `json:"language,omitempty"`
-	LandingPage      string `json:"landing_page,omitempty"`
+	GroupMemberships string `json:"group_memberships"` // Comma-separated GIDs; "" takes the user out of every group
+	Priv             string `json:"priv"`              // Comma-separated privileges; "" clears them
+	// Sent whether or not the snippet sets them: a field it leaves out takes
+	// the model's default, empty (the operator's rule, 2026-11-12).
+	Shell          string `json:"shell"`
+	AuthorizedKeys string `json:"authorizedkeys"`
+	Expires        string `json:"expires"`
+	Email          string `json:"email"`
+	Comment        string `json:"comment"`
+	Language       string `json:"language"`
+	LandingPage    string `json:"landing_page"`
 }
 
 // UserWrapper wraps a user for API set operations.
@@ -58,18 +60,16 @@ type UserWrapper struct {
 // Priv and SourceNetworks are deliberately NOT omitempty: an empty
 // string is OPNsense's own "clear this field" signal, so omitting the
 // key on a template-driven revoke would leave stale
-// privileges/networks on the device forever. Member stays omitempty: for a
-// member-managed GROUP an empty desired list still goes through the
-// existing len(Members)==0 skip in executeSyncUsersGroups (unrelated to
-// this struct tag), and for an external GROUP (external_members: true)
-// Member must never be sent at all -- see ConvertAPIToGroup, which never
-// populates it for those.
+// privileges/networks on the device forever. Member is a pointer: a
+// member-managed GROUP sends its full list, "" when it has none, and an
+// external GROUP (external_members: true) never sends it at all, which
+// leaves the directory's members alone (ConvertAPIToGroup).
 type Group struct {
-	Name           string `json:"name"`
-	Description    string `json:"description"`
-	Priv           string `json:"priv"`             // Comma-separated privileges -- always sent, even ""
-	Member         string `json:"member,omitempty"` // Comma-separated UIDs
-	SourceNetworks string `json:"source_networks"`  // Always sent, even ""
+	Name           string  `json:"name"`
+	Description    string  `json:"description"`
+	Priv           string  `json:"priv"`             // Comma-separated privileges -- always sent, even ""
+	Member         *string `json:"member,omitempty"` // Comma-separated UIDs; nil is not sent
+	SourceNetworks string  `json:"source_networks"`  // Always sent, even ""
 }
 
 // GroupWrapper wraps a group for API set operations.
@@ -85,8 +85,8 @@ type APIUserPayload struct {
 	Disabled       bool     `json:"disabled"`
 	Scope          string   `json:"scope"`
 	Descr          string   `json:"descr"`
-	Groups         []string `json:"groups,omitempty"` // Group NAMES (not GIDs)
-	Priv           []string `json:"priv,omitempty"`   // Privileges as array
+	Groups         []string `json:"groups,omitempty"` // Group NAMES (not GIDs); none clears: opnapi.User always sends the list
+	Priv           []string `json:"priv,omitempty"`   // Privileges as array; none clears, likewise
 	Shell          string   `json:"shell,omitempty"`
 	AuthorizedKeys string   `json:"authorizedkeys,omitempty"`
 	Expires        string   `json:"expires,omitempty"`
@@ -101,6 +101,9 @@ type APIUserPayload struct {
 	SuperuserCleared bool   `json:"-"`
 	SnippetName      string `json:"-"`
 	SnippetIndex     int    `json:"-"`
+	// ContentError says why the element cannot be applied as written; the
+	// sync refuses it and keeps it desired.
+	ContentError string `json:"-"`
 }
 
 // APIGroupPayload is the portable format for groups in templates/snippets.
@@ -133,6 +136,9 @@ type APIGroupPayload struct {
 	SuperuserCleared bool   `json:"-"`
 	SnippetName      string `json:"-"`
 	SnippetIndex     int    `json:"-"`
+	// ContentError says why the element cannot be applied as written; the
+	// sync refuses it and keeps it desired.
+	ContentError string `json:"-"`
 }
 
 // SetUserResponse is the response from user add/set endpoints.

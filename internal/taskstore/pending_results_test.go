@@ -6,14 +6,26 @@ import (
 	"testing"
 )
 
+// writeDropFile writes a drop file the way ndagent-plugin-install.sh does: to a
+// temporary name in the same directory that does not end in .json, then a
+// rename, so a drain polling the directory never reads it half written (it
+// quarantines a file it cannot parse).
 func writeDropFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		t.Fatalf("mkdir: %v", err)
+		t.Errorf("mkdir: %v", err)
+		return ""
 	}
+	tmp, err := os.CreateTemp(dir, "."+name+".")
+	if err != nil {
+		t.Errorf("create: %v", err)
+		return ""
+	}
+	_, werr := tmp.WriteString(content)
+	cerr := tmp.Close()
 	p := filepath.Join(dir, name)
-	if err := os.WriteFile(p, []byte(content), 0o600); err != nil {
-		t.Fatalf("write: %v", err)
+	if werr != nil || cerr != nil || os.Chmod(tmp.Name(), 0o600) != nil || os.Rename(tmp.Name(), p) != nil {
+		t.Errorf("write %s: %v %v", name, werr, cerr)
 	}
 	return p
 }

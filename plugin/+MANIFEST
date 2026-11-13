@@ -11,7 +11,7 @@
 	"flatsize": 47906,
 	"licenselogic": "single",
 	"licenses": [
-		"BSD2CLAUSE"
+		"APACHE20"
 	],
 	"desc": "NetDefense Agent Integration for OPNsense - This plugin integrates the NetDefense Agent into OPNsense, providing augmented management capabilities.",
 	"deps": {},

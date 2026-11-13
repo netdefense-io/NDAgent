@@ -350,6 +350,67 @@ func TestHandleFirmwareTrack_WaitsForAnotherFirmwareJobAndSaysSo(t *testing.T) {
 	}
 }
 
+// #143: a context closes its Done channel before it cancels its children, so a
+// waiting task can be handed the slot after the agent's context ended. Many
+// children of the agent's context widen that window. An advance in test mode
+// and a late one answer before the engine looks at the context.
+func TestHandleFirmwareTrack_ATaskHandedTheSlotAfterTheAgentStoppedAnswersNothing(t *testing.T) {
+	for name, tc := range map[string]struct {
+		testMode bool
+		expires  time.Duration
+	}{
+		"test-mode advance":     {true, 0},
+		"late-dispatch advance": {false, 3 * time.Minute},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTrackHarness(t, true)
+			h.ws = network.NewWebSocketClient(&config.Config{TestMode: tc.testMode}, nil, nil, nil, nil)
+			agent, stopAgent := context.WithCancel(context.Background())
+			defer stopAgent()
+			for i := 0; i < 30000; i++ {
+				_, cancel := context.WithCancel(agent)
+				defer cancel()
+			}
+			release, err := firmware.Acquire(context.Background(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The running job gives the slot back when the agent stops.
+			go func() {
+				<-agent.Done()
+				release()
+			}()
+			var expires time.Time
+			if tc.expires > 0 {
+				expires = time.Now().Add(tc.expires)
+			}
+			done := make(chan error, 1)
+			payload := map[string]interface{}{"action": "advance", "track": "fast", "approved": map[string]interface{}{"26.7": "26.7.5"}}
+			go func() { done <- h.dispatch(agent, "71", payload, expires) }()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				h.mu.Lock()
+				told := len(h.progress) > 0
+				h.mu.Unlock()
+				if told {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("the task did not say it was waiting")
+				}
+				time.Sleep(time.Millisecond)
+			}
+			stopAgent()
+			if err := <-done; err != nil {
+				t.Fatalf("handler error %v", err)
+			}
+			if got := h.answerList(); len(got) != 0 {
+				t.Errorf("answers %+v: a task whose agent stopped before its turn is left to the reconciler", got)
+			}
+		})
+	}
+}
+
 func TestHandleFirmwareTrack_ATaskWhoseTimeRanOutWaitingIsHeldAsBusy(t *testing.T) {
 	h := newTrackHarness(t, true)
 	release, err := firmware.Acquire(context.Background(), nil)

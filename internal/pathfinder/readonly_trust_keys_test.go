@@ -227,6 +227,86 @@ func TestHandleStream_ReadOnlyBlanksTheKeyOfEveryCertificateView(t *testing.T) {
 	}
 }
 
+// An import made before OPNsense refused a payload of more than one PEM section
+// kept whatever followed the certificate, a private key pasted after it included.
+// Every view of such an entry, and the certificate file of generate_file, reaches
+// a read-only client without the field that holds the key, and a read-write
+// client as stored.
+func TestHandleStream_ReadOnlyBlanksAKeyStoredWithTheCertificate(t *testing.T) {
+	m := newTrustMaterial(t)
+	storedPEM := m.certPEM + m.keyPEM
+	storedB64 := base64.StdEncoding.EncodeToString([]byte(storedPEM))
+	pieces := append(m.keyPieces(), storedB64, storedB64[len(storedB64)-80:len(storedB64)-20])
+
+	for _, view := range trustKeyViews() {
+		for _, enc := range encodings {
+			t.Run(view.name+" "+enc.name, func(t *testing.T) {
+				answer := view.answer(m).(map[string]any)
+				stored := view.object(answer)
+				stored["crt"], stored["crt_payload"] = storedB64, storedPEM
+				stored["prv"], stored["prv_payload"] = "", ""
+				body := enc.encode(t, answer)
+
+				ex := exchangeWith(t, true, answerAfterTheBody(body), view.raw)
+				if ex.resp.StatusCode != http.StatusOK {
+					t.Fatalf("status = %d: %s", ex.resp.StatusCode, ex.body)
+				}
+				for _, piece := range pieces {
+					if bytes.Contains(ex.raw, []byte(piece)) {
+						t.Errorf("%q of the key reached the client", piece)
+					}
+				}
+				var doc map[string]any
+				if err := json.Unmarshal([]byte(ex.body), &doc); err != nil {
+					t.Fatalf("the cleaned answer is not JSON: %v", err)
+				}
+				obj := view.object(doc)
+				if obj == nil || obj["crt"] != "" || obj["crt_payload"] != "" || obj["commonname"] != "fw.example.net" {
+					t.Errorf("want the certificate fields blanked and the rest kept: %s", ex.body)
+				}
+
+				ex = exchangeWith(t, false, answerAfterTheBody(body), view.raw)
+				if err := json.Unmarshal([]byte(ex.body), &doc); err != nil {
+					t.Fatalf("the answer is not JSON: %v", err)
+				}
+				if obj := view.object(doc); obj == nil || obj["crt_payload"] != storedPEM || obj["crt"] != storedB64 {
+					t.Errorf("a read-write client did not get the entry as stored: %s", ex.body)
+				}
+			})
+		}
+	}
+
+	var reached atomic.Int32
+	for _, module := range []string{"cert", "ca"} {
+		for _, kind := range []string{"crt", "csr", ""} {
+			target := "/api/trust/" + module + "/generate_file/" + certUUID
+			if kind != "" {
+				target += "/" + kind
+			}
+			raw := rawRequest("POST", target, formMedia, "")
+			for _, readOnly := range []bool{true, false} {
+				reached.Store(0)
+				ex := exchangeWith(t, readOnly, generateFile("payload", storedPEM, &reached), raw)
+				var file struct{ Payload string }
+				if err := json.Unmarshal([]byte(ex.body), &file); err != nil || ex.resp.StatusCode != http.StatusOK || reached.Load() != 1 {
+					t.Fatalf("POST %s: status %d, OPNsense reached %d times, body %q", target, ex.resp.StatusCode, reached.Load(), ex.body)
+				}
+				switch {
+				case readOnly && file.Payload != "":
+					t.Errorf("POST %s: a read-only client got the file %q", target, file.Payload)
+				case !readOnly && file.Payload != storedPEM:
+					t.Errorf("POST %s: a read-write client got %q", target, file.Payload)
+				}
+				for _, piece := range pieces {
+					if readOnly && bytes.Contains(ex.raw, []byte(piece)) {
+						t.Errorf("POST %s: %q of the key reached the client", target, piece)
+					}
+				}
+			}
+		}
+	}
+}
+
 // generateFile stands in for generate_file, which answers a POST with a JSON
 // document holding the file in field (payload, or payload_b64 for pkcs12),
 // counting the requests that reach it.

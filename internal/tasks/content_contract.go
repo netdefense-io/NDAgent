@@ -310,9 +310,10 @@ func opnsensePortFold(value string) string {
 // the same element comes back. Name-mapped fields are given by label, and the
 // description loses its template tags, which SYNC sets.
 //
-// The device's own UUID stays in the content: the control plane replaces it
-// with a new managed UUID when it stores the pulled snippet, and only
-// replaces a uuid that is there.
+// The device's own UUID stays in the content, and the control plane replaces
+// it when it stores the pulled snippet: a snippet the pull creates gets a new
+// managed UUID, one the pull overwrites keeps its own. Only a uuid that is
+// there is replaced.
 func (c fieldContract) portable(row map[string]interface{}, model opnapi.EntityModel, always map[string]bool) map[string]interface{} {
 	content := map[string]interface{}{}
 	if uuid, ok := row["uuid"].(string); ok {

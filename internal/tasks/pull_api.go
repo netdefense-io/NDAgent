@@ -335,14 +335,19 @@ func pullUnboundACL(ctx context.Context, client *opnapi.Client, name string) (ma
 	}, nil
 }
 
+// errCrowdsecNotInstalled is a PULL of crowdsec_settings on a device without
+// os-crowdsec, worded as the SYNC's skipped item is: "not found" read as a
+// missing snippet.
+var errCrowdsecNotInstalled = errors.New("os-crowdsec is not installed on this device (install it, for example with a software policy)")
+
 // pullCrowdsecSettings returns the eight settings a CROWDSEC_SETTINGS snippet
 // carries, booleans as real bools. A device without os-crowdsec has nothing to
-// pull and answers "not found".
+// pull and fails with errCrowdsecNotInstalled.
 func pullCrowdsecSettings(ctx context.Context, client *opnapi.Client) (map[string]interface{}, error) {
 	current, err := client.GetCrowdsecGeneral(ctx)
 	if err != nil {
 		if opnapi.IsNotFound(err) {
-			return nil, nil
+			return nil, errCrowdsecNotInstalled
 		}
 		return nil, err
 	}

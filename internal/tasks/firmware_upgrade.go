@@ -6,7 +6,7 @@ package tasks
 //
 //	minor + reboot=false  → exec opnsense-update -pt (packages only, synchronous)
 //	minor + reboot=true   → REST POST /update (point release + auto-reboot)
-//	major + reboot=true   → REST POST /upgrade (series upgrade + 3 reboots), only
+//	major + reboot=true   → REST POST /upgrade (series upgrade, three reboots, sometimes four), only
 //	                        on an offer this task's own check made (firmware_major.go)
 //	major + reboot=false  → FAILED (invalid; rejected at payload validation)
 //
@@ -321,6 +321,11 @@ func HandleFirmwareUpgrade(ctx context.Context, ws *network.WebSocketClient, cmd
 		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(taskExpiredWhileWaiting))
 	}
 	defer release()
+	// A context closes its Done channel before it cancels its children, so the
+	// slot can be handed to waitCtx after ctx ended (#143).
+	if ctx.Err() != nil {
+		return leftBeforeTheTrigger(ctx, log, cmd, marked)
+	}
 	if firmwareExpired(cmd) {
 		return firmwareSendResponse(ws, cmd.TaskID, NewFailureResult(taskExpiredWhileWaiting))
 	}

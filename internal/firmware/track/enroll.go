@@ -118,7 +118,7 @@ func (e *Engine) enrollIntact(ctx context.Context, o *op) *Outcome {
 	// that ended short, is forgotten with it, as it is when the pin is written anew.
 	updated, err := e.store.Update(func(st *State) {
 		st.Track = o.in.Payload.Track
-		st.HopAborts, st.Landing = nil, nil
+		st.HopAborts, st.Landing, st.HopBootEnvironment = nil, nil, nil
 	})
 	if err != nil {
 		e.log.Warnw("Cannot save the track", "error", err)

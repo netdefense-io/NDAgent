@@ -62,6 +62,13 @@ const coreVersionFile = `{
 }
 `
 
+// businessCoreVersionFile is the same file on a Business Edition 26.4.1 device.
+var businessCoreVersionFile = strings.NewReplacer(
+	`"opnsense"`, `"opnsense-business"`,
+	"26.7.4_1", "26.4.1",
+	`"26.7"`, `"26.4"`,
+).Replace(coreVersionFile)
+
 func versionFileJSON(version, series string) string {
 	meta := map[string]string{}
 	if version != "" {
@@ -148,14 +155,16 @@ func TestInstalledRelease_ReadsTheVersionFileFirst(t *testing.T) {
 		wantRaw string
 		major   int
 		minor   int
+		product string
 	}{
-		{"the real file layout", coreVersionFile, "26.7.4_1", 26, 7},
-		{"general availability release", versionFileJSON("26.7", "26.7"), "26.7", 26, 7},
-		{"patch release", versionFileJSON("26.1.9", "26.1"), "26.1.9", 26, 1},
-		{"package revision suffix", versionFileJSON("26.7.4_1", "26.7"), "26.7.4_1", 26, 7},
-		{"a two-digit minor is not below 26.1", versionFileJSON("26.10.1", "26.10"), "26.10.1", 26, 10},
-		{"below the floor", versionFileJSON("25.7.9_1", "25.7"), "25.7.9_1", 25, 7},
-		{"series only", versionFileJSON("", "25.7"), "25.7", 25, 7},
+		{"the real file layout", coreVersionFile, "26.7.4_1", 26, 7, "opnsense"},
+		{"Business Edition", businessCoreVersionFile, "26.4.1", 26, 4, "opnsense-business"},
+		{"general availability release", versionFileJSON("26.7", "26.7"), "26.7", 26, 7, ""},
+		{"patch release", versionFileJSON("26.1.9", "26.1"), "26.1.9", 26, 1, ""},
+		{"package revision suffix", versionFileJSON("26.7.4_1", "26.7"), "26.7.4_1", 26, 7, ""},
+		{"a two-digit minor is not below 26.1", versionFileJSON("26.10.1", "26.10"), "26.10.1", 26, 10, ""},
+		{"below the floor", versionFileJSON("25.7.9_1", "25.7"), "25.7.9_1", 25, 7, ""},
+		{"series only", versionFileJSON("", "25.7"), "25.7", 25, 7, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -169,8 +178,8 @@ func TestInstalledRelease_ReadsTheVersionFileFirst(t *testing.T) {
 			if err != nil {
 				t.Fatalf("InstalledRelease() error = %v", err)
 			}
-			if got.Raw != tc.wantRaw || got.Major != tc.major || got.Minor != tc.minor {
-				t.Errorf("got %+v, want %s parsed as %d.%d", got, tc.wantRaw, tc.major, tc.minor)
+			if got.Raw != tc.wantRaw || got.Major != tc.major || got.Minor != tc.minor || got.Product != tc.product {
+				t.Errorf("got %+v, want %s parsed as %d.%d of %q", got, tc.wantRaw, tc.major, tc.minor, tc.product)
 			}
 			if requests := api.seen(); len(requests) != 0 {
 				t.Errorf("the API was asked %v although the version file answered", requests)
@@ -236,7 +245,7 @@ func TestInstalledRelease_CommandInvocation(t *testing.T) {
 	if got.Path != "/usr/local/sbin/opnsense-version" {
 		t.Errorf("ran %q, want /usr/local/sbin/opnsense-version", got.Path)
 	}
-	if want := []string{"/usr/local/sbin/opnsense-version", "-v"}; strings.Join(got.Args, "\x00") != strings.Join(want, "\x00") {
+	if want := []string{"/usr/local/sbin/opnsense-version", "-n", "-v"}; strings.Join(got.Args, "\x00") != strings.Join(want, "\x00") {
 		t.Errorf("args = %q, want %q", got.Args, want)
 	}
 
@@ -294,20 +303,24 @@ func TestInstalledRelease_CommandOutput(t *testing.T) {
 	const status = `{"product":{"product_version":"26.7.4_1","product_series":"26.7"}}`
 
 	cases := []struct {
-		name     string
-		out      string
-		err      error
-		wantRaw  string
-		wantREST bool
+		name        string
+		out         string
+		err         error
+		wantRaw     string
+		wantREST    bool
+		wantProduct string
 	}{
-		{"one line", "26.7.4_1\n", nil, "26.7.4_1", false},
-		{"surrounding whitespace", "  26.1.9  \n", nil, "26.1.9", false},
-		{"only the first line counts", "26.7\nunexpected second line\n", nil, "26.7", false},
-		{"no output", "", nil, "26.7.4_1", true},
-		{"blank output", "\n", nil, "26.7.4_1", true},
-		{"a message instead of a version", "Missing /usr/local/opnsense/version/core\n", nil, "26.7.4_1", true},
-		{"non-zero exit", "", errors.New("exit status 1"), "26.7.4_1", true},
-		{"binary absent", "", errNoVersionCommand, "26.7.4_1", true},
+		{"the package name and the version", "opnsense 26.7.4_1\n", nil, "26.7.4_1", false, "opnsense"},
+		{"Business Edition", "opnsense-business 26.4.1\n", nil, "26.4.1", false, "opnsense-business"},
+		{"more fields than asked for", "opnsense 26.7.4_1 amd64\n", nil, "26.7.4_1", true, ""},
+		{"one line", "26.7.4_1\n", nil, "26.7.4_1", false, ""},
+		{"surrounding whitespace", "  26.1.9  \n", nil, "26.1.9", false, ""},
+		{"only the first line counts", "26.7\nunexpected second line\n", nil, "26.7", false, ""},
+		{"no output", "", nil, "26.7.4_1", true, ""},
+		{"blank output", "\n", nil, "26.7.4_1", true, ""},
+		{"a message instead of a version", "Missing /usr/local/opnsense/version/core\n", nil, "26.7.4_1", true, ""},
+		{"non-zero exit", "", errors.New("exit status 1"), "26.7.4_1", true, ""},
+		{"binary absent", "", errNoVersionCommand, "26.7.4_1", true, ""},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -321,6 +334,9 @@ func TestInstalledRelease_CommandOutput(t *testing.T) {
 			if got.Raw != tc.wantRaw {
 				t.Errorf("Raw = %q, want %q", got.Raw, tc.wantRaw)
 			}
+			if got.Product != tc.wantProduct {
+				t.Errorf("Product = %q, want %q", got.Product, tc.wantProduct)
+			}
 			if asked := len(api.seen()) > 0; asked != tc.wantREST {
 				t.Errorf("API asked = %v, want %v (requests %v)", asked, tc.wantREST, api.seen())
 			}
@@ -330,23 +346,26 @@ func TestInstalledRelease_CommandOutput(t *testing.T) {
 
 func TestInstalledRelease_StatusProductBlock(t *testing.T) {
 	cases := []struct {
-		name    string
-		body    string
-		wantRaw string
+		name        string
+		body        string
+		wantRaw     string
+		wantProduct string
 	}{
-		{"product block", `{"product":{"product_version":"26.7.4_1","product_series":"26.7"}}`, "26.7.4_1"},
-		{"series only", `{"product":{"product_series":"25.7"}}`, "25.7"},
+		{"product block", `{"product":{"product_version":"26.7.4_1","product_series":"26.7"}}`, "26.7.4_1", ""},
+		{"with the package name", `{"product":{"product_version":"26.4.1","product_id":"opnsense-business"}}`, "26.4.1", "opnsense-business"},
+		{"the package name as CORE_NAME only", `{"product":{"product_version":"26.7.4_1","CORE_NAME":"opnsense"}}`, "26.7.4_1", "opnsense"},
+		{"series only", `{"product":{"product_series":"25.7"}}`, "25.7", ""},
 		{
 			// The top-level fields are the cached result of the last firmware
 			// check; the product block is read from the version file per request.
 			"the live block wins over the cached top-level version",
 			`{"product_version":"25.1","product":{"product_version":"26.7.4_1"}}`,
-			"26.7.4_1",
+			"26.7.4_1", "",
 		},
 		{
 			"a nested cached check is not the product version",
 			`{"product":{"product_version":"26.7.4_1","product_check":{"product_version":"25.1"}}}`,
-			"26.7.4_1",
+			"26.7.4_1", "",
 		},
 	}
 	for _, tc := range cases {
@@ -360,6 +379,9 @@ func TestInstalledRelease_StatusProductBlock(t *testing.T) {
 			}
 			if got.Raw != tc.wantRaw {
 				t.Errorf("Raw = %q, want %q", got.Raw, tc.wantRaw)
+			}
+			if got.Product != tc.wantProduct {
+				t.Errorf("Product = %q, want %q", got.Product, tc.wantProduct)
 			}
 			if want := []string{"GET /core/firmware/status"}; strings.Join(api.seen(), ",") != strings.Join(want, ",") {
 				t.Errorf("requests = %v, want %v", api.seen(), want)

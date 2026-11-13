@@ -118,7 +118,7 @@ func handleMajorWithReboot(
 		verb:   "upgrade",
 		marker: upgradeRequestMarker,
 		progress: func(string) string {
-			return fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense will reboot 3 times...",
+			return fmt.Sprintf("Triggering major upgrade from series %s to %s; OPNsense will reboot three times, sometimes four...",
 				offer.series, offer.target)
 		},
 		trigger: func(ctx context.Context) (string, error) {

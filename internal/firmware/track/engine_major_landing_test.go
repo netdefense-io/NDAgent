@@ -163,7 +163,7 @@ func TestLanding_AHopThatKeepsItsABIAndEndedShortIsStillAFailedStage(t *testing.
 	}
 }
 
-// The status the proof's 26.1.11_10 device answered with the 26.7 offer shown, read
+// The status the lab run's 26.1.11_10 device answered with the 26.7 offer shown, read
 // as the engine reads it: a usable check whose offer is the major and its three sets,
 // nothing else pending, and nothing for the minor step to do.
 func TestPlanForMajor_TheMeasuredOffer(t *testing.T) {

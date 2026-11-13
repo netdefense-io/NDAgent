@@ -10,6 +10,8 @@ package track
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -17,11 +19,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/netdefense-io/ndagent/internal/config"
 	"github.com/netdefense-io/ndagent/internal/firmware"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
 	"github.com/netdefense-io/ndagent/internal/util"
@@ -391,6 +395,12 @@ var abiSeriesRE = regexp.MustCompile(`\{?\$\{ABI\}?`)
 // packagesite.pkg must answer under the target ABI. A box with no such file is not
 // nested either.
 func (d *SystemDevice) AgentRepoProbe(ctx context.Context, abi string) (AgentRepo, error) {
+	return ProbeAgentRepo(ctx, abi)
+}
+
+// ProbeAgentRepo is AgentRepoProbe for a caller outside the engine: the manual
+// FIRMWARE_UPGRADE major makes the same check before its request (#170).
+func ProbeAgentRepo(ctx context.Context, abi string) (AgentRepo, error) {
 	raw, err := os.ReadFile(agentRepoConf)
 	if err != nil {
 		return AgentRepo{Why: "the NetDefense repository file cannot be read"}, nil
@@ -525,6 +535,40 @@ func (d *SystemDevice) SnapshotSupported(ctx context.Context) (bool, error) {
 // ErrBootEnvironmentExists says the name is taken.
 func (d *SystemDevice) CreateBootEnvironment(ctx context.Context, name, note string) error {
 	return d.client.CreateBootEnvironment(ctx, name, note)
+}
+
+// BoxState is the digest of what a boot environment preserves beyond the
+// release: config.xml, and the installed packages with their versions.
+type BoxState struct {
+	ConfigSHA256   string `json:"config_sha256"`
+	PackagesSHA256 string `json:"packages_sha256"`
+}
+
+// boxConfigPath is the config.xml BoxState digests.
+var boxConfigPath = "/conf/config.xml"
+
+// BoxState reads config.xml (under its lock, whole) and `pkg query '%n %v'`,
+// sorted, and digests each.
+func (d *SystemDevice) BoxState(ctx context.Context) (BoxState, error) {
+	cfg, err := config.ReadConfigXML(ctx, boxConfigPath)
+	if err != nil {
+		return BoxState{}, fmt.Errorf("read config.xml: %w", err)
+	}
+	out, err := runCommand(ctx, commandTimeout, "/usr/sbin/pkg", "query", "%n %v")
+	if err != nil {
+		return BoxState{}, fmt.Errorf("list the installed packages: %w", err)
+	}
+	return digestBox(cfg, out), nil
+}
+
+// digestBox digests config.xml and the package list `pkg query` printed, in
+// whatever order it printed it.
+func digestBox(configXML []byte, packages string) BoxState {
+	lines := strings.Split(strings.TrimSpace(packages), "\n")
+	sort.Strings(lines)
+	configSum := sha256.Sum256(configXML)
+	packagesSum := sha256.Sum256([]byte(strings.Join(lines, "\n")))
+	return BoxState{ConfigSHA256: hex.EncodeToString(configSum[:]), PackagesSHA256: hex.EncodeToString(packagesSum[:])}
 }
 
 // FindBootEnvironment finds an environment by name in the API's listing. The

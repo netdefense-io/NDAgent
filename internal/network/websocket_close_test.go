@@ -126,10 +126,29 @@ func TestShutdownIsNotHeldByAWriteStuckOnAPeerThatStoppedReading(t *testing.T) {
 	go func() {
 		stuck <- w.SendJSON(map[string]string{"type": "task_response", "pad": strings.Repeat("x", 32<<20)})
 	}()
-	select {
-	case err := <-stuck:
-		t.Fatalf("the write did not block (%v), so the test shows nothing", err)
-	case <-time.After(300 * time.Millisecond):
+	// SendJSON marshals the payload before it takes w.mu, which under -race on a
+	// loaded runner takes longer than any fixed wait (#229). The write is stuck
+	// once w.mu has been held for a while without a break: a heartbeat holds it
+	// only for a moment.
+	held := time.Time{}
+	for deadline := time.Now().Add(20 * time.Second); ; {
+		select {
+		case err := <-stuck:
+			t.Fatalf("the write did not block (%v), so the test shows nothing", err)
+		default:
+		}
+		if w.mu.TryLock() {
+			w.mu.Unlock()
+			held = time.Time{}
+		} else if held.IsZero() {
+			held = time.Now()
+		} else if time.Since(held) > 300*time.Millisecond {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the write never took the connection's lock")
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	start := time.Now()
@@ -152,7 +171,7 @@ func TestShutdownIsNotHeldByAWriteStuckOnAPeerThatStoppedReading(t *testing.T) {
 		if err == nil {
 			t.Error("the stuck write reported success")
 		}
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("the stuck write never ended")
 	}
 }

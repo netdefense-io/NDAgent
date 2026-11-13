@@ -703,6 +703,7 @@ func TestExecuteSyncUsersGroups_DefersNewGroupMemberWhenStale(t *testing.T) {
 			Rows: []map[string]interface{}{
 				{"uuid": "u1", "name": "existing-user", "uid": "1000"},
 				{"uuid": "u2", "name": "new-safe-user", "uid": "1002"},
+				{"uuid": "u3", "name": "new-stale-user", "uid": "1003"},
 			},
 		})
 	})
@@ -1051,5 +1052,72 @@ func TestDangerousSnippetOptOut_NamesThePluginSetting(t *testing.T) {
 		if strings.Contains(msg, wrong) {
 			t.Errorf("the message points at %q: %q", wrong, msg)
 		}
+	}
+}
+
+// The operator's rule (2026-11-12): a field a snippet leaves out takes
+// OPNsense's default, which for `disabled` is 0, so a USER snippet without it
+// is an account that is not disabled. It fails if disabled becomes optional or
+// takes the device's value.
+func TestUserSnippet_ALeftOutDisabledIsNotDisabled(t *testing.T) {
+	user, err := parseUserContent(`{"name":"svc-ops","password":"x"}`, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(opnapi.ConvertAPIToUser(user, nil, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(wire), `"disabled":"0"`) {
+		t.Errorf("disabled left out of the snippet must be sent as \"0\": %s", wire)
+	}
+}
+
+// An external group whose row already holds what its update would send is not
+// written again (#195), but a stored member list with an artifact is repaired
+// even then: the compare leaves the member list out, since an external group
+// never sends one.
+func TestExecuteSyncUsersGroups_ExternalGroupUnchangedUnlessItNeedsTheRepair(t *testing.T) {
+	for _, tc := range []struct {
+		member    string
+		wantSets  int
+		wantState string
+	}{
+		{"2004", 0, "unchanged"},
+		{",2004", 1, "updated"},
+	} {
+		t.Run(tc.member, func(t *testing.T) {
+			var setBodies []map[string]interface{}
+			mux := http.NewServeMux()
+			mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{{"uuid": "u1", "name": "e2e-tests", "uid": "2004"}}})
+			})
+			mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
+				_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{{
+					"uuid": "g1", "name": "eng-external", "description": opnapi.AddTemplateTag("", "base"), "gid": "2000",
+					"priv": "page-status-interfaces", "source_networks": "", "member": tc.member,
+				}}})
+			})
+			mux.HandleFunc("/auth/group/set/", func(w http.ResponseWriter, r *http.Request) {
+				var raw map[string]interface{}
+				_ = json.NewDecoder(r.Body).Decode(&raw)
+				setBodies = append(setBodies, raw)
+				_ = json.NewEncoder(w).Encode(opnapi.SetGroupResponse{Result: "saved"})
+			})
+			server := httptest.NewServer(mux)
+			defer server.Close()
+			client := opnapi.NewClient(server.URL, "key", "secret", true)
+
+			group := opnapi.APIGroupPayload{Name: "eng-external", ExternalMembers: true, Priv: []string{"page-status-interfaces"}, Templates: []string{"base"}}
+			result := executeSyncUsersGroups(context.Background(), client, nil, []opnapi.APIGroupPayload{group}, false, authDeferralInfo{})
+			if !result.Success || len(setBodies) != tc.wantSets {
+				t.Fatalf("success %v, %d writes %v, want %d: %v", result.Success, len(setBodies), setBodies, tc.wantSets, result.Errors)
+			}
+			for _, item := range result.Results {
+				if item.Type == "group" && item.Name == "eng-external" && (item.Action != tc.wantState || item.Status != "success") {
+					t.Errorf("item %+v, want %s", item, tc.wantState)
+				}
+			}
+		})
 	}
 }

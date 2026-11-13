@@ -51,8 +51,10 @@ const defaultReplyLinger = 5 * time.Second
 // transportBody is the body of a forwarded request as the transport gets it.
 // The transport may go on reading it, from the stream's reader, after it has
 // returned the response (an upstream can answer before it reads the body), and
-// closes it once it is done with it, after reading the rest; released is
-// closed then.
+// closes it once it is done with it. Close reads the rest first, so the
+// stream's reader stops where the next request starts: net/http's own Close
+// leaves a Content-Length body of a request that says Connection: close (or is
+// HTTP/1.0) unread. released is closed then.
 type transportBody struct {
 	io.ReadCloser
 	once     sync.Once
@@ -64,6 +66,7 @@ func newTransportBody(body io.ReadCloser) *transportBody {
 }
 
 func (b *transportBody) Close() error {
+	_, _ = io.Copy(io.Discard, b.ReadCloser)
 	err := b.ReadCloser.Close()
 	b.once.Do(func() { close(b.released) })
 	return err
@@ -191,10 +194,20 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 		"session_id", session.ID,
 	)
 
-	// Process HTTP requests from the stream until it closes
+	// Process HTTP requests from the stream until it closes. Until the
+	// transport closes a forwarded request's body it may still read it from
+	// reader, so nothing else reads the stream before then: not the next
+	// request, and not the caller once this returns.
 	reader := bufio.NewReader(stream)
+	held := nothingHeld
+	defer func() { p.awaitRelease(stream, held, false) }()
 
 	for {
+		if !p.awaitRelease(stream, held, true) {
+			break
+		}
+		held = nothingHeld
+
 		// Check if stream is closed
 		if stream.IsClosed() {
 			p.log.Debugw("Stream closed, ending HTTP proxy stream", "stream_id", stream.ID())
@@ -255,15 +268,16 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			}
 		}
 
-		// An answer that is withheld can come before the transport has read the
-		// request body; until the transport closes the body, it is the only
-		// reader of the stream.
+		// An answer can come before the transport has read the request body;
+		// until the transport closes the body, it is the only reader of the
+		// stream.
 		bodyReleased := nothingHeld
-		if scrub != nil && req.Body != nil && req.Body != http.NoBody {
+		if req.Body != nil && req.Body != http.NoBody {
 			body := newTransportBody(req.Body)
 			req.Body = body
 			bodyReleased = body.released
 		}
+		held = bodyReleased
 
 		// Forward request to local OPNsense
 		resp, err := p.forwardRequest(ctx, req, session)
@@ -332,6 +346,38 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 	return nil
 }
 
+// awaitRelease waits until the transport has let go of a forwarded request
+// body, so that the stream has one reader. Before the next request (next is
+// true) it gives up when the stream closes, or after replyLinger, and then
+// closes the stream: a transport still reading it leaves no boundary to read
+// the next request from. When the stream is done it waits up to replyLinger
+// whether or not the stream is closed, since the caller may read the stream
+// once this returns, and a closed stream ends the transport's reads soon. It
+// reports whether the body was let go of.
+func (p *HTTPProxy) awaitRelease(stream *Stream, released <-chan struct{}, next bool) bool {
+	select {
+	case <-released:
+		return true
+	default:
+	}
+	limit := time.NewTimer(p.replyLinger)
+	defer limit.Stop()
+	closed := stream.CloseChan()
+	if !next {
+		closed = nil
+	}
+	select {
+	case <-released:
+		return true
+	case <-closed:
+		return false
+	case <-limit.C:
+		p.log.Warnw("The transport still holds a request body; closing the stream", "stream_id", stream.ID())
+		stream.Close()
+		return false
+	}
+}
+
 // endAfterReply ends a stream after a response that said Connection: close.
 // Nothing more is read as a request: whatever the client still sends, the body
 // of a refused request included, is discarded, but only once released is
@@ -397,6 +443,8 @@ func (p *HTTPProxy) forwardRequest(ctx context.Context, req *http.Request, sessi
 	// Create new request with context (can't reuse the original request directly)
 	proxyReq, err := http.NewRequestWithContext(ctx, req.Method, target.String(), req.Body)
 	if err != nil {
+		// No transport got the body, so nothing else lets go of it.
+		req.Body.Close()
 		return nil, fmt.Errorf("failed to create proxy request: %w", err)
 	}
 

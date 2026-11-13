@@ -166,7 +166,8 @@ func (c *Client) Ping(ctx context.Context) error {
 	return nil
 }
 
-// SetHTTPTimeout replaces the per-request timeout (30 s by default).
-func (c *Client) SetHTTPTimeout(d time.Duration) {
-	c.httpClient.Timeout = d
+// SetTransport replaces the HTTP transport, for tests that decide what a
+// request answers.
+func (c *Client) SetTransport(rt http.RoundTripper) {
+	c.httpClient.Transport = rt
 }

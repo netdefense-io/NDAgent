@@ -760,10 +760,38 @@ func (c *Client) GetFirmwareRunning(ctx context.Context) (*FirmwareRunning, erro
 // equal to this floor). Below it such a privilege can lead to administrator
 // rights, so the agent's checks count it as administrator-equivalent there. See
 // ElevateFloorDependentPrivsBelowFloor.
+//
+// That floor is the community edition's. ProductRelease.MeetsSupportedFloor
+// applies the floor of the release's edition.
 const (
 	MinSupportedOPNsenseMajor = 26
 	MinSupportedOPNsenseMinor = 1
 	MinSupportedOPNsensePatch = 11
+)
+
+// MinSupportedBusinessMajor / MinSupportedBusinessMinor / MinSupportedBusinessPatch
+// are the same floor for Business Edition: 26.4.2. Business numbers its
+// releases YY.4 and YY.10 and builds each on an older community release, so its
+// numbers say nothing about the community floor: 26.4 is built on 26.1.6, 26.4.1
+// on 26.1.9 and 26.4.2 on 26.1.11 (OPNsense's changelog, business/26.4). The
+// series part needs nothing of its own: a Business release below 26.1 by number
+// (25.10 and older) is built on a community release below it too.
+const (
+	MinSupportedBusinessMajor = 26
+	MinSupportedBusinessMinor = 4
+	MinSupportedBusinessPatch = 2
+)
+
+// Edition is the OPNsense edition a release belongs to.
+type Edition int
+
+const (
+	// EditionUnknown is a release whose core package was not read, or is not
+	// one this agent knows. It is held to the Business floor, the higher of
+	// the two, so it must meet both.
+	EditionUnknown Edition = iota
+	EditionCommunity
+	EditionBusiness
 )
 
 // ProductRelease is the installed OPNsense release.
@@ -771,12 +799,65 @@ const (
 // Raw is the version string exactly as OPNsense reported it, for logs; Major,
 // Minor and Patch are the parsed release used for comparison. A FreeBSD-style
 // suffix ("26.1.9_1") is ignored, and a release with no patch component is the
-// first of its series: "26.1" is 26.1.0.
+// first of its series: "26.1" is 26.1.0. Product is the core package's name
+// (`product_id`), "" when the source did not give it.
 type ProductRelease struct {
-	Raw   string
-	Major int
-	Minor int
-	Patch int
+	Raw     string
+	Major   int
+	Minor   int
+	Patch   int
+	Product string
+}
+
+// Edition tells the edition from the core package's name.
+func (r ProductRelease) Edition() Edition {
+	switch strings.TrimSpace(r.Product) {
+	case "opnsense", "opnsense-devel":
+		return EditionCommunity
+	case "opnsense-business":
+		return EditionBusiness
+	}
+	return EditionUnknown
+}
+
+// SupportedFloor is the supported floor for the release's edition: the
+// community floor for a community release, the Business floor otherwise.
+func (r ProductRelease) SupportedFloor() (major, minor, patch int) {
+	if r.Edition() == EditionCommunity {
+		return MinSupportedOPNsenseMajor, MinSupportedOPNsenseMinor, MinSupportedOPNsensePatch
+	}
+	return MinSupportedBusinessMajor, MinSupportedBusinessMinor, MinSupportedBusinessPatch
+}
+
+// MeetsSupportedFloor reports whether the release is at or above the supported
+// floor of its edition.
+func (r ProductRelease) MeetsSupportedFloor() bool {
+	return r.AtLeast(r.SupportedFloor())
+}
+
+// SupportedFloorName names the floor that applies to the release, for messages:
+// both for a release whose edition is unknown, which must meet both.
+func (r ProductRelease) SupportedFloorName() string {
+	community := fmt.Sprintf("%d.%d.%d", MinSupportedOPNsenseMajor, MinSupportedOPNsenseMinor, MinSupportedOPNsensePatch)
+	business := fmt.Sprintf("Business Edition %d.%d.%d", MinSupportedBusinessMajor, MinSupportedBusinessMinor, MinSupportedBusinessPatch)
+	switch r.Edition() {
+	case EditionCommunity:
+		return community
+	case EditionBusiness:
+		return business
+	}
+	return community + " and " + business
+}
+
+// Label names the release and its edition, for messages.
+func (r ProductRelease) Label() string {
+	switch r.Edition() {
+	case EditionBusiness:
+		return "Business Edition " + r.String()
+	case EditionUnknown:
+		return r.String() + " (edition unknown)"
+	}
+	return r.String()
 }
 
 // AtLeast reports whether the release is at or above major.minor.patch.

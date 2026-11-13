@@ -1,9 +1,14 @@
 package opnapi
 
 import (
+	"bytes"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -147,7 +152,7 @@ func TestConvertZabbixUserParameterRoundTrip(t *testing.T) {
 		"acceptParams": "0",
 	}
 	api := ConvertZabbixUserParameterToAPI(raw)
-	if !api.Enabled || api.Key != "nd-cpu" || api.Command != "sysctl -n hw.ncpu" || api.AcceptParams {
+	if api.Enabled == nil || !*api.Enabled || api.Key != "nd-cpu" || api.Command != "sysctl -n hw.ncpu" || api.AcceptParams {
 		t.Fatalf("roundtrip API mismatch: %+v", api)
 	}
 	wire := ConvertToOPNZabbixUserParameter(api)
@@ -165,7 +170,7 @@ func TestConvertZabbixAliasRoundTrip(t *testing.T) {
 		"acceptParams": "0",
 	}
 	api := ConvertZabbixAliasToAPI(raw)
-	if !api.Enabled || api.Key != "nd-uname" || api.SourceKey != "system.uname" {
+	if api.Enabled == nil || !*api.Enabled || api.Key != "nd-uname" || api.SourceKey != "system.uname" {
 		t.Fatalf("roundtrip API mismatch: %+v", api)
 	}
 	wire := ConvertToOPNZabbixAlias(api)
@@ -174,117 +179,202 @@ func TestConvertZabbixAliasRoundTrip(t *testing.T) {
 	}
 }
 
-// MergeZabbixSettings overlays a (possibly sparse) snippet payload onto the
-// device's current settings. Snippet fields that are non-empty win; empty
-// fields keep the device's current value.
-//
-// This is the regression guard for the "A value is required" 422 we saw
-// against clarence during the first DEV smoke test: OPNsense marks several
-// main/tuning fields Required="Y" and rejects empty strings, so a sparse
-// snippet (admin only specified e.g. enabled + hostname + server_list)
-// would fail without this overlay.
-func TestMergeZabbixSettings_OverlaysOntoCurrent(t *testing.T) {
-	// Shape mirrors the GET /api/zabbixagent/settings/get response.
-	currentRaw := map[string]interface{}{
-		"zabbixagent": map[string]interface{}{
-			"local": map[string]interface{}{"hostname": "preexisting"},
-			"settings": map[string]interface{}{
-				"main": map[string]interface{}{
-					"enabled":       "1",
-					"serverList":    map[string]interface{}{"old.example.com": map[string]interface{}{"value": "old.example.com", "selected": float64(1)}},
-					"listenPort":    "10050",
-					"listenIP":      map[string]interface{}{"0.0.0.0": map[string]interface{}{"value": "0.0.0.0", "selected": float64(1)}},
-					"sourceIP":      "",
-					"listenBacklog": "",
-					"syslogEnable":  "0",
-					"logFileSize":   "100",
-					"debugLevel":    map[string]interface{}{"val_3": map[string]interface{}{"value": "warnings", "selected": float64(1)}},
-					"sudoRoot":      "1",
-				},
-				"tuning": map[string]interface{}{
-					"startAgents": "0", "bufferSend": "5", "bufferSize": "100",
-					"maxLinesPerSecond": "100", "timeout": "30",
-				},
-				"features": map[string]interface{}{
-					"enableActiveChecks":   "1",
-					"activeCheckServers":   map[string]interface{}{"old.example.com:10051": map[string]interface{}{"value": "old.example.com:10051", "selected": float64(1)}},
-					"refreshActiveChecks":  "120",
-					"enableRemoteCommands": "0",
-					"logRemoteCommands":    "0",
-					"encryption":           "0",
-					"encryptionidentity":   "",
-					"encryptionpsk":        "",
-				},
-			},
-		},
-	}
-	// Sparse snippet: admin only wants to flip a few fields, leaves the
-	// rest empty on the wire. Before the overlay, this 422'd against
-	// OPNsense because main.logFileSize / tuning.* came in as empty.
-	snippet := APIZabbixSettingsPayload{
+// A sparse snippet: the fields it gives win, every field it leaves out takes
+// the value a fresh install of the plugin has (the operator's rule,
+// 2026-11-12), and no Required field goes out empty.
+func TestBuildZabbixSettings_LeftOutFieldsTakeThePluginDefaults(t *testing.T) {
+	body := BuildZabbixSettings(APIZabbixSettingsPayload{
 		Hostname:           "clarence",
 		Enabled:            true,
 		ServerList:         []string{"zbx.new.example.com"},
+		Timeout:            "30",
 		Encryption:         "1",
 		EncryptionIdentity: "PSK_IDENTITY",
 		EncryptionPSK:      "deadbeef",
-		// Everything else (tuning, logFileSize, debug_level, listen_port,
-		// listen_ip, active_check_servers) intentionally omitted.
+	})
+	m, tu, f := body.Settings.Main, body.Settings.Tuning, body.Settings.Features
+	for name, got := range map[string][2]string{
+		"hostname":   {body.Local.Hostname, "clarence"},
+		"enabled":    {m.Enabled, "1"},
+		"serverList": {m.ServerList, "zbx.new.example.com"},
+		"timeout":    {tu.Timeout, "30"},
+		"encryption": {f.Encryption, "1"},
+		"psk":        {f.EncryptionPSK, "deadbeef"},
+		// left out: the model's defaults
+		"listenPort":          {m.ListenPort, "10050"},
+		"listenIP":            {m.ListenIP, "0.0.0.0"},
+		"logFileSize":         {m.LogFileSize, "100"},
+		"debugLevel":          {m.DebugLevel, "val_3"},
+		"startAgents":         {tu.StartAgents, "3"},
+		"bufferSend":          {tu.BufferSend, "5"},
+		"bufferSize":          {tu.BufferSize, "100"},
+		"maxLinesPerSecond":   {tu.MaxLinesPerSecond, "100"},
+		"refreshActiveChecks": {f.RefreshActiveChecks, "120"},
+		"sourceIP":            {m.SourceIP, ""},
+		"activeCheckServers":  {f.ActiveCheckServers, ""},
+		"enableActiveChecks":  {f.EnableActiveChecks, "1"},
+		"syslogEnable":        {m.SyslogEnable, "0"},
+		"sudoRoot":            {m.SudoRoot, "0"},
+		"remoteCommands":      {f.EnableRemoteCommands, "0"},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s = %q, want %q", name, got[0], got[1])
+		}
 	}
-	body := MergeZabbixSettings(snippet, currentRaw)
 
-	// Snippet fields win
-	if body.Local.Hostname != "clarence" {
-		t.Errorf("hostname: want clarence, got %q", body.Local.Hostname)
+	if got := BuildZabbixSettings(APIZabbixSettingsPayload{}).Local.Hostname; got != "Zabbix agent" {
+		t.Errorf("a snippet without a hostname gets the model's default, got %q", got)
 	}
-	if body.Settings.Main.ServerList != "zbx.new.example.com" {
-		t.Errorf("serverList: want override, got %q", body.Settings.Main.ServerList)
-	}
-	if body.Settings.Features.EncryptionPSK != "deadbeef" {
-		t.Errorf("encryptionpsk: want deadbeef, got %q", body.Settings.Features.EncryptionPSK)
-	}
-
-	// Current-device fallbacks fill the Required gaps
-	if body.Settings.Main.LogFileSize != "100" {
-		t.Errorf("logFileSize fallback: want 100, got %q", body.Settings.Main.LogFileSize)
-	}
-	if body.Settings.Tuning.StartAgents != "0" || body.Settings.Tuning.BufferSend != "5" ||
-		body.Settings.Tuning.BufferSize != "100" || body.Settings.Tuning.MaxLinesPerSecond != "100" ||
-		body.Settings.Tuning.Timeout != "30" {
-		t.Errorf("tuning fallbacks not applied: %+v", body.Settings.Tuning)
-	}
-	if body.Settings.Main.ListenPort != "10050" {
-		t.Errorf("listenPort fallback: want 10050, got %q", body.Settings.Main.ListenPort)
-	}
-	if body.Settings.Features.ActiveCheckServers != "old.example.com:10051" {
-		t.Errorf("activeCheckServers fallback: want old.example.com:10051, got %q", body.Settings.Features.ActiveCheckServers)
-	}
-
-	// debugLevel from GET is "3" (bare digit); snippet didn't specify;
-	// result must be val_3 (the option-key form OPNsense expects on POST).
-	if body.Settings.Main.DebugLevel != "val_3" {
-		t.Errorf("debugLevel: want val_3, got %q", body.Settings.Main.DebugLevel)
+	if got := BuildZabbixSettings(APIZabbixSettingsPayload{EnableActiveChecks: new(false)}).Settings.Features.EnableActiveChecks; got != "0" {
+		t.Errorf("enable_active_checks written false: got %q, want \"0\"", got)
 	}
 }
 
-func TestMergeZabbixSettings_SnippetDebugLevelWins(t *testing.T) {
-	currentRaw := map[string]interface{}{
-		"zabbixagent": map[string]interface{}{
-			"local": map[string]interface{}{"hostname": "h"},
-			"settings": map[string]interface{}{
-				"main": map[string]interface{}{
-					"logFileSize": "100",
-					"debugLevel":  map[string]interface{}{"val_5": map[string]interface{}{"selected": float64(1)}},
-				},
-				"tuning":   map[string]interface{}{"startAgents": "0", "bufferSend": "5", "bufferSize": "100", "maxLinesPerSecond": "100", "timeout": "30"},
-				"features": map[string]interface{}{},
-			},
-		},
+func TestBuildZabbixSettings_SnippetDebugLevelWins(t *testing.T) {
+	if got := BuildZabbixSettings(APIZabbixSettingsPayload{DebugLevel: "1"}).Settings.Main.DebugLevel; got != "val_1" {
+		t.Errorf("snippet debug_level=1: got %q, want val_1", got)
 	}
-	snippet := APIZabbixSettingsPayload{DebugLevel: "1"}
-	body := MergeZabbixSettings(snippet, currentRaw)
-	if body.Settings.Main.DebugLevel != "val_1" {
-		t.Errorf("snippet debug_level=1 should win over current val_5, got %q", body.Settings.Main.DebugLevel)
+}
+
+// zabbixDefaultsByModelPath maps every field of the plugin's model to the body
+// field zabbixSettingsDefaults fills, so a field the plugin adds fails here.
+func zabbixDefaultsByModelPath(d ZabbixSettingsBody) map[string]string {
+	m, tu, f := d.Settings.Main, d.Settings.Tuning, d.Settings.Features
+	return map[string]string{
+		"local.hostname":                         d.Local.Hostname,
+		"settings.main.enabled":                  m.Enabled,
+		"settings.main.serverList":               m.ServerList,
+		"settings.main.listenPort":               m.ListenPort,
+		"settings.main.listenIP":                 m.ListenIP,
+		"settings.main.sourceIP":                 m.SourceIP,
+		"settings.main.listenBacklog":            m.ListenBacklog,
+		"settings.main.syslogEnable":             m.SyslogEnable,
+		"settings.main.logFileSize":              m.LogFileSize,
+		"settings.main.debugLevel":               ZabbixDebugLevelToWire(m.DebugLevel),
+		"settings.main.sudoRoot":                 m.SudoRoot,
+		"settings.tuning.startAgents":            tu.StartAgents,
+		"settings.tuning.bufferSend":             tu.BufferSend,
+		"settings.tuning.bufferSize":             tu.BufferSize,
+		"settings.tuning.maxLinesPerSecond":      tu.MaxLinesPerSecond,
+		"settings.tuning.timeout":                tu.Timeout,
+		"settings.features.enableActiveChecks":   f.EnableActiveChecks,
+		"settings.features.activeCheckServers":   f.ActiveCheckServers,
+		"settings.features.refreshActiveChecks":  f.RefreshActiveChecks,
+		"settings.features.enableRemoteCommands": f.EnableRemoteCommands,
+		"settings.features.logRemoteCommands":    f.LogRemoteCommands,
+		"settings.features.encryption":           f.Encryption,
+		"settings.features.encryptionidentity":   f.EncryptionIdentity,
+		"settings.features.encryptionpsk":        f.EncryptionPSK,
+	}
+}
+
+// zabbixModelField is one field of the plugin's model: its path below <items>,
+// its type and its <Default>.
+type zabbixModelField struct {
+	path, typ, def string
+}
+
+// zabbixModelFields reads the fields of the vendored copy of the plugin's model.
+func zabbixModelFields(t *testing.T) []zabbixModelField {
+	t.Helper()
+	data, err := os.ReadFile("testdata/zabbix/ZabbixAgent.xml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields []zabbixModelField
+	dec := xml.NewDecoder(bytes.NewReader(data))
+	var stack []string
+	var cur *zabbixModelField
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		switch e := tok.(type) {
+		case xml.StartElement:
+			stack = append(stack, e.Name.Local)
+			for _, a := range e.Attr {
+				if a.Name.Local == "type" && len(stack) > 2 && stack[1] == "items" {
+					fields = append(fields, zabbixModelField{path: strings.Join(stack[2:], "."), typ: a.Value})
+					cur = &fields[len(fields)-1]
+				}
+			}
+		case xml.CharData:
+			if cur != nil && len(stack) > 0 && stack[len(stack)-1] == "Default" {
+				cur.def = strings.TrimSpace(string(e))
+			}
+		case xml.EndElement:
+			if cur != nil && strings.Join(stack[2:], ".") == cur.path {
+				cur = nil
+			}
+			stack = stack[:len(stack)-1]
+		}
+	}
+	return fields
+}
+
+// What a snippet that gives nothing posts is the model's: every field holds the
+// model's <Default>, a boolean without one being off and any other field
+// without one empty. It reads the body BuildZabbixSettings sends, not the
+// table, because a boolean the snippet leaves out is written by the conversion.
+func TestZabbixSettingsDefaultsAreTheModels(t *testing.T) {
+	fields := zabbixModelFields(t)
+	ours := zabbixDefaultsByModelPath(BuildZabbixSettings(APIZabbixSettingsPayload{}))
+	seen := 0
+	for _, f := range fields {
+		if !strings.HasPrefix(f.path, "local.") && !strings.HasPrefix(f.path, "settings.") {
+			continue // the userparameter and alias lists, which other snippets own
+		}
+		seen++
+		got, ok := ours[f.path]
+		if !ok {
+			t.Errorf("model field %s (%s) has no place in the defaults table", f.path, f.typ)
+			continue
+		}
+		want := f.def
+		if f.typ == "BooleanField" && want == "" {
+			want = "0"
+		}
+		if got != want {
+			t.Errorf("%s: default %q, want %q", f.path, got, want)
+		}
+	}
+	if seen != len(ours) {
+		t.Errorf("the model has %d settings fields, the table %d", seen, len(ours))
+	}
+}
+
+// A field a userparameter or alias snippet leaves out is sent with the model's
+// <Default>, and every boolean of the two entries is covered.
+func TestZabbixEntryDefaultsAreTheModels(t *testing.T) {
+	up := ConvertToOPNZabbixUserParameter(APIZabbixUserParameterPayload{Key: "nd-x", Command: "true"})
+	al := ConvertToOPNZabbixAlias(APIZabbixAliasPayload{Key: "nd-x", SourceKey: "agent.ping"})
+	sent := map[string]string{
+		"userparameters.userparameter.enabled":      up.Enabled,
+		"userparameters.userparameter.acceptParams": up.AcceptParams,
+		"aliases.alias.enabled":                     al.Enabled,
+		"aliases.alias.acceptParams":                al.AcceptParams,
+	}
+	seen := 0
+	for _, f := range zabbixModelFields(t) {
+		if f.typ != "BooleanField" || !(strings.HasPrefix(f.path, "userparameters.") || strings.HasPrefix(f.path, "aliases.")) {
+			continue
+		}
+		seen++
+		got, ok := sent[f.path]
+		if !ok {
+			t.Errorf("model field %s has no default in the conversion", f.path)
+			continue
+		}
+		if got != f.def {
+			t.Errorf("%s left out: sent %q, the model's default is %q", f.path, got, f.def)
+		}
+	}
+	if seen != len(sent) {
+		t.Errorf("the model has %d entry booleans, the test %d", seen, len(sent))
 	}
 }
 
@@ -359,4 +449,90 @@ func indexOf(haystack, needle string) int {
 		}
 	}
 	return -1
+}
+
+// The operator's rule (2026-11-12), at the snippet's JSON: a boolean the
+// ZABBIX_SETTINGS snippet leaves out takes the plugin's fresh-install value,
+// which is off for five of them, enabled included, and on for active checks.
+func TestBuildZabbixSettings_ALeftOutBooleanTakesThePluginDefault(t *testing.T) {
+	var p APIZabbixSettingsPayload
+	if err := json.Unmarshal([]byte(`{"server_list":["zbx.example.com"]}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	body := BuildZabbixSettings(p)
+	m, f := body.Settings.Main, body.Settings.Features
+	for name, got := range map[string][2]string{
+		"enabled":              {m.Enabled, "0"},
+		"syslogEnable":         {m.SyslogEnable, "0"},
+		"sudoRoot":             {m.SudoRoot, "0"},
+		"enableActiveChecks":   {f.EnableActiveChecks, "1"},
+		"enableRemoteCommands": {f.EnableRemoteCommands, "0"},
+		"logRemoteCommands":    {f.LogRemoteCommands, "0"},
+	} {
+		if got[0] != got[1] {
+			t.Errorf("%s left out of the snippet: got %q, want %q", name, got[0], got[1])
+		}
+	}
+}
+
+// The operator's rule (2026-11-12) for the userparameter and alias entries: a
+// field the snippet leaves out takes the model's default, which is what adding
+// the entry in the GUI gives it. enabled is on and acceptParams off; a value the
+// snippet gives is sent as given.
+func TestConvertZabbixEntries_ALeftOutFieldTakesTheModelDefault(t *testing.T) {
+	for _, tt := range []struct {
+		content           string
+		enabled, accepted string
+	}{
+		{`{"key":"nd-x","command":"true","source_key":"agent.ping"}`, "1", "0"},
+		{`{"key":"nd-x","command":"true","source_key":"agent.ping","enabled":false}`, "0", "0"},
+		{`{"key":"nd-x","command":"true","source_key":"agent.ping","enabled":true,"accept_params":true}`, "1", "1"},
+	} {
+		var up APIZabbixUserParameterPayload
+		var al APIZabbixAliasPayload
+		if err := json.Unmarshal([]byte(tt.content), &up); err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal([]byte(tt.content), &al); err != nil {
+			t.Fatal(err)
+		}
+		u, a := ConvertToOPNZabbixUserParameter(up), ConvertToOPNZabbixAlias(al)
+		if u.Enabled != tt.enabled || u.AcceptParams != tt.accepted || a.Enabled != tt.enabled || a.AcceptParams != tt.accepted {
+			t.Errorf("%s: userparameter %+v, alias %+v; want enabled %q, acceptParams %q", tt.content, u, a, tt.enabled, tt.accepted)
+		}
+	}
+}
+
+// A disabled entry the device holds is pulled as disabled, and synced back so.
+func TestConvertZabbixEntries_ADisabledEntryRoundTrips(t *testing.T) {
+	raw := map[string]interface{}{"enabled": "0", "key": "nd-x", "command": "true", "sourceKey": "agent.ping", "acceptParams": "0"}
+	up, al := ConvertZabbixUserParameterToAPI(raw), ConvertZabbixAliasToAPI(raw)
+	for name, b := range map[string][]byte{"userparameter": mustJSON(t, up), "alias": mustJSON(t, al)} {
+		if !strings.Contains(string(b), `"enabled":false`) {
+			t.Errorf("the pulled %s does not say it is disabled: %s", name, b)
+		}
+	}
+	if u, a := ConvertToOPNZabbixUserParameter(up), ConvertToOPNZabbixAlias(al); u.Enabled != "0" || a.Enabled != "0" {
+		t.Errorf("a disabled entry is synced back as userparameter %+v, alias %+v", u, a)
+	}
+}
+
+func mustJSON(t *testing.T, v interface{}) []byte {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+// A JSON null is a field left out: enable_active_checks null is on.
+func TestBuildZabbixSettings_ANullIsLeftOut(t *testing.T) {
+	var p APIZabbixSettingsPayload
+	if err := json.Unmarshal([]byte(`{"enable_active_checks":null,"server_list":["zbx.example.com"]}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if got := BuildZabbixSettings(p).Settings.Features.EnableActiveChecks; got != "1" {
+		t.Errorf("enableActiveChecks = %q, want the default \"1\"", got)
+	}
 }

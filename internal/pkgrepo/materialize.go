@@ -57,16 +57,28 @@ func AnyChanged(written map[string]bool) bool {
 	return false
 }
 
-// checkPermitted enforces the agent-side half of the trust model.
+// checkPermitted enforces the agent-side half of the trust model. A signature
+// type other than the three pkg.conf(5) values written here is refused whatever
+// the opt-in: pkg reads an unknown or empty one as no verification at all, and
+// "NONE" is none.
 func checkPermitted(r Repository, allowUnverified bool) error {
+	switch r.Signature.Type {
+	case SignatureFingerprints, SignaturePubkey:
+	case SignatureNone:
+		if !allowUnverified {
+			return fmt.Errorf(
+				"repository %q declares signature type none, which this device's organization does not permit",
+				r.Name,
+			)
+		}
+	default:
+		return fmt.Errorf(
+			"repository %q declares signature type %q, which is not fingerprints, pubkey or none",
+			r.Name, string(r.Signature.Type),
+		)
+	}
 	if allowUnverified {
 		return nil
-	}
-	if r.Signature.Type == SignatureNone {
-		return fmt.Errorf(
-			"repository %q declares signature type none, which this device's organization does not permit",
-			r.Name,
-		)
 	}
 	parsed, err := url.Parse(r.URL)
 	if err != nil {

@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -18,11 +19,12 @@ import (
 // see them. Every mutating call is recorded, in order, as "<verb> <kind> <name>".
 //
 // It reconciles the groups' member lists on a user add and set the way
-// UserController::setBaseHook does, one occurrence of the uid at a time. It does
-// not derive a user row's group_memberships from the member lists the way
-// GroupMembershipField does: a row keeps what the test set, which is what lets a
-// test give the two views of one membership different values. What OPNsense
-// itself does with them is checked only on a device.
+// UserController::setBaseHook does, one occurrence of the uid at a time. Unless
+// deriveMemberships is set, it does not derive a user row's group_memberships
+// from the member lists the way GroupMembershipField does: a row keeps what the
+// test set, which is what lets a test give the two views of one membership
+// different values. What OPNsense itself does with them is checked only on a
+// device.
 type fakeAccounts struct {
 	t      *testing.T
 	mu     sync.Mutex
@@ -34,11 +36,16 @@ type fakeAccounts struct {
 	// onGroupSearch, when set, is asked before each group listing whether to
 	// answer it with a 500.
 	onGroupSearch func() bool
+	// onUserSearch is the same for the user listing.
+	onUserSearch func() bool
 	// keepMemberLists makes a user set answer "saved" without touching the groups'
 	// member lists, for a prune that reports success and changes nothing.
 	keepMemberLists bool
-	nextID          int
-	client          *opnapi.Client
+	// deriveMemberships makes the user listing build each row's
+	// group_memberships from the groups' member lists, as OPNsense does.
+	deriveMemberships bool
+	nextID            int
+	client            *opnapi.Client
 	// privs, when set, is what /auth/priv/search lists: the privilege IDs the
 	// device defines. Left nil the route answers 404, so the catalog is
 	// unreadable and every verdict falls back to fail-closed.
@@ -60,7 +67,13 @@ func newFakeAccounts(t *testing.T, users, groups []row) *fakeAccounts {
 	}
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) { f.search(w, "user", f.users) })
+	mux.HandleFunc("/auth/user/search", func(w http.ResponseWriter, r *http.Request) {
+		if f.onUserSearch != nil && f.onUserSearch() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		f.search(w, "user", f.users)
+	})
 	mux.HandleFunc("/auth/group/search", func(w http.ResponseWriter, r *http.Request) {
 		if f.onGroupSearch != nil && f.onGroupSearch() {
 			w.WriteHeader(http.StatusInternalServerError)
@@ -103,7 +116,44 @@ func (f *fakeAccounts) search(w http.ResponseWriter, kind string, rows []row) {
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
+	if kind == "user" && f.deriveMemberships {
+		rows = f.withDerivedMemberships(rows)
+	}
 	_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: rows, RowCount: len(rows), Total: len(rows)})
+}
+
+func (f *fakeAccounts) withDerivedMemberships(users []row) []row {
+	out := make([]row, len(users))
+	for i, user := range users {
+		uid, _ := user["uid"].(string)
+		var gids []string
+		for _, group := range f.groups {
+			csv, _ := group["member"].(string)
+			for _, m := range strings.Split(csv, ",") {
+				if m == uid {
+					gid, _ := group["gid"].(string)
+					gids = append(gids, gid)
+					break
+				}
+			}
+		}
+		copied := row{}
+		for k, v := range user {
+			copied[k] = v
+		}
+		copied["group_memberships"] = strings.Join(gids, ",")
+		out[i] = copied
+	}
+	return out
+}
+
+// storedB64 is what OPNsense's StoreB64Field keeps of a posted value: its
+// base64, or empty.
+func storedB64(v interface{}) interface{} {
+	if s, ok := v.(string); ok && s != "" {
+		return base64.StdEncoding.EncodeToString([]byte(s))
+	}
+	return v
 }
 
 func (f *fakeAccounts) rows(kind string) *[]row {
@@ -152,6 +202,14 @@ func (f *fakeAccounts) add(w http.ResponseWriter, r *http.Request, kind string) 
 		created["descr"] = body["descr"]
 		created["scope"] = body["scope"]
 		created["is_admin"] = "0"
+		for _, k := range []string{"disabled", "shell", "expires", "email", "comment", "language", "landing_page"} {
+			if v, ok := body[k]; ok {
+				created[k] = v
+			}
+		}
+		if v, ok := body["authorizedkeys"]; ok {
+			created["authorizedkeys"] = storedB64(v)
+		}
 	} else {
 		created["gid"] = id
 		created["member"] = body["member"]
@@ -194,6 +252,9 @@ func (f *fakeAccounts) set(w http.ResponseWriter, r *http.Request, kind string) 
 	for k, v := range body {
 		if k == "password" {
 			continue
+		}
+		if kind == "user" && k == "authorizedkeys" {
+			v = storedB64(v)
 		}
 		target[k] = v
 	}

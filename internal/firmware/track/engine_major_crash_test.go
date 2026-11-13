@@ -85,7 +85,9 @@ func TestMajorCrash_AnAgentStoppedBeforeTheRunWasRecordedHoldsAsTheOrdinaryStep(
 	}
 }
 
-func TestMajorCrash_ABootEnvironmentMadeBeforeAStopMakesTheNextAttemptTakeTheNextName(t *testing.T) {
+// The environment was made and recorded before the agent stopped, and nothing
+// changed on the box: the next attempt reuses it (#136).
+func TestMajorCrash_ABootEnvironmentMadeBeforeAStopIsReusedByTheNextAttempt(t *testing.T) {
 	r := hopRig(t)
 	p := hopPayload(approveFinalHotfix)
 	job := hopCutAt(t, r, p, "be-create")
@@ -100,8 +102,8 @@ func TestMajorCrash_ABootEnvironmentMadeBeforeAStopMakesTheNextAttemptTakeTheNex
 	})
 	r.hopWants(t, ReasonHeldUpgradeAborted, NoteBootEnvironmentMade)
 	r.dev.do(func(d *simDevice) {
-		if len(d.hop.bes) != 2 || d.hop.bes[1].Name != "ndagent-pre-26.7-2" {
-			t.Errorf("environments %+v: the agent never removes one, and the next takes the next name", d.hop.bes)
+		if len(d.hop.bes) != 1 || d.hop.bes[0].Name != "ndagent-pre-26.7" {
+			t.Errorf("environments %+v: the next attempt should reuse the recorded one", d.hop.bes)
 		}
 	})
 }
@@ -532,8 +534,8 @@ func TestMajorCrash_AStage0AbortIsAHoldWhateverEvaluateWouldHaveSaid(t *testing.
 // log says, or whether there is one.
 func TestMajorCrash_ALandedHopIsASuccessWhateverTheUpdateLogSays(t *testing.T) {
 	for name, log := range map[string]LogFile{
-		"a failure text written after the landing": {Exists: true, ModTime: time.Now().Add(time.Minute), Text: "Partial update failure detected\n***DONE***\n"},
-		"no .update.log at all (Part 9's landing)": {},
+		"a failure text written after the landing":             {Exists: true, ModTime: time.Now().Add(time.Minute), Text: "Partial update failure detected\n***DONE***\n"},
+		"no .update.log at all, as the lab run's landing left": {},
 	} {
 		t.Run(name, func(t *testing.T) {
 			r := hopRig(t)
@@ -704,6 +706,77 @@ func TestMajorCrash_ARowThatCannotBeConfirmedIsFailedOnlyPastItsDeadline(t *test
 			if st := r.state(); st.Pending != nil || st.Landing != nil {
 				t.Errorf("record %+v: not confirmed is no mixed system", st)
 			}
+		})
+	}
+}
+
+// An attempt that aborted changed nothing, so a retry of the same upgrade from
+// the same release reuses the boot environment the first one made, and answers
+// boot_environment_made: an environment exists for this upgrade (#136).
+func TestMajorCrash_ARetryAfterAnAbortReusesTheBootEnvironmentItMade(t *testing.T) {
+	r := hopRig(t)
+	r.dev.do(func(d *simDevice) { d.hop.stage0 = "abort" })
+	r.hopWants(t, ReasonHeldUpgradeAborted, NoteBootEnvironmentMade)
+	if hb := r.state().HopBootEnvironment; hb == nil || hb.Name != "ndagent-pre-26.7" || hb.Series != "26.7" || hb.Box.ConfigSHA256 != "config-1" {
+		t.Fatalf("record %+v: the environment the agent made, and the box it was made over, are not recorded", hb)
+	}
+
+	r.hopWants(t, ReasonHeldUpgradeAborted, NoteBootEnvironmentMade)
+	r.dev.do(func(d *simDevice) {
+		if len(d.hop.bes) != 1 || d.hop.bes[0].Name != "ndagent-pre-26.7" {
+			t.Errorf("environments %+v: the retry should reuse the first one", d.hop.bes)
+		}
+	})
+	if n := r.dev.count("be-create ndagent-pre-26.7"); n != 1 {
+		t.Errorf("the environment was made %d times, want once", n)
+	}
+}
+
+// A recorded environment is reused only while it fits: made for this upgrade
+// from the release the box still runs, and still on the box. Otherwise a new one
+// is made, under the next free name.
+func TestMajorCrash_ARecordedBootEnvironmentThatNoLongerFitsIsNotReused(t *testing.T) {
+	for name, change := range map[string]func(r *rig){
+		"made from another release": func(r *rig) {
+			_, _ = r.store.Update(func(s *State) { s.HopBootEnvironment.From = "26.1.10" })
+		},
+		"removed from the box": func(r *rig) {
+			r.dev.do(func(d *simDevice) { d.hop.bes = nil })
+		},
+		"another environment under its name": func(r *rig) {
+			r.dev.do(func(d *simDevice) { d.hop.bes[0].UUID = "uuid-someone-else" })
+		},
+		"recorded without a uuid": func(r *rig) {
+			_, _ = r.store.Update(func(s *State) { s.HopBootEnvironment.UUID = "" })
+		},
+		"config.xml changed since": func(r *rig) {
+			r.dev.do(func(d *simDevice) { d.hop.box = BoxState{ConfigSHA256: "config-2", PackagesSHA256: "packages-1"} })
+		},
+		"the packages changed since": func(r *rig) {
+			r.dev.do(func(d *simDevice) { d.hop.box = BoxState{ConfigSHA256: "config-1", PackagesSHA256: "packages-2"} })
+		},
+		"the box cannot be read": func(r *rig) {
+			r.dev.do(func(d *simDevice) { d.hop.boxErr = errSim })
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := hopRig(t)
+			r.dev.do(func(d *simDevice) { d.hop.stage0 = "abort" })
+			r.hopWants(t, ReasonHeldUpgradeAborted, NoteBootEnvironmentMade)
+			change(r)
+			r.hopWants(t, ReasonHeldUpgradeAborted, NoteBootEnvironmentMade)
+			if n := r.dev.count("be-create"); n < 2 {
+				t.Errorf("made %d environments, want a new one for the retry", n)
+			}
+			r.dev.do(func(d *simDevice) {
+				last := d.hop.bes[len(d.hop.bes)-1]
+				if len(d.hop.bes) == 2 && (d.hop.bes[0].Name != "ndagent-pre-26.7" || last.Name != "ndagent-pre-26.7-2") {
+					t.Errorf("environments %+v: the old one stays and the new one takes the next name", d.hop.bes)
+				}
+				if len(d.hop.bes) == 1 && last.Name != "ndagent-pre-26.7" {
+					t.Errorf("environments %+v: the removed one is made again under its name", d.hop.bes)
+				}
+			})
 		})
 	}
 }

@@ -8,9 +8,10 @@ package track
 //
 // The hop is OPNsense's, not the agent's: `POST /api/core/firmware/upgrade` starts
 // a detached job that downloads and verifies the sets, installs the kernel, and
-// reboots three times (the base at the second boot, the packages at the third), with
+// reboots three times, sometimes four (the base at the second boot, the packages at
+// the third; firmware.Meta.ExpectedReboots says when a fourth comes), with
 // no web GUI, no SSH and no agent running between the first reboot and the end of
-// the third. So what is recorded before the request is what decides the row later,
+// the last. So what is recorded before the request is what decides the row later,
 // and the outcome is read from the device, never from an exit code, a log or the
 // agent coming back: the version files and the markers say whether it landed.
 //
@@ -237,7 +238,7 @@ func (e *Engine) majorStep(ctx context.Context, o *op) *Outcome {
 	if out != nil {
 		return out
 	}
-	o.progress(fmt.Sprintf("Upgrading from %s to %s; OPNsense will reboot three times and the device will be offline meanwhile...", o.installed, major))
+	o.progress(fmt.Sprintf("Upgrading from %s to %s; OPNsense will reboot three times, sometimes four, and the device will be offline meanwhile...", o.installed, major))
 	// A4.12 and A4.13: the request, the watch.
 	return e.requestRun(ctx, o, meta, pin, pin, runSpec{
 		marker: upgradeRequestMarker, trigger: e.dev.TriggerUpgrade, marked: true,
@@ -468,6 +469,40 @@ func (e *Engine) majorSpace(ctx context.Context, o *op, plan Plan) (makeBE bool,
 	return true, nil
 }
 
+// reuseBootEnvironment answers the boot environment an earlier attempt of this
+// upgrade made, when the agent's record shows it made it for this series from
+// the release the box still runs, over the config.xml and package set the box
+// still has, and the same environment (by uuid) is still there: it then holds
+// the state this attempt would make. The note boot_environment_made then means
+// that a pre-upgrade environment of the box as it is now exists for this
+// upgrade, not that this attempt made it.
+func (e *Engine) reuseBootEnvironment(ctx context.Context, o *op, major string) bool {
+	if o.st == nil || o.st.HopBootEnvironment == nil {
+		return false
+	}
+	hb := o.st.HopBootEnvironment
+	if hb.Series != major || hb.From != o.installed || hb.Box.ConfigSHA256 == "" || hb.UUID == "" {
+		return false
+	}
+	if box, err := e.dev.BoxState(ctx); err != nil || box != hb.Box {
+		if err != nil {
+			e.log.Warnw("Cannot read the state of the box; making a fresh boot environment", "error", describeErr(err))
+		} else {
+			e.log.Infow("The box changed since the earlier attempt's boot environment was made; making a fresh one", "name", hb.Name)
+		}
+		return false
+	}
+	be, found, err := e.dev.FindBootEnvironment(ctx, hb.Name)
+	if err != nil || !found || be.UUID != hb.UUID {
+		return false
+	}
+	o.progress("Reusing the boot environment " + hb.Name + " that an earlier attempt of this upgrade made...")
+	o.job.BootEnvironment = &MadeBootEnvironment{Name: hb.Name, UUID: be.UUID}
+	o.note(NoteBootEnvironmentMade)
+	e.log.Infow("Reusing the boot environment an earlier attempt of this upgrade made from the same release", "name", hb.Name, "uuid", be.UUID)
+	return true
+}
+
 // makeBootEnvironment is A4.10: a boot environment named ndagent-pre-<major>, then
 // -2, -3 ... when the name is taken, made through the snapshots API and found by
 // name in its listing (the answer to the add carries no uuid). Best effort: a
@@ -478,7 +513,13 @@ func (e *Engine) majorSpace(ctx context.Context, o *op, plan Plan) (makeBE bool,
 func (e *Engine) makeBootEnvironment(ctx context.Context, o *op, major string) {
 	base := "ndagent-pre-" + major
 	note := "NetDefense: before the upgrade to " + major
+	if e.reuseBootEnvironment(ctx, o, major) {
+		return
+	}
 	o.progress("Making a boot environment before the upgrade...")
+	// Read before the environment is made: a change in between then makes the
+	// record older than the snapshot, which a retry reads as a changed box.
+	box, boxErr := e.dev.BoxState(ctx)
 	for try := 1; try <= bootEnvironmentTries; try++ {
 		name := base
 		if try > 1 {
@@ -496,6 +537,14 @@ func (e *Engine) makeBootEnvironment(ctx context.Context, o *op, major string) {
 			o.job.BootEnvironment = made
 			o.note(NoteBootEnvironmentMade)
 			e.log.Infow("Made a boot environment before the series upgrade; the agent never removes it", "name", made.Name, "uuid", made.UUID)
+			hb := &HopBootEnvironment{Series: major, From: o.installed, Name: made.Name, UUID: made.UUID, Box: box}
+			if boxErr != nil {
+				e.log.Warnw("Cannot read the state of the box; a retry makes another boot environment", "error", describeErr(boxErr))
+				hb = nil
+			}
+			if _, err := e.store.Update(func(s *State) { s.HopBootEnvironment = hb }); err != nil {
+				e.log.Warnw("Cannot record the boot environment; a retry makes another", "error", err)
+			}
 			return
 		case errors.Is(err, ErrBootEnvironmentExists):
 			continue
@@ -1043,7 +1092,7 @@ func (e *Engine) clearHopRecords() {
 		if s.Pending != nil && s.Pending.Major != "" {
 			s.Pending = nil
 		}
-		s.HopAborts, s.Landing = nil, nil
+		s.HopAborts, s.Landing, s.HopBootEnvironment = nil, nil, nil
 	}); err != nil {
 		e.log.Warnw("Cannot save the firmware track record after the series upgrade", "error", err)
 	}

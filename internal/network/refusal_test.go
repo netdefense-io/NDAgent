@@ -52,6 +52,14 @@ func TestClassifyPermanentRefusal(t *testing.T) {
 			wantPermanent: false,
 		},
 		{
+			// NDBroker closes the auth leg with 1011 when its database is
+			// down (NDBroker#141): the agent reconnects with its backoff and
+			// does not re-run the registration phase.
+			name:          "an internal server error is a reconnect",
+			err:           fmt.Errorf("authentication failed: %w", &websocket.CloseError{Code: websocket.CloseInternalServerErr, Text: "service unavailable"}),
+			wantPermanent: false,
+		},
+		{
 			name:          "dial failure is a reconnect",
 			err:           fmt.Errorf("websocket dial failed: %w", &net.OpError{Op: "dial", Err: errors.New("connection refused")}),
 			wantPermanent: false,

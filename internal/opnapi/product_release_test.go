@@ -115,3 +115,48 @@ func TestProductReleaseString(t *testing.T) {
 		t.Errorf("String() without a reported version = %q, want 26.1.11", got)
 	}
 }
+
+// The Business floor is the first Business release built on the community
+// floor: 26.4 is built on 26.1.6, 26.4.1 on 26.1.9, 26.4.2 on 26.1.11
+// (opnsense/changelog, business/26.4).
+func TestBusinessFloorIsTheDocumentedLiteral(t *testing.T) {
+	if MinSupportedBusinessMajor != 26 || MinSupportedBusinessMinor != 4 || MinSupportedBusinessPatch != 2 {
+		t.Fatalf("Business floor = %d.%d.%d, want 26.4.2", MinSupportedBusinessMajor, MinSupportedBusinessMinor, MinSupportedBusinessPatch)
+	}
+	business := ProductRelease{Major: MinSupportedBusinessMajor, Minor: MinSupportedBusinessMinor, Patch: MinSupportedBusinessPatch}
+	if !business.AtLeast(MinSupportedOPNsenseMajor, MinSupportedOPNsenseMinor, MinSupportedOPNsensePatch) {
+		t.Error("the Business floor must be above the community one: an unknown edition is held to the Business floor so that it meets both")
+	}
+}
+
+func TestProductReleaseEdition(t *testing.T) {
+	tests := []struct {
+		product string
+		edition Edition
+		floor   string
+		label   string
+	}{
+		{"opnsense", EditionCommunity, "26.1.11", "26.4.1"},
+		{"opnsense-devel", EditionCommunity, "26.1.11", "26.4.1"},
+		{" opnsense ", EditionCommunity, "26.1.11", "26.4.1"},
+		{"opnsense-business", EditionBusiness, "Business Edition 26.4.2", "Business Edition 26.4.1"},
+		{"", EditionUnknown, "26.1.11 and Business Edition 26.4.2", "26.4.1 (edition unknown)"},
+		{"OPNsense", EditionUnknown, "26.1.11 and Business Edition 26.4.2", "26.4.1 (edition unknown)"},
+		{"opnsense-new", EditionUnknown, "26.1.11 and Business Edition 26.4.2", "26.4.1 (edition unknown)"},
+	}
+	for _, tt := range tests {
+		r := ProductRelease{Raw: "26.4.1", Major: 26, Minor: 4, Patch: 1, Product: tt.product}
+		if got := r.Edition(); got != tt.edition {
+			t.Errorf("%q: Edition() = %v, want %v", tt.product, got, tt.edition)
+		}
+		if got := r.SupportedFloorName(); got != tt.floor {
+			t.Errorf("%q: SupportedFloorName() = %q, want %q", tt.product, got, tt.floor)
+		}
+		if got := r.Label(); got != tt.label {
+			t.Errorf("%q: Label() = %q, want %q", tt.product, got, tt.label)
+		}
+		if want := tt.edition == EditionCommunity; r.MeetsSupportedFloor() != want {
+			t.Errorf("%q: 26.4.1 MeetsSupportedFloor() = %v, want %v", tt.product, !want, want)
+		}
+	}
+}

@@ -52,6 +52,10 @@ type versionServer struct {
 	calls   int
 	version string
 	fail    bool
+	// product is the core package's name, "opnsense" when empty; noProduct
+	// leaves it out of the answer.
+	product   string
+	noProduct bool
 }
 
 // client returns a client whose only release source is the server.
@@ -73,6 +77,14 @@ func (v *versionServer) newClient(t *testing.T) *opnapi.Client {
 		v.mu.Lock()
 		v.calls++
 		fail, version := v.fail, v.version
+		product := map[string]string{"product_version": version}
+		switch {
+		case v.noProduct:
+		case v.product != "":
+			product["product_id"] = v.product
+		default:
+			product["product_id"] = "opnsense"
+		}
 		v.mu.Unlock()
 
 		if fail {
@@ -80,7 +92,7 @@ func (v *versionServer) newClient(t *testing.T) *opnapi.Client {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{
-			"product": map[string]string{"product_version": version},
+			"product": product,
 		})
 	})
 	srv := httptest.NewServer(mux)
@@ -225,7 +237,7 @@ func TestWarnIfOPNsenseBelowFloor_LocalReleaseNeedsNoAPI(t *testing.T) {
 	versionFile := filepath.Join(t.TempDir(), "core")
 	write := func(version string) {
 		t.Helper()
-		if err := os.WriteFile(versionFile, []byte(`{"product_series":"26.7","product_version":"`+version+`"}`), 0o644); err != nil {
+		if err := os.WriteFile(versionFile, []byte(`{"product_series":"26.7","product_version":"`+version+`","product_id":"opnsense"}`), 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -334,13 +346,15 @@ func TestUnsupportedVersionConsequenceIsActionable(t *testing.T) {
 // TestUnsupportedConsequenceFollowsTheBand: each band of unsupported releases
 // is told the consequence that applies to it, not the other's.
 func TestUnsupportedConsequenceFollowsTheBand(t *testing.T) {
-	parse := func(v string) opnapi.ProductRelease {
+	parseOf := func(v, product string) opnapi.ProductRelease {
 		r, err := opnapi.ParseProductRelease(v)
 		if err != nil {
 			t.Fatal(err)
 		}
+		r.Product = product
 		return r
 	}
+	parse := func(v string) opnapi.ProductRelease { return parseOf(v, "opnsense") }
 	for _, v := range []string{"25.7.11_9", "25.1", "24.7.12"} {
 		if got := unsupportedConsequenceFor(parse(v)); got != unsupportedVersionConsequence {
 			t.Errorf("%s: consequence = %q, want the stranded VPN rules", v, got)
@@ -353,5 +367,67 @@ func TestUnsupportedConsequenceFollowsTheBand(t *testing.T) {
 	}
 	if !strings.Contains(unknownReleaseConsequence, unsupportedVersionConsequence) || !strings.Contains(unknownReleaseConsequence, unsupportedPatchConsequence) {
 		t.Error("an unreadable release must be told both possible consequences")
+	}
+
+	for _, tc := range []struct{ version, product, want, what string }{
+		{"25.10", "opnsense-business", unsupportedVersionConsequence, "the stranded VPN rules (built on 25.7.5)"},
+		{"26.4", "opnsense-business", businessPatchConsequence, "the Business patch consequence"},
+		{"26.4.1", "opnsense-business", businessPatchConsequence, "the Business patch consequence"},
+		{"26.1.11", "", unknownEditionConsequence, "the unknown-edition consequence"},
+		{"26.4.1", "", unknownEditionConsequence, "the unknown-edition consequence"},
+		{"26.1.10", "", unknownEditionConsequence, "the unknown-edition consequence, which names product_id"},
+		{"25.7.11_9", "", unsupportedVersionConsequence, "the stranded VPN rules"},
+	} {
+		if got := unsupportedConsequenceFor(parseOf(tc.version, tc.product)); got != tc.want {
+			t.Errorf("%s of %q: consequence = %q, want %s", tc.version, tc.product, got, tc.what)
+		}
+	}
+	for _, want := range []string{"administrator rights", "Business Edition 26.4.2"} {
+		if !strings.Contains(businessPatchConsequence, want) {
+			t.Errorf("the Business consequence is missing %q", want)
+		}
+	}
+	for _, want := range []string{"Business Edition", "26.4.2", "product_id"} {
+		if !strings.Contains(unknownEditionConsequence, want) {
+			t.Errorf("the unknown-edition consequence is missing %q", want)
+		}
+	}
+}
+
+// Each edition is held to its own floor, and a release whose edition is not
+// known to the higher one: Business Edition 26.4.2 is the first built on
+// community 26.1.11.
+func TestWarnIfOPNsenseBelowFloor_EditionFloor(t *testing.T) {
+	tests := []struct {
+		version   string
+		product   string
+		noProduct bool
+		supported bool
+	}{
+		{"26.4", "opnsense-business", false, false},
+		{"26.4.1", "opnsense-business", false, false},
+		{"26.4.2", "opnsense-business", false, true},
+		{"26.10", "opnsense-business", false, true},
+		{"25.10", "opnsense-business", false, false},
+		{"26.1.11", "opnsense-devel", false, true},
+		{"26.1.11", "", true, false},
+		{"26.4.1", "", true, false},
+		{"26.7.5", "", true, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version+" "+tt.product, func(t *testing.T) {
+			resetOPNsenseVersionWarnings()
+			t.Cleanup(resetOPNsenseVersionWarnings)
+
+			srv := &versionServer{version: tt.version, product: tt.product, noProduct: tt.noProduct}
+			warnIfOPNsenseBelowFloor(context.Background(), srv.client(t))
+
+			if opnsenseVersionWarnings.knownSupported != tt.supported {
+				t.Errorf("recognised as supported = %v, want %v", opnsenseVersionWarnings.knownSupported, tt.supported)
+			}
+			if opnsenseVersionWarnings.warnedUnsupported == tt.supported {
+				t.Errorf("unsupported warning fired = %v, want %v", opnsenseVersionWarnings.warnedUnsupported, !tt.supported)
+			}
+		})
 	}
 }

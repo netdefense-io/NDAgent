@@ -84,6 +84,17 @@ func urls(names ...string) []jsonKey {
 	return keys
 }
 
+// keyMaterial are fields that hold a certificate, a signing request or a CRL,
+// which is public, and are blanked only when a private key was stored in them
+// as well.
+func keyMaterial(names ...string) []jsonKey {
+	keys := make([]jsonKey, len(names))
+	for i, n := range names {
+		keys[i] = jsonKey{name: n, kinds: kindString, keyMaterial: true}
+	}
+	return keys
+}
+
 // at is a position in a document: its keys from the root, with "*" for any key
 // or index.
 func at(segments ...string) jsonPath {
@@ -181,8 +192,16 @@ var scrubRules = []scrubRule{
 	// static key grid.
 	jsonRule(`openvpn/instances`, scalars("password", "auth-gen-token-secret", "key")),
 
-	// Certificates and CAs: the private key, as stored and decoded.
-	jsonRule(`trust/(ca|cert)`, scalars("prv", "prv_payload")),
+	// Certificates and CAs: the private key, as stored and decoded. An import made
+	// before OPNsense refused a payload of more than one PEM section kept whatever
+	// followed the certificate, and a signing request given to sign is still
+	// stored whole, so a certificate, a signing request and the file generate_file
+	// hands out are blanked when a private key is in them.
+	jsonRule(`trust/(ca|cert)`, scalars("prv", "prv_payload"), keyMaterial("crt", "crt_payload", "csr", "csr_payload", "payload")),
+
+	// A CRL import stores the whole paste and get hands it back as text, so a
+	// key pasted after the CRL is blanked the same way.
+	jsonRule(`trust/crl/get`, keyMaterial("text")),
 
 	// WireGuard: the private keys of servers and clients, and the pre-shared key
 	// of a peer.

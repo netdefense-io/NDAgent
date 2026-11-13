@@ -23,6 +23,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os/exec"
 	"strings"
 
@@ -77,6 +78,9 @@ func pkgQueryFreeBSD(ctx context.Context, names []string) ([]Status, error) {
 // not-installed (pkg-query exits non-zero with no stdout). Any other
 // error — pkg(8) missing, signal, etc — is returned to the caller.
 func installedVersion(ctx context.Context, name string) (string, error) {
+	if optionLike(name) {
+		return "", errOptionLike(name)
+	}
 	stdout, err := runPkg(ctx, "query", "%v", name)
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -94,6 +98,9 @@ func installedVersion(ctx context.Context, name string) (string, error) {
 // repo metadata. Returns "" if the package isn't in any configured repo
 // (or the catalog can't be read).
 func availableVersion(ctx context.Context, name string) (string, error) {
+	if optionLike(name) {
+		return "", errOptionLike(name)
+	}
 	stdout, err := runPkg(ctx, "rquery", "-U", "%v", name)
 	if err != nil {
 		var exitErr *exec.ExitError
@@ -110,6 +117,17 @@ func availableVersion(ctx context.Context, name string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// optionLike reports whether a package name or URL would be read by pkg(8) as
+// an option: it is refused rather than passed.
+func optionLike(arg string) bool {
+	return strings.HasPrefix(arg, "-")
+}
+
+// errOptionLike is the refusal of a package name or URL that starts with "-".
+func errOptionLike(arg string) error {
+	return fmt.Errorf("%q starts with \"-\" and would be read by pkg as an option", arg)
 }
 
 // pkgCmd builds every pkg(8) command this package runs. pkg hands its own

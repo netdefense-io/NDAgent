@@ -79,7 +79,7 @@ func vpnNetworkFromDevice(ctx context.Context, t *testing.T, client *opnapi.Clie
 		Interface: VPNInterface{
 			PrivateKey: privKey,
 			Address:    tunnelAddress,
-			ListenPort: port,
+			ListenPort: &port,
 		},
 	}
 

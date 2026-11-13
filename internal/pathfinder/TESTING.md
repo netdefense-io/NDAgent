@@ -168,6 +168,14 @@ os-isc-dhcp, os-tailscale, os-qemu-guest-agent):
    dotted name of a nested field in a grid row (`wpa.passphrase`) is not the name
    in a form (`passphrase`): name both. The inherited `getAction` returns the
    whole model, so the keys of a model apply to every route of its controllers.
+   A field that holds public material can hold a secret stored with it: an
+   import before OPNsense refused a payload of more than one PEM section kept
+   whatever followed the certificate, and on 26.7.9 a signing request given to
+   sign is still stored whole (`sign_csr` checks no section count), so the Trust
+   `crt`, `csr`, their payloads and the `generate_file` file are `keyMaterial`
+   fields, blanked when a private key is in them. So is the `text` of
+   `trust/crl/get`: an imported CRL is stored as pasted. Look for the same in any
+   field an import fills from pasted text.
 3. The non-model reads: for every reachable action that calls configd or reads
    a file, the script it runs and what it prints (`ipsec list sad` parses
    `setkey -D`, whose `E:` and `A:` lines are the SA keys; `wireguard show` leaves
@@ -222,11 +230,13 @@ these again as findings:
   that the search reaches OPNsense untouched and selects the row by its blanked
   secret, and that the answer is still cleaned.
 - **Logs and free-text settings stay readable.** The logs (system, firewall,
-  service) hold what a component wrote into them, and a credential typed into a
-  free-text setting (an alias URL, a cron command, a service start command, a custom
-  option and the like) is stored as text no rule can tell from any other. Nothing
-  cleans them. The crash reporter, whose output is not cleaned either, stays
-  excluded, and so does the packet capture (`READONLY_EXCLUDED_PRIVS`).
+  service) hold what a component wrote into them (on 26.7.8 and 26.7.9 the IDS
+  rule updater logs the abuse.ch rule set URLs with the account's token in them),
+  and a credential typed into a free-text setting (an alias URL, a cron command, a
+  service start command, a custom option and the like) is stored as text no rule
+  can tell from any other. Nothing cleans them. The crash reporter, whose output
+  is not cleaned either, stays excluded, and so does the packet capture
+  (`READONLY_EXCLUDED_PRIVS`).
 
 What the last audit did not cover, so nobody assumes it did: the routes of plugins
 other than the three, and whatever a release added since.

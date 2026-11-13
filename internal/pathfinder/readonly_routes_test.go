@@ -282,6 +282,27 @@ func TestReadOnlyRoutes_SafeMethods(t *testing.T) {
 	}
 }
 
+// The dashboard's product news feed holds OPNsense's firmware lock on 26.7.9
+// while it fetches (configd `firmware feed` through launcher.sh), and firmware
+// jobs asked for meanwhile are dropped: refused whatever the method, while the
+// dashboard's other reads stay forwarded.
+func TestReadOnlyRoutes_TheProductFeedIsRefused(t *testing.T) {
+	for _, method := range []string{"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"} {
+		assertRefusal(t, method, refused,
+			"/api/core/dashboard/product_info_feed",
+			"/api/core/dashboard/productInfoFeed",
+			"/api/core/dashboard/PRODUCT_INFO_FEED",
+			"/api/core/dashboard//product_info_feed/",
+			"/api/core/dashboard/product_info_feed?x=1",
+		)
+	}
+	assertRefusal(t, "GET", forwarded,
+		"/api/core/dashboard/get_dashboard",
+		"/api/core/dashboard/picture",
+		"/api/core/dashboard/product_info",
+	)
+}
+
 // Three handlers act on the state they find, not on the request method, so a GET
 // reaches them too:
 //   - trust/ca/del runs `system trust configure` (unlink, rewrite and rehash of the
@@ -515,11 +536,11 @@ func TestReadOnlyRoutes_DashboardAndFavoriteSavesAreRefused(t *testing.T) {
 		"/api/core/menu/set_favorite#frag",
 	)
 
-	// What the dashboard and the menu read keeps working.
+	// What the dashboard and the menu read keeps working (the product feed is
+	// refused on its own: TestReadOnlyRoutes_TheProductFeedIsRefused).
 	assertRefusal(t, "POST", forwarded,
 		"/api/core/dashboard/get_dashboard",
 		"/api/core/dashboard/getDashboard",
-		"/api/core/dashboard/product_info_feed",
 		"/api/core/dashboard/picture",
 		"/api/core/menu/search",
 		"/api/core/menu/tree",
@@ -740,6 +761,7 @@ var auditedMutatingRoutes = []string{
 	"/api/captiveportal/voucher/expire_voucher",
 	"/api/captiveportal/voucher/generate_vouchers",
 	// core
+	"/api/core/dashboard/product_info_feed",
 	"/api/core/dashboard/restore_defaults",
 	"/api/core/dashboard/save_widgets",
 	"/api/core/hasync/reconfigure",
@@ -842,6 +864,7 @@ var auditedMutatingRoutes = []string{
 	"/api/interfaces/lagg_settings/reconfigure",
 	"/api/interfaces/loopback_settings/reconfigure",
 	"/api/interfaces/neighbor_settings/reconfigure",
+	"/api/interfaces/tap_settings/reconfigure",
 	"/api/interfaces/overview/reload_interface",
 	"/api/interfaces/settings/reconfigure",
 	"/api/interfaces/vip_settings/reconfigure",

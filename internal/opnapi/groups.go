@@ -163,13 +163,10 @@ func (c *Client) SetGroup(ctx context.Context, uuid string, group Group) error {
 	return nil
 }
 
-// groupMemberRepairWrapper mirrors GroupWrapper/Group but its Member field
-// carries no `omitempty`. It exists only for RepairGroupMember: repairing
-// the empty-token artifact SanitizeMemberCSV detects requires being able
-// to send an explicit "member":"" when every stored token was an
-// artifact, and Group.Member's `omitempty` (needed everywhere else, so an
-// external group's normal update never sends "member" at all) would
-// silently drop exactly that value.
+// groupMemberRepairWrapper mirrors GroupWrapper/Group with a plain Member, which
+// RepairGroupMember always sends: an external group's normal update sends no
+// member at all, and the repair has to send one, "" when every stored token
+// was an artifact.
 type groupMemberRepairWrapper struct {
 	Group struct {
 		Name           string `json:"name"`
@@ -391,14 +388,17 @@ func ConvertAPIToGroup(payload APIGroupPayload, templates []string, uidLookup ma
 		return group
 	}
 
-	// Resolve member names to UIDs
+	// Resolve member names to UIDs. A name with no user yet (one this sync
+	// creates later) is added by the user's own write and phase 4's; the sync
+	// refuses a GROUP whose member nothing creates, and reports one whose USER
+	// it does not apply, before it writes anything.
 	var memberUIDs []string
 	for _, name := range payload.Members {
 		if uid, ok := uidLookup[name]; ok {
 			memberUIDs = append(memberUIDs, uid)
 		}
-		// Skip members that don't exist locally
 	}
-	group.Member = StringsToCSV(memberUIDs)
+	csv := StringsToCSV(memberUIDs)
+	group.Member = &csv
 	return group
 }

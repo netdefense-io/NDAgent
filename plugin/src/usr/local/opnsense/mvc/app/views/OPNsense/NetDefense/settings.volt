@@ -1,27 +1,17 @@
 {#
  # Copyright (C) 2024 NetDefense
- # All rights reserved.
  #
- # Redistribution and use in source and binary forms, with or without
- # modification, are permitted provided that the following conditions are met:
+ # Licensed under the Apache License, Version 2.0 (the "License");
+ # you may not use this file except in compliance with the License.
+ # You may obtain a copy of the License at
  #
- # 1. Redistributions of source code must retain the above copyright notice,
- #    this list of conditions and the following disclaimer.
+ #     http://www.apache.org/licenses/LICENSE-2.0
  #
- # 2. Redistributions in binary form must reproduce the above copyright
- #    notice, this list of conditions and the following disclaimer in the
- #    documentation and/or other materials provided with the distribution.
- #
- # THIS SOFTWARE IS PROVIDED ``AS IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES,
- # INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY
- # AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
- # AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY,
- # OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
- # SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
- # INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
- # CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
- # ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
- # POSSIBILITY OF SUCH DAMAGE.
+ # Unless required by applicable law or agreed to in writing, software
+ # distributed under the License is distributed on an "AS IS" BASIS,
+ # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ # See the License for the specific language governing permissions and
+ # limitations under the License.
  #}
 
 <style>
@@ -150,6 +140,15 @@
         });
     }
 
+    // statusCell is an icon and a label. The label is always text, never
+    // markup: it carries values from the agent's status file, and an error
+    // can quote what a peer sent (a certificate's names).
+    function statusCell(cls, icon, label) {
+        return $('<span>').addClass(cls)
+            .append($('<i>').addClass('fa ' + icon))
+            .append(document.createTextNode(' ' + label));
+    }
+
     // Fetch agent runtime status (version + WS connection) from
     // /var/run/ndagent.status via the ServiceController endpoint.
     function checkAgentStatus() {
@@ -168,30 +167,36 @@
                 }
 
                 if (data.version && data.version !== 'unknown') {
-                    versionEl.html('<span class="text-success"><i class="fa fa-check-circle"></i> ' + data.version + '</span>');
+                    versionEl.empty().append(statusCell('text-success', 'fa-check-circle', data.version));
                 } else {
-                    versionEl.html('<span class="text-warning"><i class="fa fa-question-circle"></i> Unknown</span>');
+                    versionEl.empty().append(statusCell('text-warning', 'fa-question-circle', 'Unknown'));
                 }
 
+                var cell;
                 if (data.connected) {
                     var label = 'Connected';
                     if (data.server) {
                         label += ' (' + data.server + ')';
                     }
-                    connEl.html('<span class="text-success"><i class="fa fa-check-circle"></i> ' + label + '</span>');
+                    cell = statusCell('text-success', 'fa-check-circle', label);
                 } else if (data.stale && data.state !== 'unknown') {
-                    connEl.html('<span class="text-warning"><i class="fa fa-exclamation-triangle"></i> Stale (' + data.state + ')</span>');
+                    cell = statusCell('text-warning', 'fa-exclamation-triangle', 'Stale (' + data.state + ')');
                 } else if (data.state === 'connecting') {
-                    connEl.html('<span class="text-warning"><i class="fa fa-spinner fa-spin"></i> Connecting</span>');
+                    cell = statusCell('text-warning', 'fa-spinner fa-spin', 'Connecting');
+                } else if (data.state === 'pending') {
+                    cell = statusCell('text-info', 'fa-hourglass-half', 'Waiting for approval in NetDefense');
+                } else if (data.state === 'disabled') {
+                    cell = statusCell('text-warning', 'fa-pause-circle', 'Disabled in NetDefense');
                 } else if (data.state === 'disconnected') {
                     var label = 'Disconnected';
                     if (data.last_error) {
                         label += ' — ' + data.last_error;
                     }
-                    connEl.html('<span class="text-danger"><i class="fa fa-times-circle"></i> ' + label + '</span>');
+                    cell = statusCell('text-danger', 'fa-times-circle', label);
                 } else {
-                    connEl.html('<span class="text-danger"><i class="fa fa-times-circle"></i> Unknown</span>');
+                    cell = statusCell('text-danger', 'fa-times-circle', 'Unknown');
                 }
+                connEl.empty().append(cell);
             },
             error: function() {
                 $('#statusKeyMismatch').hide().empty();
@@ -700,7 +705,7 @@
                                 <input type="checkbox" id="settings.allowAllSnippetContent" name="settings.allowAllSnippetContent"> {{ lang._('Apply privileged snippet content instead of refusing it') }}
                             </label>
                             <div class="help-block">
-                                {{ lang._('Off by default: broad privileges, system scope, interactive shells, SSH keys and Zabbix sudo are refused.') }}
+                                {{ lang._('Off by default: broad privileges, system scope, interactive shells, SSH keys, Zabbix sudo, adding or changing authentication servers, the login order, and adding or updating certificates and CAs are refused.') }}
                                 <a href="https://netdefense.io/docs/ndagent/configuration/#allow-all-snippet-content" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
                             </div>
                         </td>

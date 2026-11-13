@@ -27,10 +27,15 @@
 #   4. deprovision the two NetDefense OPNsense accounts, locally — the
 #      plugin and its PHP are still installed at this point, and this is
 #      the last moment they are
-#   5. pkg delete -y <this channel's package, plus any sibling channel)
-#   6. remove the NetDefense pkg repo config(s) and fingerprint dir
+#   5. remove the plugin's settings node from config.xml (configure.php
+#      --remove-settings), so a later install starts from the defaults
+#   6. pkg delete -y <this channel's package, plus any sibling channel)
+#   7. take each removed package off OPNsense's plugin list (register.php
+#      remove), which would otherwise install it again after a series upgrade
+#   8. remove the NetDefense pkg repo config(s) and fingerprint dir
 #      (mirrors remove_legacy_repo() in ndagent-repo/install.sh)
-#   7. rm -rf /var/db/ndagent   (identity, pinned keys, replay watermarks)
+#   9. rm -rf /var/db/ndagent   (identity, pinned keys, replay watermarks),
+#      ndagent.conf and /etc/rc.conf.d/ndagent, which the package does not own
 #
 # It NEVER restarts ndagent — that is the one line that separates this helper
 # from its PLUGIN_INSTALL sibling. There is nothing left to start: the device
@@ -58,6 +63,9 @@ PHP=/usr/local/bin/php
 CONFIGURE_PHP=/usr/local/opnsense/scripts/OPNsense/NetDefense/configure.php
 RELEASE_FLAVOUR_PHP=/usr/local/opnsense/scripts/OPNsense/NetDefense/release_firmware_flavour.php
 RC_SCRIPT=/usr/local/etc/rc.d/ndagent
+REGISTER_PHP=/usr/local/opnsense/scripts/firmware/register.php
+RC_CONF_D=/etc/rc.conf.d/ndagent
+CANDIDATES=""
 
 # Bounded wait for the agent to go away on its own. It requested shutdown
 # immediately after forking us, so this is normally a second or two; the
@@ -136,11 +144,24 @@ deprovision_accounts() {
         printf 'WARN: configure.php --deprovision-accounts returned non-zero\n'
 }
 
+# The plugin's settings node goes too, while configure.php is still installed:
+# a later install then starts from the model's defaults (the operator's ruling,
+# 2026-11-12). Under OPNsense's config lock, like the account removal.
+remove_settings() {
+    if [ ! -x "$PHP" ] || [ ! -f "$CONFIGURE_PHP" ]; then
+        printf 'WARN: %s or %s missing; the settings node is left in config.xml\n' "$PHP" "$CONFIGURE_PHP"
+        return
+    fi
+    "$PHP" "$CONFIGURE_PHP" --remove-settings --json ||
+        printf 'WARN: configure.php --remove-settings returned non-zero\n'
+}
+
 # Remove the package for this channel, and sweep any sibling channel package
 # that somehow coexists. The three channel packages declare mutual
 # product_conflicts so normally only one is installed, but a decommission that
 # leaves a NetDefense package behind has failed at its only job.
 remove_packages() {
+    CANDIDATES="$(/usr/sbin/pkg query '%n' 2>/dev/null | grep '^os-netdefense' || true) $PKG_NAME"
     for name in $(/usr/sbin/pkg query '%n' 2>/dev/null | grep '^os-netdefense' || true); do
         printf 'Removing package %s\n' "$name"
         /usr/sbin/pkg delete -y "$name" || printf 'WARN: pkg delete %s failed\n' "$name"
@@ -152,6 +173,24 @@ remove_packages() {
         printf 'Removing package %s (fallback path)\n' "$PKG_NAME"
         /usr/sbin/pkg delete -y "$PKG_NAME" || printf 'WARN: pkg delete %s failed\n' "$PKG_NAME"
     fi
+}
+
+# OPNsense keeps its installed plugins in system.firmware.plugins and installs a
+# listed one again when it is missing (after a series upgrade, or a plugin
+# resync), so a package this helper removed leaves the list too. Only a package
+# that is gone: one whose delete failed stays listed, as it stays installed.
+unregister_plugins() {
+    [ -f "$REGISTER_PHP" ] || { printf 'WARN: %s not found; the plugin list is left as it is\n' "$REGISTER_PHP"; return; }
+    seen=" "
+    for name in $CANDIDATES; do
+        case "$seen" in *" $name "*) continue ;; esac
+        seen="$seen$name "
+        if /usr/sbin/pkg info -e "$name" 2>/dev/null; then
+            continue
+        fi
+        printf 'Removing %s from the plugin list\n' "$name"
+        "$PHP" "$REGISTER_PHP" remove "$name" || printf 'WARN: register.php remove %s failed\n' "$name"
+    done
 }
 
 # Mirror of install.sh's repo registration, in reverse: the current
@@ -189,6 +228,11 @@ remove_state() {
         printf 'Removing rendered config /usr/local/etc/ndagent.conf\n'
         rm -f /usr/local/etc/ndagent.conf || printf 'WARN: could not remove ndagent.conf\n'
     fi
+    # The plugin's template renders it (+TARGETS); the package does not own it.
+    if [ -f "$RC_CONF_D" ]; then
+        printf 'Removing rendered rc.conf.d %s\n' "$RC_CONF_D"
+        rm -f "$RC_CONF_D" || printf 'WARN: could not remove %s\n' "$RC_CONF_D"
+    fi
 }
 
 {
@@ -204,8 +248,10 @@ remove_state() {
     stop_agent
     release_firmware_pin
     deprovision_accounts
+    remove_settings
 
     remove_packages
+    unregister_plugins
     remove_repo
     remove_state
 

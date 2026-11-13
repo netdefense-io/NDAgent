@@ -60,10 +60,12 @@ type PrivPolicy struct {
 
 // PrivPolicyForRelease is the policy for a device running release, with the
 // floor-dependent IDs elevated below the floor: they are elevated on a release
-// below the supported floor, and on one that could not be read (known is false).
-// It does not look at ElevateFloorDependentPrivsBelowFloor.
+// below the supported floor of its edition (a Business Edition release is held
+// to the Business floor, and one whose edition is unknown to both), and on one
+// that could not be read (known is false). It does not look at
+// ElevateFloorDependentPrivsBelowFloor.
 func PrivPolicyForRelease(release ProductRelease, known bool) PrivPolicy {
-	return PrivPolicy{FloorDependentElevated: !known || !release.AtLeast(MinSupportedOPNsenseMajor, MinSupportedOPNsenseMinor, MinSupportedOPNsensePatch)}
+	return PrivPolicy{FloorDependentElevated: !known || !release.MeetsSupportedFloor()}
 }
 
 type adminEquivalenceFile struct {

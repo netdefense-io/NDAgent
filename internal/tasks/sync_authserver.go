@@ -1,15 +1,16 @@
 // Copyright (C) 2026 NetDefense
-// All rights reserved.
 //
-// Redistribution and use in source and binary forms, with or without
-// modification, are permitted provided that the following conditions are met:
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-// 1. Redistributions of source code must retain the above copyright notice,
-//    this list of conditions and the following disclaimer.
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-// 2. Redistributions in binary form must reproduce the above copyright
-//    notice, this list of conditions and the following disclaimer in the
-//    documentation and/or other materials provided with the distribution.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package tasks
 
@@ -221,7 +222,11 @@ func rejectTrailingJSON(dec *json.Decoder) error {
 func parseAuthServerContent(jsonContent string) (authServerContent, error) {
 	dec := json.NewDecoder(strings.NewReader(jsonContent))
 	dec.DisallowUnknownFields()
-	var c authServerContent
+	// An optional key the snippet leaves out (or sends as null) takes
+	// OPNsense's default for a new server (system_authservers.php): the
+	// memberOf constraint is on, the rest empty or off. A required one
+	// (validateServerFieldsRequired) is refused by the helper instead.
+	c := authServerContent{LdapSyncMemberofConstraint: true}
 	if err := dec.Decode(&c); err != nil {
 		return authServerContent{}, fmt.Errorf("strict decode failed: %w", err)
 	}
@@ -1059,7 +1064,8 @@ func authServerBlockedMessage(s authHelperServerResult, release string, rejectDa
 		if consumersNameFacility(s.Consumers, authFacilityWebadmin) {
 			msg += fmt.Sprintf("; remove this server from the %q login order first (an AUTH_ORDER policy without it, or a change made directly on the device), then retry", authFacilityWebadmin)
 			if rejectDangerous {
-				msg += "; reject_dangerous_snippets is on, so NetDefense cannot rewrite the order itself — use CONNECT at remote_access_policy=full, or a local edit"
+				msg += "; reject_dangerous_snippets is on, so NetDefense does not change the order, removals included: " + dangerousSnippetOptOut +
+					", then sync again with an order policy without the server; or change the order on the device (CONNECT at remote_access_policy=full, or a local edit)"
 			}
 		}
 	case s.Code == "CREATE_ACTIVATES_LOGIN_PATH":

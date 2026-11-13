@@ -5,8 +5,9 @@
 //
 // Single producer (the agent process), single file (/var/run/ndagent.status,
 // mode 0644). Writes are atomic via tempfile+rename. File mtime is the
-// freshness signal — readers should treat snapshots older than ~60s as
-// stale (the heartbeat refreshes it every interval).
+// freshness signal — the plugin treats a snapshot older than 120 s as stale
+// (the heartbeat refreshes it every interval, and the registration wait
+// every 30 s while it is not stuck).
 package status
 
 import (
@@ -27,6 +28,10 @@ const (
 	StateConnecting   State = "connecting"
 	StateConnected    State = "connected"
 	StateDisconnected State = "disconnected"
+	// StatePending and StateDisabled are the registration waits: the device
+	// waits for its approval, or is disabled, in NetDefense.
+	StatePending  State = "pending"
+	StateDisabled State = "disabled"
 )
 
 // snapshot is the JSON shape written to disk.
@@ -75,6 +80,16 @@ func NewWriter(path, version, gitCommit, deviceUUID string) *Writer {
 // state changes.
 func (w *Writer) MarkConnecting() error {
 	return w.transition(StateConnecting, "", "")
+}
+
+// MarkPending records that the device waits for its approval in NetDefense.
+func (w *Writer) MarkPending() error {
+	return w.transition(StatePending, "", "")
+}
+
+// MarkDisabled records that the device is disabled in NetDefense, and waits.
+func (w *Writer) MarkDisabled() error {
+	return w.transition(StateDisabled, "", "")
 }
 
 // MarkConnected records a successful WebSocket auth, with the server URL.

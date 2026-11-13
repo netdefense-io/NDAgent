@@ -21,7 +21,7 @@ type VPNNetwork struct {
 type VPNInterface struct {
 	PrivateKey string `json:"private_key"`
 	Address    string `json:"address"`
-	ListenPort int    `json:"listen_port"`
+	ListenPort *int   `json:"listen_port"` // left out: the model default, empty (WireGuard picks a port)
 	MTU        *int   `json:"mtu,omitempty"`
 }
 
@@ -114,22 +114,28 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 	}
 	managedClients := opnapi.FilterManagedWireGuardClients(allClients)
 
-	// Build name→UUID maps from current state
+	// Build name→UUID maps from current state, and keep the rows to skip a
+	// write that would change nothing. A row is compared once: a second
+	// server or client of the same name always writes, so the last one wins.
 	currentServerUUIDs := make(map[string]string) // name → UUID
+	currentServerRows := make(map[string]map[string]interface{})
 	for _, s := range managedServers {
 		name, _ := s["name"].(string)
 		uuid, _ := s["uuid"].(string)
 		if name != "" && uuid != "" {
 			currentServerUUIDs[name] = uuid
+			currentServerRows[name] = s
 		}
 	}
 
 	currentClientUUIDs := make(map[string]string)
+	currentClientRows := make(map[string]map[string]interface{})
 	for _, c := range managedClients {
 		name, _ := c["name"].(string)
 		uuid, _ := c["uuid"].(string)
 		if name != "" && uuid != "" {
 			currentClientUUIDs[name] = uuid
+			currentClientRows[name] = c
 		}
 	}
 
@@ -225,7 +231,7 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 			Name:          serverName,
 			PubKey:        pubKey,
 			PrivKey:       network.Interface.PrivateKey,
-			Port:          fmt.Sprintf("%d", network.Interface.ListenPort),
+			Port:          intPtrToString(network.Interface.ListenPort),
 			TunnelAddress: network.Interface.Address,
 			MTU:           mtu,
 			DNS:           "",
@@ -233,7 +239,18 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 			Gateway:       "",
 		}
 
-		if existingUUID, exists := currentServerUUIDs[serverName]; exists {
+		row := currentServerRows[serverName]
+		delete(currentServerRows, serverName)
+		if existingUUID, exists := currentServerUUIDs[serverName]; exists && opnapi.RowHolds(server, row) {
+			serverNameToUUID[serverName] = existingUUID
+			result.Results = append(result.Results, SyncAPIItemResult{
+				Type:   "wg_server",
+				UUID:   existingUUID,
+				Name:   serverName,
+				Action: "unchanged",
+				Status: "ok",
+			})
+		} else if exists {
 			// Update existing server
 			if err := client.SetServer(ctx, existingUUID, server); err != nil {
 				errMsg := fmt.Sprintf("Failed to update server %s: %v", serverName, err)
@@ -316,7 +333,17 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 				Servers:       serverUUID,
 			}
 
-			if existingUUID, exists := currentClientUUIDs[clientName]; exists {
+			row := currentClientRows[clientName]
+			delete(currentClientRows, clientName)
+			if existingUUID, exists := currentClientUUIDs[clientName]; exists && opnapi.RowHolds(wgClient, row) {
+				result.Results = append(result.Results, SyncAPIItemResult{
+					Type:   "wg_client",
+					UUID:   existingUUID,
+					Name:   clientName,
+					Action: "unchanged",
+					Status: "ok",
+				})
+			} else if exists {
 				// Update existing client
 				if err := client.SetClient(ctx, existingUUID, wgClient); err != nil {
 					errMsg := fmt.Sprintf("Failed to update client %s: %v", clientName, err)
