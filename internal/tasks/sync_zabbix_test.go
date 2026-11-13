@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -268,6 +269,7 @@ func newZabbixTestServer(t *testing.T) (client *opnapi.Client, setSettingsCalls 
 		reconfigures++
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	serveRunning(t, mux, "/zabbixagent/service/status")
 
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
@@ -410,16 +412,16 @@ func TestExecuteSyncZabbix_ServerListNotConstrained(t *testing.T) {
 // TestExecuteSyncZabbix_RejectOnlySyncDoesNotReconfigure locks the "no
 // service bounce" half of the dangerous-field gate's safety contract: a
 // sync whose only Zabbix change is a rejected element must never call
-// ReconfigureZabbix. The "touched" gate in executeSyncZabbix only flips to
-// true on a Status=="success" result, and a rejection is recorded with
-// Status=="blocked" — this test fails if that ever regresses (e.g. a
-// rejection being miscounted as a change).
+// ReconfigureZabbix. A rejection writes nothing, so it owes no apply — this
+// test fails if that ever regresses (e.g. a rejection being miscounted as a
+// change).
 func TestExecuteSyncZabbix_RejectOnlySyncDoesNotReconfigure(t *testing.T) {
+	useApplyRecord(t)
 	client, _, addedKeys, reconfigureCalls := newZabbixTestServer(t)
 
 	dangerous := opnapi.APIZabbixUserParameterPayload{Key: "nd-dangerous-check", Command: "rm -rf /tmp/x"}
 
-	result := executeSyncZabbix(context.Background(), client, nil,
+	result := executeSyncZabbix(syncCtx(), client, nil,
 		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
 
 	if result.Success {
@@ -479,6 +481,7 @@ func TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePre
 		reconfigureCalls++
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	serveRunning(t, mux, "/zabbixagent/service/status")
 	// add/set handlers are wired defensively: if a regression let the
 	// rejected element through, the test fails on a clean "wrong calls
 	// happened" assertion rather than a 404 from an unhandled route.
@@ -500,7 +503,8 @@ func TestExecuteSyncZabbix_DangerousUserParameterRejectionDoesNotOrphanDeletePre
 	// the gate rejects it.
 	dangerous := opnapi.APIZabbixUserParameterPayload{Key: "nd-dangerous-check", Command: "rm -rf /tmp/x"}
 
-	result := executeSyncZabbix(context.Background(), client, nil,
+	useApplyRecord(t)
+	result := executeSyncZabbix(syncCtx(), client, nil,
 		[]opnapi.APIZabbixUserParameterPayload{dangerous}, nil, true /* gate on */)
 
 	if result.Success {
@@ -545,6 +549,7 @@ func TestSyncZabbix_LeftOutFieldsTakeThePluginDefaults(t *testing.T) {
 	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	serveRunning(t, mux, "/zabbixagent/service/status")
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	client := opnapi.NewClient(server.URL, "key", "secret", true)
@@ -606,6 +611,7 @@ func TestSyncZabbix_AnEntryLeftWithoutEnabledIsOn(t *testing.T) {
 	mux.HandleFunc("/zabbixagent/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	serveRunning(t, mux, "/zabbixagent/service/status")
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	client := opnapi.NewClient(server.URL, "key", "secret", true)
@@ -642,7 +648,8 @@ func addedKey(body map[string]map[string]interface{}) string {
 }
 
 // zabbixNoopServer is a device holding settings, one userparameter and one
-// alias; it counts every write and reconfigure.
+// alias; it counts every write and reconfigure, and reports status as the
+// agent's service status ("running" when empty).
 type zabbixNoopServer struct {
 	settings  map[string]interface{}
 	upRow     map[string]interface{}
@@ -650,11 +657,13 @@ type zabbixNoopServer struct {
 	writes    []string
 	bodies    []string
 	reconfigs int
+	status    string
 	client    *opnapi.Client
 }
 
 func newZabbixNoopServer(t *testing.T, settings map[string]interface{}, upRow, aliasRow map[string]interface{}) *zabbixNoopServer {
 	t.Helper()
+	shortServiceStartWait(t)
 	s := &zabbixNoopServer{settings: settings, upRow: upRow, aliasRow: aliasRow}
 	mux := http.NewServeMux()
 	rows := func(row map[string]interface{}) opnapi.SearchResponse {
@@ -694,6 +703,9 @@ func newZabbixNoopServer(t *testing.T, settings map[string]interface{}, upRow, a
 		s.reconfigs++
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
+	mux.HandleFunc("/zabbixagent/service/status", func(w http.ResponseWriter, r *http.Request) {
+		writeServiceStatus(w, s.status)
+	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
 	s.client = opnapi.NewClient(server.URL, "key", "secret", true)
@@ -701,9 +713,9 @@ func newZabbixNoopServer(t *testing.T, settings map[string]interface{}, upRow, a
 }
 
 // A sync whose settings, userparameter and alias are already on the device
-// writes nothing and says each is unchanged; a change in any one is written
-// (#195). Both reconfigure: a reconfigure that failed after an earlier write is
-// only ever retried by the next sync.
+// writes nothing, says each is unchanged and does not reconfigure; a change in
+// any one is written and reconfigured (#195, #248). An apply an earlier sync
+// owes is made even when nothing is written.
 func TestSyncZabbix_WhatIsAlreadyOnTheDeviceIsNotWritten(t *testing.T) {
 	payload := map[string]interface{}{"snippets": []interface{}{
 		map[string]interface{}{"config_type": "ZABBIX_SETTINGS", "content": `{"hostname":"fw1","server_list":["zbx.example.com"]}`},
@@ -733,20 +745,30 @@ func TestSyncZabbix_WhatIsAlreadyOnTheDeviceIsNotWritten(t *testing.T) {
 
 	live, upRow, aliasRow := asStored()
 	s := newZabbixNoopServer(t, live, upRow, aliasRow)
-	result := executeSyncZabbix(context.Background(), s.client, settings, ups, aliases, false)
+	useApplyRecord(t)
+	result := executeSyncZabbix(syncCtx(), s.client, settings, ups, aliases, false)
 	if !result.Success {
 		t.Fatalf("sync failed: %+v", result.Errors)
 	}
 	if len(s.writes) != 0 {
 		t.Errorf("an unchanged device was written %v", s.writes)
 	}
-	if s.reconfigs != 1 {
-		t.Errorf("reconfigured %d times, want once: a reconfigure owed by an earlier sync must still run", s.reconfigs)
+	if s.reconfigs != 0 {
+		t.Errorf("reconfigured %d times; a sync with nothing new restarts nothing", s.reconfigs)
 	}
 	for _, item := range result.Results {
 		if item.Action != "unchanged" || item.Status != "success" {
 			t.Errorf("item %s %s: %s/%s, want unchanged/success", item.Type, item.Name, item.Action, item.Status)
 		}
+	}
+
+	useApplyRecord(t, applyZabbix)
+	owed := executeSyncZabbix(syncCtx(), s.client, settings, ups, aliases, false)
+	if len(s.writes) != 0 || s.reconfigs != 1 {
+		t.Errorf("writes %v, reconfigures %d; want an owed apply made with nothing written", s.writes, s.reconfigs)
+	}
+	if item := applyItemOf(owed.Results, "zabbix_apply"); item == nil || item.Code != codeApplyOwed {
+		t.Errorf("apply item = %+v, want code %s", item, codeApplyOwed)
 	}
 
 	for _, tc := range []struct {
@@ -764,11 +786,16 @@ func TestSyncZabbix_WhatIsAlreadyOnTheDeviceIsNotWritten(t *testing.T) {
 			live, upRow, aliasRow := asStored()
 			tc.change(live, upRow, aliasRow)
 			s := newZabbixNoopServer(t, live, upRow, aliasRow)
-			if result := executeSyncZabbix(context.Background(), s.client, settings, ups, aliases, false); !result.Success {
+			useApplyRecord(t)
+			result := executeSyncZabbix(syncCtx(), s.client, settings, ups, aliases, false)
+			if !result.Success {
 				t.Fatalf("sync failed: %+v", result.Errors)
 			}
 			if len(s.writes) != 1 || s.writes[0] != tc.write || s.reconfigs != 1 {
 				t.Errorf("writes %v, reconfigures %d; want one %s write and one reconfigure", s.writes, s.reconfigs, tc.write)
+			}
+			if item := applyItemOf(result.Results, "zabbix_apply"); item == nil || item.Status != "success" || item.Code != "" {
+				t.Errorf("apply item = %+v, want a success without a code", item)
 			}
 		})
 	}
@@ -821,5 +848,47 @@ func TestSyncZabbix_ASecondSnippetWithTheSameKeyAlwaysWrites(t *testing.T) {
 	}
 	if got := fmt.Sprint(s.bodies); got != "[first sysctl -n hw.ncpu first agent.ping]" {
 		t.Errorf("written content %s, want each key's last snippet written last", got)
+	}
+}
+
+// OPNsense answers a reconfigure ok for a Zabbix agent that did not start (its
+// rc.d start exits 0 once zabbix_agentd has forked): the SYNC fails, and the
+// apply stays owed until the agent runs (NDAgent-go#248).
+func TestSyncZabbix_AnAgentLeftStoppedStaysOwed(t *testing.T) {
+	shortServiceStartWait(t)
+	settings, err := parseAPIZabbixSettings(map[string]interface{}{"snippets": []interface{}{
+		map[string]interface{}{"config_type": "ZABBIX_SETTINGS", "content": `{"hostname":"fw1","server_list":["zbx.example.com"]}`},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := json.Marshal(map[string]interface{}{"zabbixagent": opnapi.BuildZabbixSettings(*settings)})
+	var live map[string]interface{}
+	_ = json.Unmarshal(body, &live)
+	s := newZabbixNoopServer(t, live, nil, nil)
+	useApplyRecord(t, applyZabbix)
+
+	s.status = "stopped"
+	failed := executeSyncZabbix(syncCtx(), s.client, settings, nil, nil, false)
+	if failed.Success || s.reconfigs != 1 || len(s.writes) != 0 {
+		t.Fatalf("an agent left stopped: success=%v reconfigures=%d writes=%v errors=%v", failed.Success, s.reconfigs, s.writes, failed.Errors)
+	}
+	if item := applyItemOf(failed.Results, "zabbix_apply"); item == nil || item.Status != "error" || !strings.Contains(item.Error, `"stopped"`) {
+		t.Errorf("apply item = %+v, want an error naming the status", item)
+	}
+	if !recordOwes(t)[applyZabbix] {
+		t.Fatal("an agent left stopped left nothing owed")
+	}
+
+	s.status = ""
+	retried := executeSyncZabbix(syncCtx(), s.client, settings, nil, nil, false)
+	if !retried.Success || s.reconfigs != 2 {
+		t.Fatalf("the retry: success=%v reconfigures=%d errors=%v", retried.Success, s.reconfigs, retried.Errors)
+	}
+	if item := applyItemOf(retried.Results, "zabbix_apply"); item == nil || item.Code != codeApplyOwed {
+		t.Errorf("apply item = %+v, want code %s", item, codeApplyOwed)
+	}
+	if recordOwes(t)[applyZabbix] {
+		t.Error("the record still owes Zabbix after the retry")
 	}
 }

@@ -141,7 +141,12 @@ type fakeRuleDevice struct {
 	searches int
 
 	writes []string
-	bodies map[string][]map[string]string
+	// aliasApplies counts the alias reconfigures; a filter apply is the
+	// "apply" entry of writes. ruleApplyFails answers the filter apply with
+	// configd's error.
+	aliasApplies   int
+	ruleApplyFails bool
+	bodies         map[string][]map[string]string
 	// calls counts the getRule/<uuid>, setRule, delRule and toggleRule calls
 	// per "<call> <uuid>", the current one included when before runs.
 	calls map[string]int
@@ -274,6 +279,9 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"alias": f.aliasTemplate})
 	})
 	mux.HandleFunc("/firewall/alias/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		f.mu.Lock()
+		f.aliasApplies++
+		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/firewall/filter/getRule", f.getRule)
@@ -287,7 +295,12 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 	mux.HandleFunc("/firewall/filter/apply", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		f.writes = append(f.writes, "apply")
+		fails := f.ruleApplyFails
 		f.mu.Unlock()
+		if fails {
+			_ = json.NewEncoder(w).Encode(map[string]string{"status": "Execute error"})
+			return
+		}
 		_ = json.NewEncoder(w).Encode(map[string]string{"status": "OK\n\n"})
 	})
 

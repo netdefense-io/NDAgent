@@ -382,6 +382,10 @@ func HandleSyncAPI(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"software_absent_count", softwareAbsentCount,
 	)
 
+	// A service is applied only when this SYNC writes to it or an earlier one
+	// left its apply owed (apply_owed.go).
+	ctx = loadApplyOwed().attach(ctx)
+
 	// The trust family runs first: a service another family touches may use
 	// a certificate it renews. CAs before certificates on add, certificates
 	// before CAs on removal.
@@ -849,6 +853,12 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		"total_rules", len(allRules),
 		"managed_rules", len(currentRules),
 	)
+	if len(currentAliases) == 0 && len(aliases) == 0 {
+		applyOwedFrom(ctx).unused(applyFirewallAliases)
+	}
+	if len(currentRules) == 0 && len(rules) == 0 {
+		applyOwedFrom(ctx).unused(applyFirewallRules)
+	}
 
 	// Build maps of current UUIDs
 	currentAliasUUIDs := make(map[string]bool)
@@ -1184,10 +1194,15 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 		}
 	}
 
-	// Phase 6: Apply changes. Every errors entry must have a matching
-	// results item, or a FAILED task's own results array shows nothing
-	// wrong.
-	if err := client.ReconfigureAliases(ctx); err != nil {
+	// Phase 6: Apply changes, each only when this SYNC wrote to it or an
+	// earlier one left it owed. The alias reconfigure reloads the filter,
+	// refreshes the alias tables and restarts cron; the rule apply reloads
+	// the filter. Every errors entry must have a matching results item, or a
+	// FAILED task's own results array shows nothing wrong.
+	owed := applyOwedFrom(ctx)
+	if apply, owedOnly := owed.due(applyFirewallAliases); !apply {
+		log.Info("Aliases: nothing written and no apply owed; reconfigure skipped")
+	} else if err := client.ReconfigureAliases(ctx); err != nil {
 		msg := fmt.Sprintf("Alias reconfigure: %v", err)
 		errors = append(errors, msg)
 		results = append(results, SyncAPIItemResult{
@@ -1197,6 +1212,9 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 			Status: "error",
 			Error:  msg,
 		})
+	} else {
+		owed.applied(applyFirewallAliases)
+		results = append(results, appliedItem("alias_apply", "reconfigure", owedOnly))
 	}
 
 	if withheld := placement.withheld; len(withheld) > 0 {
@@ -1218,6 +1236,8 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 			Error:  msg,
 			Code:   codeRuleApplyWithheld,
 		})
+	} else if apply, owedOnly := owed.due(applyFirewallRules); !apply {
+		log.Info("Rules: nothing written and no apply owed; filter apply skipped")
 	} else if err := client.ApplyRules(ctx); err != nil {
 		msg := fmt.Sprintf("Rule apply: %v", err)
 		errors = append(errors, msg)
@@ -1228,6 +1248,9 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 			Status: "error",
 			Error:  msg,
 		})
+	} else {
+		owed.applied(applyFirewallRules)
+		results = append(results, appliedItem("rule_apply", "apply", owedOnly))
 	}
 
 	// Build final result with detailed counts
@@ -3065,7 +3088,7 @@ func parseUnboundACLContent(jsonContent string, templates []string) (opnapi.APIU
 // 4. Create/Update host aliases (after host overrides exist)
 // 5. Delete orphan host aliases (before parent host overrides)
 // 6. Delete orphan host overrides, domain forwards, ACLs
-// 7. Apply changes with ReconfigureUnbound()
+// 7. Apply changes with ReconfigureUnbound(), when written or owed
 func executeSyncUnbound(
 	ctx context.Context,
 	client *opnapi.Client,
@@ -3162,6 +3185,10 @@ func executeSyncUnbound(
 		"total_acls", len(allACLs),
 		"managed_acls", len(currentACLs),
 	)
+	if len(currentHostOverrides)+len(currentForwards)+len(currentHostAliases)+len(currentACLs) == 0 &&
+		len(hostOverrides)+len(domainForwards)+len(hostAliases)+len(unboundACLs) == 0 {
+		applyOwedFrom(ctx).unused(applyUnbound)
+	}
 
 	// The managed rows by uuid, to skip a write that would change nothing. A row
 	// is compared once: a second snippet with the same uuid always writes, so
@@ -3490,10 +3517,15 @@ func executeSyncUnbound(
 		}
 	}
 
-	// Phase 10: Apply changes. Every errors entry must have a matching
-	// results item, or a FAILED task's own results array shows nothing
-	// wrong.
-	if err := client.ReconfigureUnbound(ctx); err != nil {
+	// Phase 10: Apply changes, only when this SYNC wrote to Unbound or an
+	// earlier one left the apply owed: the reconfigure stops and starts
+	// Unbound, and is judged by Unbound's status after it too. Every errors
+	// entry must have a matching results item, or a FAILED task's own results
+	// array shows nothing wrong.
+	owed := applyOwedFrom(ctx)
+	if apply, owedOnly := owed.due(applyUnbound); !apply {
+		log.Info("Unbound: nothing written and no apply owed; reconfigure skipped")
+	} else if err := reconfigureRunning(ctx, client.ReconfigureUnbound, client.UnboundStatus); err != nil {
 		msg := fmt.Sprintf("Unbound reconfigure: %v", err)
 		errors = append(errors, msg)
 		results = append(results, SyncAPIItemResult{
@@ -3503,6 +3535,9 @@ func executeSyncUnbound(
 			Status: "error",
 			Error:  msg,
 		})
+	} else {
+		owed.applied(applyUnbound)
+		results = append(results, appliedItem("unbound_apply", "reconfigure", owedOnly))
 	}
 
 	// Build final result with detailed counts

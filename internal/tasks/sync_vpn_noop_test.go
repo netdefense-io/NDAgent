@@ -22,6 +22,8 @@ type wireGuardStore struct {
 	next     int
 	writes   []string
 	setUUIDs []string
+	// reconfigures counts the WireGuard reconfigures.
+	reconfigures int
 }
 
 func newWireGuardStore(t *testing.T) (*wireGuardStore, *opnapi.Client) {
@@ -32,6 +34,9 @@ func newWireGuardStore(t *testing.T) (*wireGuardStore, *opnapi.Client) {
 		_ = json.NewEncoder(w).Encode(opnapi.WireGuardGeneralWrapper{General: opnapi.WireGuardGeneral{Enabled: "1"}})
 	})
 	mux.HandleFunc("/wireguard/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		s.reconfigures++
+		s.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "ok"})
 	})
 	for _, kind := range []string{"server", "client"} {

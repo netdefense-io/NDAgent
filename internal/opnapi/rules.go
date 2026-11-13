@@ -224,8 +224,11 @@ func (c *Client) ToggleRule(ctx context.Context, uuid string, enabled bool) erro
 // This is the simple version without savepoint/rollback.
 func (c *Client) ApplyRules(ctx context.Context) error {
 	// OPNsense API requires an empty JSON object, not nil
-	_, err := c.doRequest(ctx, "POST", "/firewall/filter/apply", struct{}{})
+	respBody, err := c.doRequest(ctx, "POST", "/firewall/filter/apply", struct{}{})
 	if err != nil {
+		return fmt.Errorf("apply failed: %w", err)
+	}
+	if err := checkApplyAnswer(respBody, "status"); err != nil {
 		return fmt.Errorf("apply failed: %w", err)
 	}
 

@@ -62,7 +62,7 @@ func (m *aliasCollisionMock) client(t *testing.T) *opnapi.Client {
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"alias": aliasTemplate(t)})
 	})
 	mux.HandleFunc("/firewall/alias/reconfigure", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/firewall/filter/searchRule", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})

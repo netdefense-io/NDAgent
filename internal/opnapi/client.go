@@ -82,6 +82,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, body interf
 	}
 
 	if !isIdempotentRead(method, path) {
+		noteWrite(ctx, method, path)
 		return c.send(ctx, method, path, payload)
 	}
 

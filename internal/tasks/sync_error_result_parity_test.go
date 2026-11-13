@@ -73,7 +73,7 @@ func TestExecuteSyncAPI_RuleApplyFailure_HasMatchingResultItem(t *testing.T) {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{Rows: []map[string]interface{}{}})
 	})
 	mux.HandleFunc("/firewall/alias/reconfigure", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/firewall/filter/apply", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

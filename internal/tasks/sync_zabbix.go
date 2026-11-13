@@ -204,6 +204,9 @@ func executeSyncZabbix(
 
 	var results []SyncAPIItemResult
 	var errors []string
+	// inUse: the SYNC wants Zabbix content (even content the gate rejects)
+	// or the device holds managed userparameters or aliases.
+	inUse := settings != nil || len(userParams) > 0 || len(aliases) > 0
 
 	// Phase 0: Plugin-presence probe.
 	//
@@ -216,6 +219,7 @@ func executeSyncZabbix(
 	if err != nil {
 		if opnapi.IsNotFound(err) {
 			log.Debug("Zabbix plugin not installed on this device; skipping zabbix sync")
+			applyOwedFrom(ctx).gone(applyZabbix)
 			return SyncAPIResult{
 				Success: true,
 				Message: "No changes applied",
@@ -293,6 +297,7 @@ func executeSyncZabbix(
 	// removing the if-len gate).
 	{
 		currentManaged := opnapi.FilterManagedZabbixUserParameters(currentUPRows)
+		inUse = inUse || len(currentManaged) > 0
 
 		// Index current managed rows by key for O(1) match.
 		currentByKey := make(map[string]map[string]interface{}, len(currentManaged))
@@ -416,6 +421,7 @@ func executeSyncZabbix(
 			}
 		}
 		currentManaged := opnapi.FilterManagedZabbixAliases(currentRows)
+		inUse = inUse || len(currentManaged) > 0
 
 		currentByKey := make(map[string]map[string]interface{}, len(currentManaged))
 		for _, r := range currentManaged {
@@ -497,35 +503,32 @@ func executeSyncZabbix(
 		}
 	}
 
-	// Phase 6: Apply changes. Skip the reconfigure call if nothing
-	// actually changed on the device — saves a service bounce on no-op
-	// syncs (no settings push, no creates, no updates, no deletes). A
-	// rejected element (Status "blocked") is not a device change, so a
-	// sync consisting only of rejections must not trigger a reconfigure.
-	// An element already as wanted ("unchanged") still reconfigures: a
-	// reconfigure that failed after an earlier write is only retried here,
-	// since nothing records that one is owed.
-	touched := false
-	for _, r := range results {
-		if r.Status == "success" {
-			touched = true
-			break
-		}
+	// Phase 6: Apply changes, only when this SYNC wrote to Zabbix or an
+	// earlier one left the apply owed: the reconfigure stops and starts the
+	// agent, and is judged by the agent's status after it too. An element
+	// already as wanted, or rejected (Status "blocked"), writes nothing, so a
+	// SYNC of only those does not reconfigure.
+	owed := applyOwedFrom(ctx)
+	if !inUse {
+		owed.unused(applyZabbix)
 	}
-	if touched {
-		if err := client.ReconfigureZabbix(ctx); err != nil {
-			// Every errors entry must have a matching results item, or a
-			// FAILED task's own results array shows nothing wrong.
-			msg := fmt.Sprintf("Zabbix reconfigure: %v", err)
-			errors = append(errors, msg)
-			results = append(results, SyncAPIItemResult{
-				Type:   "zabbix_apply",
-				Name:   "reconfigure",
-				Action: "apply",
-				Status: "error",
-				Error:  msg,
-			})
-		}
+	if apply, owedOnly := owed.due(applyZabbix); !apply {
+		log.Info("Zabbix: nothing written and no apply owed; reconfigure skipped")
+	} else if err := reconfigureRunning(ctx, client.ReconfigureZabbix, client.ZabbixStatus); err != nil {
+		// Every errors entry must have a matching results item, or a
+		// FAILED task's own results array shows nothing wrong.
+		msg := fmt.Sprintf("Zabbix reconfigure: %v", err)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "zabbix_apply",
+			Name:   "reconfigure",
+			Action: "apply",
+			Status: "error",
+			Error:  msg,
+		})
+	} else {
+		owed.applied(applyZabbix)
+		results = append(results, appliedItem("zabbix_apply", "reconfigure", owedOnly))
 	}
 
 	// Aggregate counts for logging
@@ -563,6 +566,13 @@ func executeSyncZabbix(
 	}
 
 	success := len(errors) == 0
+	touched := false
+	for _, r := range results {
+		if r.Status == "success" && r.Type != "zabbix_apply" {
+			touched = true
+			break
+		}
+	}
 	var message string
 	switch {
 	case !touched:

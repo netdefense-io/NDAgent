@@ -240,6 +240,10 @@ func (d *Decommissioner) Run(ctx context.Context, deletedAt, kid string) error {
 	d.logf("=== decommission start %s deleted_at=%s tombstone_kid=%s ===",
 		time.Now().UTC().Format(time.RFC3339), deletedAt, kid)
 
+	// A family applies a service only when it wrote to it or a SYNC left its
+	// apply owed, as in a SYNC (apply_owed.go). The record goes with
+	// /var/db/ndagent.
+	ctx = loadApplyOwed().attach(ctx)
 	for _, family := range d.Families {
 		d.reconcileFamily(ctx, family)
 	}

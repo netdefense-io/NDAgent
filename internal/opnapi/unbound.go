@@ -589,8 +589,11 @@ func (c *Client) DeleteACL(ctx context.Context, uuid string) error {
 
 // ReconfigureUnbound applies pending Unbound configuration changes.
 func (c *Client) ReconfigureUnbound(ctx context.Context) error {
-	_, err := c.doRequest(ctx, "POST", "/unbound/service/reconfigure", struct{}{})
+	respBody, err := c.doRequest(ctx, "POST", "/unbound/service/reconfigure", struct{}{})
 	if err != nil {
+		return fmt.Errorf("reconfigure failed: %w", err)
+	}
+	if err := checkApplyAnswer(respBody, "status"); err != nil {
 		return fmt.Errorf("reconfigure failed: %w", err)
 	}
 

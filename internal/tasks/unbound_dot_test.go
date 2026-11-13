@@ -44,6 +44,9 @@ func newDotDevice(rows ...map[string]interface{}) (*dotDevice, *opnapi.Client) {
 	mux.HandleFunc("/unbound/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
+	mux.HandleFunc("/unbound/service/status", func(w http.ResponseWriter, r *http.Request) {
+		writeServiceStatus(w, "running")
+	})
 	mux.HandleFunc("/unbound/settings/", func(w http.ResponseWriter, r *http.Request) {
 		d.mu.Lock()
 		defer d.mu.Unlock()
@@ -106,6 +109,7 @@ func itemActions(result SyncAPIResult) map[string]string {
 // dot row on the device found as current (updated, not created) and as an
 // orphan (deleted), and a row that changes type keeping its uuid.
 func TestSyncUnbound_DotForwards(t *testing.T) {
+	shortServiceStartWait(t)
 	device, client := newDotDevice(
 		map[string]interface{}{"uuid": dotForwardUUID, "type": "dot", "domain": "secure.example.com", "server": "192.0.2.53", "description": "old [nd-template:dns]"},
 		map[string]interface{}{"uuid": dotOrphanUUID, "type": "dot", "domain": "gone.example.com", "server": "192.0.2.54", "description": "[nd-template:dns]"},
@@ -160,6 +164,7 @@ func TestSyncUnbound_DotForwards(t *testing.T) {
 // TestPullDomainForward_DotRoundTrips: PULL finds a DNS-over-TLS forward by its
 // domain and returns it as dot content that SYNC writes back as dot.
 func TestPullDomainForward_DotRoundTrips(t *testing.T) {
+	shortServiceStartWait(t)
 	device, client := newDotDevice(
 		map[string]interface{}{"uuid": dotForwardUUID, "enabled": "1", "type": "dot", "domain": "secure.example.com", "server": "192.0.2.53", "port": "853", "verify": "dns.example.com", "forward_tcp_upstream": "0", "forward_first": "0", "description": "Secure [nd-template:dns]"},
 	)

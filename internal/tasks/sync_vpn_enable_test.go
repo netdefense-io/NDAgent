@@ -286,7 +286,7 @@ func (m *teardownMock) client(t *testing.T) *opnapi.Client {
 		_ = json.NewEncoder(w).Encode(opnapi.SearchResponse{})
 	})
 	mux.HandleFunc("/firewall/alias/reconfigure", func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(opnapi.APIResult{Result: "ok"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 	})
 	// Honours the `interface` search parameter, matching OPNsense 26.1's
 	// controller: a non-empty filter returns only rules bound to those

@@ -162,8 +162,11 @@ func (c *Client) DeleteAlias(ctx context.Context, uuid string) error {
 // ReconfigureAliases applies pending alias changes.
 func (c *Client) ReconfigureAliases(ctx context.Context) error {
 	// OPNsense API requires an empty JSON object, not nil
-	_, err := c.doRequest(ctx, "POST", "/firewall/alias/reconfigure", struct{}{})
+	respBody, err := c.doRequest(ctx, "POST", "/firewall/alias/reconfigure", struct{}{})
 	if err != nil {
+		return fmt.Errorf("reconfigure failed: %w", err)
+	}
+	if err := checkApplyAnswer(respBody, "status"); err != nil {
 		return fmt.Errorf("reconfigure failed: %w", err)
 	}
 

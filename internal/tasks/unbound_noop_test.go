@@ -1,7 +1,6 @@
 package tasks
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -14,15 +13,29 @@ import (
 
 // unboundStore is an Unbound that keeps what is written and serves it back in
 // its search grids, as OPNsense's UIModelGrid does (each field's stored value).
+// Its passes run with a record that owes nothing at first, as HandleSyncAPI's
+// do; reconfigures counts the applies, applyFails answers them "failed", and
+// status is the service status it reports ("running" when empty).
 type unboundStore struct {
-	mu     sync.Mutex
-	rows   map[string]map[string]map[string]interface{} // kind -> uuid -> row
-	writes []string
-	client *opnapi.Client
+	mu           sync.Mutex
+	rows         map[string]map[string]map[string]interface{} // kind -> uuid -> row
+	writes       []string
+	reconfigures int
+	applyFails   bool
+	status       string
+	client       *opnapi.Client
 }
 
 func newUnboundStore(t *testing.T) *unboundStore {
 	t.Helper()
+	useApplyRecord(t)
+	return newUnboundStoreAt(t)
+}
+
+// newUnboundStoreAt is newUnboundStore with the record left as the test set it.
+func newUnboundStoreAt(t *testing.T) *unboundStore {
+	t.Helper()
+	shortServiceStartWait(t)
 	s := &unboundStore{rows: map[string]map[string]map[string]interface{}{
 		"host": {}, "forward": {}, "alias": {}, "acl": {},
 	}}
@@ -30,7 +43,19 @@ func newUnboundStore(t *testing.T) *unboundStore {
 	set := map[string]string{"setHostOverride": "host", "setHostAlias": "alias", "setAcl": "acl", "setForward": "forward", "setDot": "forward"}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/unbound/service/reconfigure", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.reconfigures++
+		if s.applyFails {
+			_, _ = w.Write([]byte(`{"status":"failed","status_msg":"Service \"unbound\" failed to start."}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	})
+	mux.HandleFunc("/unbound/service/status", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		writeServiceStatus(w, s.status)
 	})
 	mux.HandleFunc("/unbound/settings/", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -123,11 +148,24 @@ func noopUnboundSnippets(t *testing.T, aclNetworks string) unboundSnippets {
 
 func syncUnbound(t *testing.T, s *unboundStore, in unboundSnippets) SyncAPIResult {
 	t.Helper()
-	result := executeSyncUnbound(context.Background(), s.client, in.hosts, in.forwards, in.aliases, in.acls)
+	result := runUnbound(s, in)
 	if !result.Success {
 		t.Fatalf("sync failed: %+v", result.Errors)
 	}
 	return result
+}
+
+// runUnbound is one SYNC's Unbound pass, whatever its outcome.
+func runUnbound(s *unboundStore, in unboundSnippets) SyncAPIResult {
+	return executeSyncUnbound(syncCtx(), s.client, in.hosts, in.forwards, in.aliases, in.acls)
+}
+
+func (s *unboundStore) takeReconfigures() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := s.reconfigures
+	s.reconfigures = 0
+	return n
 }
 
 // An Unbound row that already holds what the sync would write is not written
@@ -166,6 +204,91 @@ func TestSyncUnbound_WhatIsAlreadyOnTheDeviceIsNotWritten(t *testing.T) {
 	syncUnbound(t, s, changed)
 	if got := s.takeWrites(); len(got) != 1 || got[0] != "setAcl "+noopACLUUID {
 		t.Errorf("an ACL whose description the snippet leaves empty wrote %v, want the ACL: an empty value sent is a value", got)
+	}
+}
+
+// Unbound is reconfigured (a stop and a start) only by a SYNC that wrote to it,
+// or after one whose reconfigure failed: a SYNC with nothing new restarts
+// nothing, and the apply a failed one owes is retried once by the next
+// (NDAgent-go#248).
+func TestSyncUnbound_ReconfiguresOnlyWhatItWroteOrStillOwes(t *testing.T) {
+	s := newUnboundStore(t)
+	snippets := noopUnboundSnippets(t, `["192.168.1.0/24","192.168.2.0/24"]`)
+
+	first := syncUnbound(t, s, snippets)
+	if n := s.takeReconfigures(); n != 1 {
+		t.Errorf("a SYNC that wrote reconfigured %d times, want once", n)
+	}
+	if item := applyItemOf(first.Results, "unbound_apply"); item == nil || item.Status != "success" || item.Code != "" {
+		t.Errorf("apply item = %+v, want a success without a code", item)
+	}
+
+	second := syncUnbound(t, s, snippets)
+	if n := s.takeReconfigures(); n != 0 {
+		t.Errorf("a SYNC with nothing new reconfigured %d times", n)
+	}
+	if item := applyItemOf(second.Results, "unbound_apply"); item != nil {
+		t.Errorf("a skipped apply was reported: %+v", item)
+	}
+
+	changed := noopUnboundSnippets(t, `["192.168.1.0/24"]`)
+	s.applyFails = true
+	failed := runUnbound(s, changed)
+	if failed.Success || s.takeReconfigures() != 1 {
+		t.Fatalf("a failed reconfigure: success=%v errors=%v", failed.Success, failed.Errors)
+	}
+	if item := applyItemOf(failed.Results, "unbound_apply"); item == nil || item.Status != "error" {
+		t.Errorf("apply item = %+v, want an error", item)
+	}
+	if !recordOwes(t)[applyUnbound] {
+		t.Fatal("a failed reconfigure left nothing owed")
+	}
+
+	s.takeWrites()
+	s.applyFails = false
+	retried := syncUnbound(t, s, changed)
+	if got := s.takeWrites(); len(got) != 0 {
+		t.Errorf("the retry wrote %v; the failed SYNC had already written the ACL", got)
+	}
+	if n := s.takeReconfigures(); n != 1 {
+		t.Errorf("the SYNC after a failed reconfigure reconfigured %d times, want once", n)
+	}
+	if item := applyItemOf(retried.Results, "unbound_apply"); item == nil || item.Code != codeApplyOwed {
+		t.Errorf("apply item = %+v, want code %s", item, codeApplyOwed)
+	}
+	syncUnbound(t, s, changed)
+	if s.takeWrites() != nil || s.takeReconfigures() != 0 {
+		t.Error("the SYNC after the retry wrote or reconfigured")
+	}
+	if recordOwes(t)[applyUnbound] {
+		t.Error("the record still owes Unbound after the retry")
+	}
+}
+
+// The apply an interrupted SYNC owes (its rows written, the agent stopped
+// before the reconfigure) is made by the next SYNC even though it finds
+// nothing to write, and is reported as owed.
+func TestSyncUnbound_AnApplyAnInterruptedSYNCOwesIsMadeByTheNext(t *testing.T) {
+	s := newUnboundStore(t)
+	snippets := noopUnboundSnippets(t, `["192.168.1.0/24"]`)
+	syncUnbound(t, s, snippets)
+	s.takeWrites()
+	s.takeReconfigures()
+	useApplyRecord(t, applyUnbound)
+
+	result := syncUnbound(t, s, snippets)
+
+	if got := s.takeWrites(); len(got) != 0 {
+		t.Errorf("wrote %v, want nothing", got)
+	}
+	if n := s.takeReconfigures(); n != 1 {
+		t.Errorf("reconfigured %d times, want once", n)
+	}
+	if item := applyItemOf(result.Results, "unbound_apply"); item == nil || item.Code != codeApplyOwed {
+		t.Errorf("apply item = %+v, want code %s", item, codeApplyOwed)
+	}
+	if recordOwes(t)[applyUnbound] {
+		t.Error("the record still owes Unbound")
 	}
 }
 

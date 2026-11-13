@@ -354,8 +354,11 @@ func (c *Client) DeleteClient(ctx context.Context, uuid string) error {
 
 // ReconfigureWireGuard applies pending WireGuard changes.
 func (c *Client) ReconfigureWireGuard(ctx context.Context) error {
-	_, err := c.doRequest(ctx, "POST", "/wireguard/service/reconfigure", struct{}{})
+	respBody, err := c.doRequest(ctx, "POST", "/wireguard/service/reconfigure", struct{}{})
 	if err != nil {
+		return fmt.Errorf("wireguard reconfigure failed: %w", err)
+	}
+	if err := checkApplyAnswer(respBody, "result"); err != nil {
 		return fmt.Errorf("wireguard reconfigure failed: %w", err)
 	}
 

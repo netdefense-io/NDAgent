@@ -79,6 +79,7 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 			// the whole VPN sync as a silent no-op — same behavior the
 			// Zabbix executor has when os-zabbix-agent is absent.
 			log.Debug("WireGuard plugin not installed on this device; skipping VPN sync")
+			applyOwedFrom(ctx).gone(applyWireGuard)
 			return SyncAPIResult{
 				Success: true,
 				Message: "No changes applied",
@@ -143,6 +144,9 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		"managed_servers", len(currentServerUUIDs),
 		"managed_clients", len(currentClientUUIDs),
 	)
+	if len(managedServers) == 0 && len(managedClients) == 0 && len(networks) == 0 {
+		applyOwedFrom(ctx).unused(applyWireGuard)
+	}
 
 	// Phase 1.5: Enable the WireGuard master switch when this device is
 	// meant to carry VPN configuration.
@@ -461,23 +465,30 @@ func executeSyncVPN(ctx context.Context, client *opnapi.Client, networks []VPNNe
 		log.Infow("Deleted orphan WireGuard server", "name", name, "uuid", uuid)
 	}
 
-	// Phase 6: Reconfigure WireGuard service
-	log.Info("Phase 6: Applying WireGuard configuration")
-
-	if err := client.ReconfigureWireGuard(ctx); err != nil {
-		errMsg := fmt.Sprintf("Failed to reconfigure WireGuard: %v", err)
-		log.Errorw(errMsg)
-		result.Errors = append(result.Errors, errMsg)
-		result.Results = append(result.Results, SyncAPIItemResult{
-			Type:   "wg_apply",
-			Name:   "reconfigure",
-			Action: "apply",
-			Status: "error",
-			Error:  errMsg,
-		})
-		result.Success = false
-		result.Message = errMsg
-		return result
+	// Phase 6: Reconfigure WireGuard service, only when this SYNC wrote to it
+	// or an earlier one left the apply owed.
+	owed := applyOwedFrom(ctx)
+	if apply, owedOnly := owed.due(applyWireGuard); !apply {
+		log.Info("Phase 6: nothing written and no apply owed; WireGuard reconfigure skipped")
+	} else {
+		log.Info("Phase 6: Applying WireGuard configuration")
+		if err := client.ReconfigureWireGuard(ctx); err != nil {
+			errMsg := fmt.Sprintf("Failed to reconfigure WireGuard: %v", err)
+			log.Errorw(errMsg)
+			result.Errors = append(result.Errors, errMsg)
+			result.Results = append(result.Results, SyncAPIItemResult{
+				Type:   "wg_apply",
+				Name:   "reconfigure",
+				Action: "apply",
+				Status: "error",
+				Error:  errMsg,
+			})
+			result.Success = false
+			result.Message = errMsg
+			return result
+		}
+		owed.applied(applyWireGuard)
+		result.Results = append(result.Results, appliedItem("wg_apply", "reconfigure", owedOnly))
 	}
 
 	log.Info("VPN sync completed successfully")
