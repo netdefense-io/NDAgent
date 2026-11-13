@@ -2,6 +2,7 @@
 package config
 
 import (
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
@@ -58,20 +59,34 @@ type Config struct {
 	ServerHost string `mapstructure:"server_host"`
 	ServerPort int    `mapstructure:"server_port"`
 
-	// SSL settings
-	SSLVerify bool `mapstructure:"ssl_verify"`
+	// TLSMode is what the control-plane connections verify the server
+	// against: system (the default), custom_ca or spki_pinned (tlsmode.go).
+	TLSMode TLSMode `mapstructure:"tls_mode"`
 
-	// TOFUSSLVerify governs TLS verification for the first-connect NDM
-	// JWKS fetch (TOFU key pinning) independently of SSLVerify. It
-	// defaults to true even when ssl_verify=false is set for dev/lab
-	// convenience, so a MITM can't plant a rogue key at the one moment
-	// nothing is pinned yet.
-	TOFUSSLVerify bool `mapstructure:"tofu_ssl_verify"`
+	// TLSCAFile is the PEM file of the CAs tls_mode=custom_ca trusts, alone.
+	TLSCAFile string `mapstructure:"tls_ca_file"`
+
+	// TLSSPKIHashes lists the server keys tls_mode=spki_pinned trusts.
+	TLSSPKIHashes string `mapstructure:"tls_spki_hashes"`
+
+	// TLSError is why the trust material of TLSMode cannot be used; while it
+	// is set every control-plane connection is refused. TLSCAs describes the
+	// CAs TLSCAFile loaded. Config loading happens before logging is
+	// initialized, so main logs them.
+	TLSError error
+	TLSCAs   []ExtraCA
+
+	// ignoredVerify lists the settings the file sets to false of those that
+	// once turned verification off (ssl_verify, tofu_ssl_verify,
+	// pathfinder_tls_verify). They no longer do, and the Config has no field
+	// for them: they are read only so the startup log and the task results
+	// can say they are ignored (IgnoredVerifyNotice).
+	ignoredVerify []string
 
 	// ExtraCAFile is a local PEM file of CAs the control-plane connections
-	// trust besides the built-in roots, for sites behind a TLS-inspection
-	// proxy (see roots.go). No sync writes it: it is set on the device, by
-	// root or through an administrator's session to it.
+	// trust besides the built-in roots under tls_mode=system, for sites
+	// behind a TLS-inspection proxy (see roots.go). No sync writes it: it is
+	// set on the device, by root or through an administrator's session to it.
 	ExtraCAFile string `mapstructure:"extra_ca_file"`
 
 	// ExtraCAs and ExtraCAError report what Load made of ExtraCAFile. Config
@@ -79,9 +94,13 @@ type Config struct {
 	ExtraCAs     []ExtraCA
 	ExtraCAError error
 
-	// controlPlaneRoots is the built-in roots plus ExtraCAFile's CAs, nil
-	// when there are none; see ControlPlaneRoots.
+	// controlPlaneRoots is the roots of tls_mode system (the built-in roots
+	// plus ExtraCAFile's CAs, nil when there are none) or custom_ca (the CAs
+	// of TLSCAFile); see ControlPlaneRoots. tlsPins are the keys of
+	// spki_pinned. tlsLoaded says LoadControlPlaneTrust ran.
 	controlPlaneRoots *x509.CertPool
+	tlsPins           [][sha256.Size]byte
+	tlsLoaded         bool
 
 	// File paths
 	ConfigXMLPath string `mapstructure:"config_xml_path"`
@@ -123,9 +142,8 @@ type Config struct {
 	OPNsenseAPIURL string `mapstructure:"opnsense_api_url"`
 
 	// Pathfinder settings (for CONNECT task)
-	PathfinderHost      string `mapstructure:"pathfinder_host"`
-	PathfinderTLSVerify bool   `mapstructure:"pathfinder_tls_verify"`
-	PathfinderShell     string `mapstructure:"pathfinder_shell"`
+	PathfinderHost  string `mapstructure:"pathfinder_host"`
+	PathfinderShell string `mapstructure:"pathfinder_shell"`
 
 	// RemoteAccessPolicy is the device-local ceiling on CONNECT sessions:
 	// "full" (default), "readonly", or "disabled". See the
@@ -193,8 +211,7 @@ func Load(configPath string) (*Config, error) {
 	// Set defaults
 	v.SetDefault("server_host", "localhost")
 	v.SetDefault("server_port", 8443)
-	v.SetDefault("ssl_verify", true)
-	v.SetDefault("tofu_ssl_verify", true)
+	v.SetDefault("tls_mode", string(TLSModeSystem))
 	v.SetDefault("config_xml_path", "/conf/config.xml")
 	v.SetDefault("pid_file", "/var/run/ndagent.pid")
 	v.SetDefault("log_level", "INFO")
@@ -203,7 +220,6 @@ func Load(configPath string) (*Config, error) {
 	v.SetDefault("enabled", false)
 	v.SetDefault("opnsense_api_url", "https://127.0.0.1/api")
 	v.SetDefault("pathfinder_host", "https://pathfinder.netdefense.io")
-	v.SetDefault("pathfinder_tls_verify", true)
 	v.SetDefault("pathfinder_shell", "/usr/local/sbin/opnsense-shell")
 	v.SetDefault("webadmin_user", "root")
 	v.SetDefault("remote_access_policy", string(RemoteAccessFull))
@@ -231,6 +247,14 @@ func Load(configPath string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
+	// Anything the file sets but true is off, as an unreadable value once
+	// failed the start: the plugin writes only true and false.
+	for _, key := range ignoredVerifyKeys {
+		if value := v.Get(key); value != nil && value != true {
+			cfg.ignoredVerify = append(cfg.ignoredVerify, key)
+		}
+	}
+
 	// First-run keypair generation lives in lifecycle (state.LoadOrEnsureDevicePrivkey)
 	// so the seed sits at /var/db/ndagent/device.key — outside configctl's reach,
 	// which would otherwise wipe the conf line on every GUI Save. cfg.DevicePrivKey
@@ -241,7 +265,7 @@ func Load(configPath string) (*Config, error) {
 		return nil, err
 	}
 
-	cfg.loadControlPlaneRoots()
+	cfg.LoadControlPlaneTrust()
 
 	// Detect webadmin port/protocol from OPNsense config.xml
 	wg := ReadWebGUIConfig(cfg.ConfigXMLPath)
@@ -404,49 +428,22 @@ func (c *Config) computeURIs() {
 }
 
 // GetTLSConfig returns the TLS configuration of registration and the broker
-// socket, based on the ssl_verify setting. Verification is against
-// ControlPlaneRoots, never the system bundle.
+// socket, under tls_mode. ssl_verify=false no longer turns verification off.
 func (c *Config) GetTLSConfig() *tls.Config {
-	if c.SSLVerify {
-		return c.controlPlaneTLSConfig()
-	}
-
-	// Warning: Insecure - skips certificate verification
-	return &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-	}
+	return c.controlPlaneTLSConfig()
 }
 
-// GetTOFUTLSConfig returns a TLS configuration for the first-connect NDM
-// JWKS fetch (TOFU key pinning). It honors TOFUSSLVerify independently of
-// SSLVerify — the global toggle is not permitted to weaken the one fetch
-// where nothing is pinned yet, so ssl_verify=false alone never disables
-// verification here. Verification is against ControlPlaneRoots.
+// GetTOFUTLSConfig returns the TLS configuration of the first-connect NDM
+// JWKS fetch (TOFU key pinning), under tls_mode, the broker's: the fetch goes
+// to the same server. tofu_ssl_verify=false no longer turns verification off.
 func (c *Config) GetTOFUTLSConfig() *tls.Config {
-	if c.TOFUSSLVerify {
-		return c.controlPlaneTLSConfig()
-	}
-
-	// Warning: Insecure - skips certificate verification
-	return &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-	}
+	return c.controlPlaneTLSConfig()
 }
 
-// GetPathfinderTLSConfig returns a TLS configuration for Pathfinder
-// connections. Verification is against ControlPlaneRoots.
+// GetPathfinderTLSConfig returns the TLS configuration of the relay, under
+// tls_mode. pathfinder_tls_verify=false no longer turns verification off.
 func (c *Config) GetPathfinderTLSConfig() *tls.Config {
-	if c.PathfinderTLSVerify {
-		return c.controlPlaneTLSConfig()
-	}
-
-	// Warning: Insecure - skips certificate verification
-	return &tls.Config{
-		InsecureSkipVerify: true,
-		MinVersion:         tls.VersionTLS12,
-	}
+	return c.controlPlaneTLSConfig()
 }
 
 // IsEnabled returns whether the agent is enabled.

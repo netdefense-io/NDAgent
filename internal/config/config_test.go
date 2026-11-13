@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -53,8 +54,8 @@ test_mode=false
 	if cfg.ServerPort != 8443 {
 		t.Errorf("ServerPort = %d, want %d", cfg.ServerPort, 8443)
 	}
-	if !cfg.SSLVerify {
-		t.Error("Expected ssl_verify=true")
+	if len(cfg.IgnoredVerifyKeys()) != 0 {
+		t.Errorf("ssl_verify=true is reported as ignored: %v", cfg.IgnoredVerifyKeys())
 	}
 	if cfg.ConfigXMLPath != "/conf/config.xml" {
 		t.Errorf("ConfigXMLPath = %q, want %q", cfg.ConfigXMLPath, "/conf/config.xml")
@@ -155,11 +156,11 @@ server_host=localhost
 	if cfg.ServerPort != 8443 {
 		t.Errorf("ServerPort default = %d, want %d", cfg.ServerPort, 8443)
 	}
-	if !cfg.SSLVerify {
-		t.Error("SSLVerify default should be true")
+	if cfg.TLSMode != TLSModeSystem {
+		t.Errorf("TLSMode default = %q, want system", cfg.TLSMode)
 	}
-	if !cfg.TOFUSSLVerify {
-		t.Error("TOFUSSLVerify default should be true")
+	if len(cfg.IgnoredVerifyKeys()) != 0 {
+		t.Errorf("an absent ssl_verify is reported as ignored: %v", cfg.IgnoredVerifyKeys())
 	}
 	if cfg.ConfigXMLPath != "/conf/config.xml" {
 		t.Errorf("ConfigXMLPath default = %q, want %q", cfg.ConfigXMLPath, "/conf/config.xml")
@@ -245,47 +246,26 @@ reject_dangerous_snippets=false
 	}
 }
 
-// TestLoad_TOFUSSLVerifyDefaultsTrueEvenWhenSSLVerifyDisabled guards against
-// the TOFU JWKS fetch silently inheriting a dev/lab ssl_verify=false — the
-// two toggles must be independent, with TOFU secure by default.
-func TestLoad_TOFUSSLVerifyDefaultsTrueEvenWhenSSLVerifyDisabled(t *testing.T) {
-	content := `
-token=test-token
-device_uuid=test-device
-server_host=localhost
-ssl_verify=false
-`
-	configPath := createTempConfigFile(t, content)
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.SSLVerify {
-		t.Fatal("expected ssl_verify=false to be honored")
-	}
-	if !cfg.TOFUSSLVerify {
-		t.Error("TOFUSSLVerify should default to true regardless of ssl_verify=false")
-	}
-}
-
-// TestLoad_TOFUSSLVerifyExplicitlyDisabled confirms the escape hatch still
-// works when an operator explicitly opts out.
-func TestLoad_TOFUSSLVerifyExplicitlyDisabled(t *testing.T) {
-	content := `
-token=test-token
-device_uuid=test-device
-server_host=localhost
-tofu_ssl_verify=false
-`
-	configPath := createTempConfigFile(t, content)
-	cfg, err := Load(configPath)
-	if err != nil {
-		t.Fatalf("Load() error = %v", err)
-	}
-
-	if cfg.TOFUSSLVerify {
-		t.Error("expected tofu_ssl_verify=false to be honored when explicitly set")
+// The old verification toggles are read only to be reported: a key the file
+// sets to anything but true is named, on its own; one set to true, or absent,
+// is not.
+func TestLoad_OldVerifyTogglesAreReadToBeReported(t *testing.T) {
+	for _, c := range []struct{ lines, want string }{
+		{"ssl_verify=false\n", "ssl_verify"},
+		{"tofu_ssl_verify=false\n", "tofu_ssl_verify"},
+		{"pathfinder_tls_verify=0\nssl_verify=true\n", "pathfinder_tls_verify"},
+		{"pathfinder_tls_verify=false\nssl_verify=no\n", "ssl_verify,pathfinder_tls_verify"},
+		{"ssl_verify=true\ntofu_ssl_verify=true\npathfinder_tls_verify=true\n", ""},
+		{"ssl_verify=off\ntofu_ssl_verify=yes\n", "ssl_verify"},
+		{"", ""},
+	} {
+		cfg, err := Load(createTempConfigFile(t, "token=t\ndevice_uuid=d\n"+c.lines))
+		if err != nil {
+			t.Fatalf("%q: Load() error = %v", c.lines, err)
+		}
+		if got := strings.Join(cfg.IgnoredVerifyKeys(), ","); got != c.want {
+			t.Errorf("%q: IgnoredVerifyKeys = %q, want %q", c.lines, got, c.want)
+		}
 	}
 }
 
@@ -477,45 +457,6 @@ server_host=localhost
 	}
 	if cfg.DeviceUUID != "test-device" {
 		t.Errorf("DeviceUUID = %q, want %q", cfg.DeviceUUID, "test-device")
-	}
-}
-
-func TestGetTLSConfig_SSLVerifyTrue(t *testing.T) {
-	cfg := &Config{SSLVerify: true}
-	tlsConfig := cfg.GetTLSConfig()
-
-	if tlsConfig.InsecureSkipVerify {
-		t.Error("InsecureSkipVerify should be false when ssl_verify=true")
-	}
-}
-
-func TestGetTLSConfig_SSLVerifyFalse(t *testing.T) {
-	cfg := &Config{SSLVerify: false}
-	tlsConfig := cfg.GetTLSConfig()
-
-	if !tlsConfig.InsecureSkipVerify {
-		t.Error("InsecureSkipVerify should be true when ssl_verify=false")
-	}
-}
-
-// TestGetTOFUTLSConfig_VerifiesEvenWhenSSLVerifyFalse is the core
-// revert guard: the TOFU JWKS fetch must stay verifying as long as
-// TOFUSSLVerify is true, no matter what SSLVerify is set to.
-func TestGetTOFUTLSConfig_VerifiesEvenWhenSSLVerifyFalse(t *testing.T) {
-	cfg := &Config{SSLVerify: false, TOFUSSLVerify: true}
-	tlsConfig := cfg.GetTOFUTLSConfig()
-
-	if tlsConfig.InsecureSkipVerify {
-		t.Error("GetTOFUTLSConfig InsecureSkipVerify should be false when TOFUSSLVerify=true, regardless of SSLVerify")
-	}
-}
-
-func TestGetTOFUTLSConfig_SkipsVerifyOnlyWhenExplicitlyDisabled(t *testing.T) {
-	cfg := &Config{SSLVerify: true, TOFUSSLVerify: false}
-	tlsConfig := cfg.GetTOFUTLSConfig()
-
-	if !tlsConfig.InsecureSkipVerify {
-		t.Error("GetTOFUTLSConfig InsecureSkipVerify should be true when TOFUSSLVerify=false")
 	}
 }
 

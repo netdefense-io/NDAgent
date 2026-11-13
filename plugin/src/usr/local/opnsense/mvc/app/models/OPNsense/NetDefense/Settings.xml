@@ -22,16 +22,68 @@
             <Default>https://hub.netdefense.io</Default>
             <Required>Y</Required>
         </serverAddress>
+        <tlsMode type="OptionField">
+            <!-- What the agent's connections to NetDefense (registration and
+                 the broker socket, the trust-key fetch, the relay) verify the
+                 server against:
+
+                 system      - the root set built into the agent plus Extra CA
+                               File, never the firewall's own certificate
+                               store, which NetDefense can sync CAs into.
+                 custom_ca   - only the CAs of CA File (tlsCaFile), for a
+                               NetDefense server whose certificate a private
+                               CA issued, or a self-signed one.
+                 spki_pinned - only the server keys SPKI Hashes
+                               (tlsSpkiHashes) lists.
+
+                 The mode covers every one of those connections: a relay
+                 (pathfinderHost) on another host needs its CA in the CA File,
+                 or its key in SPKI Hashes, too. Trust material a mode cannot
+                 use refuses every connection to NetDefense; nothing turns
+                 verification off. -->
+            <Default>system</Default>
+            <Required>Y</Required>
+            <OptionValues>
+                <system>System (built-in roots plus Extra CA File)</system>
+                <custom_ca>Custom CA (only the CAs of CA File)</custom_ca>
+                <spki_pinned>SPKI pinned (only the keys of SPKI Hashes)</spki_pinned>
+            </OptionValues>
+        </tlsMode>
+        <tlsCaFile type="TextField">
+            <!-- The PEM file of the CAs TLS Mode custom_ca trusts, alone. The
+                 agent holds it to Extra CA File's rules: a regular file root
+                 owns, with one link and no group or other write permission,
+                 named without a symbolic link, outside the system certificate
+                 store, in directories only root can write, holding nothing
+                 but CERTIFICATE blocks. A file it refuses, or none, refuses
+                 every connection to NetDefense. -->
+            <mask>/^\/[A-Za-z0-9._+@,=\/-]{1,254}$/</mask>
+            <ValidationMessage>CA File must be an absolute path (letters, digits and . _ + @ , = - /)</ValidationMessage>
+            <Required>N</Required>
+        </tlsCaFile>
+        <tlsSpkiHashes type="TextField">
+            <!-- The server keys TLS Mode spki_pinned trusts: up to 16 entries,
+                 separated by commas or spaces, each sha256/ and the base64 of the
+                 SHA-256 of the key's DER SubjectPublicKeyInfo. Only the
+                 server's own key counts, whatever signed its certificate, so
+                 it suits a key the operator controls: a public CA's
+                 certificate usually comes with a new key at each renewal. -->
+            <mask>/^sha256\/[A-Za-z0-9+\/]{43}=([ ,]+sha256\/[A-Za-z0-9+\/]{43}=){0,15}$/</mask>
+            <ValidationMessage>SPKI Hashes must be up to 16 entries like sha256/ followed by 44 characters of base64, separated by commas or spaces</ValidationMessage>
+            <Required>N</Required>
+        </tlsSpkiHashes>
         <sslVerify type="BooleanField">
+            <!-- sslVerify, tofuSslVerify and pathfinderTlsVerify once turned
+                 verification off for registration and the broker socket, the
+                 trust-key fetch and the relay. Since agent 1.31.0 they do
+                 not: the fields stay so a value that is off is still
+                 rendered, and the agent and the settings page name it as
+                 ignored. -->
             <Default>1</Default>
             <Required>Y</Required>
         </sslVerify>
         <tofuSslVerify type="BooleanField">
-            <!-- Governs TLS verification for the first-connect NDM JWKS
-                 fetch (TOFU key pinning), independently of sslVerify.
-                 Stays on even when sslVerify is disabled for lab/dev use,
-                 so that toggle can't be used to plant a rogue key at the
-                 one moment nothing is pinned yet. -->
+            <!-- No longer honoured; see sslVerify. -->
             <Default>1</Default>
             <Required>Y</Required>
         </tofuSslVerify>
@@ -52,7 +104,7 @@
                  system certificate store, in directories only root can
                  write, holding nothing but CERTIFICATE blocks. Otherwise it
                  trusts its built-in roots only. Empty (the default) adds
-                 nothing. -->
+                 nothing. Read under TLS Mode system only. -->
             <mask>/^\/[A-Za-z0-9._+@,=\/-]{1,254}$/</mask>
             <ValidationMessage>Extra CA File must be an absolute path (letters, digits and . _ + @ , = - /)</ValidationMessage>
             <Required>N</Required>
@@ -72,6 +124,7 @@
             <Required>Y</Required>
         </pathfinderHost>
         <pathfinderTlsVerify type="BooleanField">
+            <!-- No longer honoured; see sslVerify. -->
             <Default>1</Default>
             <Required>Y</Required>
         </pathfinderTlsVerify>

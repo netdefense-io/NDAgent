@@ -48,6 +48,9 @@ type snapshot struct {
 	// auth; empty unless it reported a mismatch.
 	KeyState   string `json:"key_state,omitempty"`
 	KeyMessage string `json:"key_message,omitempty"`
+	// TLSError is why the trust material of tls_mode cannot be used, which
+	// refuses every connection to NetDefense; empty while it can.
+	TLSError string `json:"tls_error,omitempty"`
 }
 
 // Writer serializes status snapshots to a file. Safe for concurrent use.
@@ -113,6 +116,19 @@ func (w *Writer) SetKeyState(state, message string) error {
 	defer w.mu.Unlock()
 	w.snap.KeyState = state
 	w.snap.KeyMessage = message
+	w.snap.UpdatedAt = time.Now().UTC()
+	return w.persist()
+}
+
+// SetTLSError records why the trust material of tls_mode cannot be used. An
+// empty reason clears it.
+func (w *Writer) SetTLSError(reason string) error {
+	if w == nil {
+		return nil
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.snap.TLSError = reason
 	w.snap.UpdatedAt = time.Now().UTC()
 	return w.persist()
 }

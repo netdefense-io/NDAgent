@@ -140,6 +140,48 @@
         });
     }
 
+    // Only the rows of the chosen TLS Mode are shown.
+    function updateTLSModeRows() {
+        var mode = $('#settings\\.tlsMode').val() || 'system';
+        $('#tlsCaFileRow').toggle(mode === 'custom_ca');
+        $('#tlsSpkiHashesRow').toggle(mode === 'spki_pinned');
+        $('#extraCaFileRow').toggle(mode === 'system');
+    }
+
+    // The settings that once turned verification off, as they are saved. One
+    // that is off is named, as the agent names it in its log and its task
+    // results, and its row is shown so it can be turned back on.
+    var ignoredVerifySettings = [
+        ['sslVerify', 'SSL Verification', 'ssl_verify'],
+        ['tofuSslVerify', 'TOFU Key Fetch SSL Verification', 'tofu_ssl_verify'],
+        ['pathfinderTlsVerify', 'Pathfinder SSL Verification', 'pathfinder_tls_verify']
+    ];
+
+    // keepRow leaves the row shown while the operator ticks its boxes back on;
+    // it hides once every box is on and the settings are applied or loaded.
+    function updateIgnoredVerifyNotice(keepRow) {
+        var off = [];
+        $.each(ignoredVerifySettings, function(i, s) {
+            if (!$('#settings\\.' + s[0]).is(':checked')) {
+                off.push(s[1] + ' (' + s[2] + '=false)');
+            }
+        });
+        var el = $('#statusIgnoredVerify');
+        if (off.length === 0) {
+            el.hide().empty();
+            if (keepRow !== true) {
+                $('#ignoredVerifyRow').hide();
+            }
+            return;
+        }
+        var names = off.length === 1 ? off[0] : off.slice(0, -1).join(', ') + ' and ' + off[off.length - 1];
+        var mode = $('#settings\\.tlsMode').val() || 'system';
+        el.text(names + (off.length === 1 ? ' is' : ' are') + ' off in these settings and no longer honoured: ' +
+            'the connections to NetDefense are verified under TLS Mode ' + mode + '. ' +
+            'For a NetDefense server with a private CA, set TLS Mode to Custom CA (Advanced Settings, Control Plane).').show();
+        $('#ignoredVerifyRow').show();
+    }
+
     // statusCell is an icon and a label. The label is always text, never
     // markup: it carries values from the agent's status file, and an error
     // can quote what a peer sent (a certificate's names).
@@ -164,6 +206,14 @@
                     keyEl.text('Device key mismatch - ' + (data.key_message || 'rebind required')).show();
                 } else {
                     keyEl.hide().empty();
+                }
+
+                var tlsEl = $('#statusTLSError');
+                if (data.tls_error && !data.stale) {
+                    tlsEl.text('Every connection to NetDefense is refused: TLS Mode cannot be used - ' + data.tls_error +
+                        '. Fix it in Advanced Settings, Control Plane, and apply.').show();
+                } else {
+                    tlsEl.hide().empty();
                 }
 
                 if (data.version && data.version !== 'unknown') {
@@ -200,6 +250,7 @@
             },
             error: function() {
                 $('#statusKeyMismatch').hide().empty();
+                $('#statusTLSError').hide().empty();
                 $('#statusAgentVersion').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
                 $('#statusServerConnection').html('<span class="text-danger"><i class="fa fa-question-circle"></i> Unknown</span>');
             }
@@ -260,6 +311,8 @@
         // Load form data (pathfinderShell is handled separately)
         mapDataToFormUI({'frmSettings':"/api/netdefense/settings/get"}).done(function(data) {
             $('.selectpicker').selectpicker('refresh');
+            updateTLSModeRows();
+            updateIgnoredVerifyNotice();
 
             // Auto-generate Device ID UUID if field is empty
             var deviceIdField = $('#settings\\.deviceId');
@@ -267,6 +320,14 @@
                 var newUUID = generateUUID();
                 deviceIdField.val(newUUID);
             }
+        });
+
+        $('#settings\\.tlsMode').on('change', function() {
+            updateTLSModeRows();
+            updateIgnoredVerifyNotice(true);
+        });
+        $('#settings\\.sslVerify, #settings\\.tofuSslVerify, #settings\\.pathfinderTlsVerify').on('change', function() {
+            updateIgnoredVerifyNotice(true);
         });
 
         // Load shells dropdown separately (not part of standard form binding)
@@ -414,6 +475,20 @@
                 $('#settings\\.deviceId').closest('td').removeClass('has-error');
             }
 
+            var tlsMode = $('#settings\\.tlsMode').val();
+            if (tlsMode === 'custom_ca' && !$('#settings\\.tlsCaFile').val().trim()) {
+                errors.push('TLS Mode Custom CA needs a CA File');
+                $('#tlsCaFileRow').addClass('has-error');
+            } else {
+                $('#tlsCaFileRow').removeClass('has-error');
+            }
+            if (tlsMode === 'spki_pinned' && !$('#settings\\.tlsSpkiHashes').val().trim()) {
+                errors.push('TLS Mode SPKI pinned needs SPKI Hashes');
+                $('#tlsSpkiHashesRow').addClass('has-error');
+            } else {
+                $('#tlsSpkiHashesRow').removeClass('has-error');
+            }
+
             if (errors.length > 0) {
                 BootstrapDialog.show({
                     type: BootstrapDialog.TYPE_WARNING,
@@ -436,6 +511,7 @@
                     url: '/api/netdefense/service/reconfigure',
                     type: 'POST',
                     success: function(data) {
+                        updateIgnoredVerifyNotice();
                         // Refresh status displays after applying
                         setTimeout(function() {
                             checkServiceStatus();
@@ -497,6 +573,8 @@
         </tbody>
     </table>
     <div id="statusKeyMismatch" class="alert alert-danger" style="display:none; margin: 10px;"></div>
+    <div id="statusTLSError" class="alert alert-danger" style="display:none; margin: 10px;"></div>
+    <div id="statusIgnoredVerify" class="alert alert-warning" style="display:none; margin: 10px;"></div>
 </div>
 
 <!-- Step 1: API Configuration -->
@@ -616,28 +694,63 @@
                         </td>
                     </tr>
                     <tr>
-                        <td><strong>{{ lang._('SSL Verification') }}</strong></td>
+                        <td><strong>{{ lang._('TLS Mode') }}</strong></td>
                         <td>
-                            <label class="checkbox-inline">
-                                <input type="checkbox" id="settings.sslVerify" name="settings.sslVerify" checked> {{ lang._('Enable SSL certificate verification') }}
-                            </label>
-                            <br>
-                            <label class="checkbox-inline">
-                                <input type="checkbox" id="settings.tofuSslVerify" name="settings.tofuSslVerify" checked> {{ lang._('TOFU Key Fetch SSL Verification') }}
-                            </label>
+                            <select class="form-control selectpicker" id="settings.tlsMode" name="settings.tlsMode">
+                                <option value="system" selected>{{ lang._('System (built-in roots plus Extra CA File)') }}</option>
+                                <option value="custom_ca">{{ lang._('Custom CA (only the CAs of CA File)') }}</option>
+                                <option value="spki_pinned">{{ lang._('SPKI pinned (only the keys of SPKI Hashes)') }}</option>
+                            </select>
                             <div class="help-block">
-                                {{ lang._('The second box covers the one-time trust key fetch and stays on independently, so disabling the first never exposes key pinning.') }}
-                                <a href="https://netdefense.io/docs/ndagent/configuration/#tofu-key-fetch-ssl-verification" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                                {{ lang._('What the connections to NetDefense, the relay of remote sessions included, verify the server against. System trusts the roots built into the agent, never the certificate store of the firewall. Choose Custom CA for a NetDefense server with a private CA. Trust material that cannot be used refuses every connection; nothing turns verification off.') }}
+                                <a href="https://netdefense.io/docs/ndagent/configuration/#tls-mode" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
                             </div>
                         </td>
                     </tr>
-                    <tr>
+                    <tr id="tlsCaFileRow">
+                        <td><strong>{{ lang._('CA File') }}</strong></td>
+                        <td>
+                            <input type="text" class="form-control" id="settings.tlsCaFile" name="settings.tlsCaFile" placeholder="/usr/local/etc/ndagent-ca.pem">
+                            <div class="help-block">
+                                {{ lang._('PEM file of the CA that issued the certificate of the NetDefense server (or that self-signed certificate itself), trusted alone. It must hold the CA of the relay (Pathfinder Address) too. The file must be owned by root and writable by root alone, in a directory only root can write.') }}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr id="tlsSpkiHashesRow">
+                        <td><strong>{{ lang._('SPKI Hashes') }}</strong></td>
+                        <td>
+                            <input type="text" class="form-control" id="settings.tlsSpkiHashes" name="settings.tlsSpkiHashes" placeholder="sha256/(44 base64 characters), sha256/(the next key)">
+                            <div class="help-block">
+                                {{ lang._('The NetDefense server keys trusted, as sha256/ and base64, separated by commas or spaces (up to 16): the key of the server and the key of the relay (Pathfinder Address). Only the key of the server itself counts, so pin only a key you control: a certificate from a public CA usually comes with a new key at each renewal. Add the next key before a key changes.') }}
+                            </div>
+                        </td>
+                    </tr>
+                    <tr id="extraCaFileRow">
                         <td><strong>{{ lang._('Extra CA File') }}</strong></td>
                         <td>
                             <input type="text" class="form-control" id="settings.extraCaFile" name="settings.extraCaFile" placeholder="/usr/local/etc/ndagent-extra-ca.pem">
                             <div class="help-block">
                                 {{ lang._('Optional. CA certificates of a TLS-inspection proxy, trusted for the connections to NetDefense besides the built-in roots. The file must be owned by root and writable by root alone, in a directory only root can write.') }}
                                 <a href="https://netdefense.io/docs/ndagent/configuration/#extra-ca-file" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
+                            </div>
+                        </td>
+                    </tr>
+                    <tr id="ignoredVerifyRow" style="display:none;">
+                        <td><strong>{{ lang._('SSL Verification') }}</strong></td>
+                        <td>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.sslVerify" name="settings.sslVerify" checked> {{ lang._('SSL Verification') }}
+                            </label>
+                            <br>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.tofuSslVerify" name="settings.tofuSslVerify" checked> {{ lang._('TOFU Key Fetch SSL Verification') }}
+                            </label>
+                            <br>
+                            <label class="checkbox-inline">
+                                <input type="checkbox" id="settings.pathfinderTlsVerify" name="settings.pathfinderTlsVerify" checked> {{ lang._('Pathfinder SSL Verification') }}
+                            </label>
+                            <div class="help-block">
+                                {{ lang._('No longer honoured since agent 1.31.0: the connections to NetDefense are always verified, under TLS Mode. Turn these back on and apply to clear the notice; they are shown only while one is off.') }}
                             </div>
                         </td>
                     </tr>
@@ -655,14 +768,6 @@
                                 {{ lang._('Relay used for remote sessions. Change only for a self-hosted deployment.') }}
                                 <a href="https://netdefense.io/docs/ndagent/configuration/#pathfinder-address" target="_blank" rel="noopener">{{ lang._('Learn more') }}</a>
                             </div>
-                        </td>
-                    </tr>
-                    <tr>
-                        <td><strong>{{ lang._('Pathfinder SSL Verification') }}</strong></td>
-                        <td>
-                            <label class="checkbox-inline">
-                                <input type="checkbox" id="settings.pathfinderTlsVerify" name="settings.pathfinderTlsVerify" checked> {{ lang._('Enable SSL certificate verification for Pathfinder') }}
-                            </label>
                         </td>
                     </tr>
                     <tr>

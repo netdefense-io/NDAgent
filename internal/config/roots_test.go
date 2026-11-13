@@ -131,10 +131,8 @@ func trustTestDirs(t *testing.T, dir string) string {
 	return resolved
 }
 
-// controlPlaneConfigs are the three TLS configurations of the control plane,
-// with verification on.
+// controlPlaneConfigs are the three TLS configurations of the control plane.
 func controlPlaneConfigs(c *Config) map[string]*tls.Config {
-	c.SSLVerify, c.TOFUSSLVerify, c.PathfinderTLSVerify = true, true, true
 	return map[string]*tls.Config{
 		"GetTLSConfig":           c.GetTLSConfig(),
 		"GetTOFUTLSConfig":       c.GetTOFUTLSConfig(),
@@ -143,28 +141,24 @@ func controlPlaneConfigs(c *Config) map[string]*tls.Config {
 }
 
 // A nil RootCAs makes crypto/tls verify against the system bundle, so every
-// control-plane configuration must carry the embedded pool.
+// control-plane configuration of tls_mode system must carry the embedded pool,
+// whatever the old verification toggles say.
 func TestControlPlaneConfigsCarryTheEmbeddedRoots(t *testing.T) {
-	for name, cfg := range controlPlaneConfigs(&Config{}) {
-		if cfg.RootCAs == nil {
-			t.Fatalf("%s: RootCAs is nil, which means the system bundle", name)
-		}
-		if !cfg.RootCAs.Equal(embeddedRoots()) {
-			t.Errorf("%s: RootCAs is not the embedded root set", name)
-		}
-		if cfg.InsecureSkipVerify {
-			t.Errorf("%s: verification is off", name)
-		}
-	}
-
-	insecure := &Config{}
-	for name, cfg := range map[string]*tls.Config{
-		"GetTLSConfig":           insecure.GetTLSConfig(),
-		"GetTOFUTLSConfig":       insecure.GetTOFUTLSConfig(),
-		"GetPathfinderTLSConfig": insecure.GetPathfinderTLSConfig(),
+	for _, c := range []*Config{
+		{},
+		{ignoredVerify: ignoredVerifyKeys},
+		loadedConfig(&Config{}),
 	} {
-		if !cfg.InsecureSkipVerify {
-			t.Errorf("%s with its toggle off: verification is on", name)
+		for name, cfg := range controlPlaneConfigs(c) {
+			if cfg.RootCAs == nil {
+				t.Fatalf("%s: RootCAs is nil, which means the system bundle", name)
+			}
+			if !cfg.RootCAs.Equal(embeddedRoots()) {
+				t.Errorf("%s: RootCAs is not the embedded root set", name)
+			}
+			if cfg.InsecureSkipVerify {
+				t.Errorf("%s: verification is off", name)
+			}
 		}
 	}
 }
@@ -346,7 +340,13 @@ func assertExtraCARefused(t *testing.T, path, want string) {
 	}
 }
 
-func TestExtraCAFileRefusals(t *testing.T) {
+type caFileRefusalCase struct{ name, path, reason string }
+
+// caFileRefusalCases are the CA files the checks of loadCAFile refuse, with
+// the reason each is refused for. Every directory up to the test's own stands
+// in for root's, and a directory of the test's stands in for the system store.
+func caFileRefusalCases(t *testing.T) []caFileRefusalCase {
+	t.Helper()
 	pki := newTestPKI(t, "Refused CA")
 	dir := trustTestDirs(t, t.TempDir())
 	trustDir, err := filepath.EvalSymlinks(t.TempDir())
@@ -390,7 +390,7 @@ func TestExtraCAFileRefusals(t *testing.T) {
 	writeFile(t, real, "ca.pem", pki.caPEM, 0o644)
 	symlink(real, "alias")
 
-	cases := []struct{ name, path, reason string }{
+	return []caFileRefusalCase{
 		{"a relative path", "ca.pem", "not an absolute path"},
 		{"a file that is missing", filepath.Join(dir, "missing.pem"), "no such file"},
 		{"a directory", dir, "not a regular file"},
@@ -407,18 +407,24 @@ func TestExtraCAFileRefusals(t *testing.T) {
 		{"a certificate that does not parse", writeFile(t, dir, "bad.pem",
 			pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("junk")}), 0o644), "does not parse"},
 		{"a file larger than the bound", writeFile(t, dir, "large.pem", append(append([]byte{}, pki.caPEM...), make([]byte, extraCAFileMaxBytes)...), 0o644), "larger than"},
+		// The file the cases above refuse for other reasons is accepted as it is.
+		{"", good, ""},
 	}
-	for _, c := range cases {
+}
+
+func TestExtraCAFileRefusals(t *testing.T) {
+	for _, c := range caFileRefusalCases(t) {
+		if c.name == "" {
+			cfg := &Config{ExtraCAFile: c.path}
+			cfg.loadControlPlaneRoots()
+			if cfg.ExtraCAError != nil || len(cfg.ExtraCAs) != 1 {
+				t.Fatalf("the good file was refused: %v", cfg.ExtraCAError)
+			}
+			continue
+		}
 		t.Run(c.name, func(t *testing.T) {
 			assertExtraCARefused(t, c.path, c.reason)
 		})
-	}
-
-	// The file the cases above refuse for other reasons is accepted as it is.
-	cfg := &Config{ExtraCAFile: good}
-	cfg.loadControlPlaneRoots()
-	if cfg.ExtraCAError != nil || len(cfg.ExtraCAs) != 1 {
-		t.Fatalf("the good file was refused: %v", cfg.ExtraCAError)
 	}
 }
 

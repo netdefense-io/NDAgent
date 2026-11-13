@@ -55,3 +55,42 @@ func TestWriter_TheRegistrationWaitsHaveTheirOwnStates(t *testing.T) {
 		t.Errorf("a nil writer returned %v", err)
 	}
 }
+
+// The plugin page reads tls_error to say why every connection is refused; it
+// stays through the state changes and is left out when there is none.
+func TestWriter_TLSErrorSurvivesStateChanges(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ndagent.status")
+	w := NewWriter(path, "1.0.0", "abc", "221f3268-0000-4000-8000-000000000001")
+	if err := w.SetTLSError("tls_mode custom_ca needs tls_ca_file"); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.MarkDisconnected("tls: failed to verify certificate"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if raw["tls_error"] != "tls_mode custom_ca needs tls_ca_file" {
+		t.Errorf("tls_error = %v", raw["tls_error"])
+	}
+
+	if err := w.SetTLSError(""); err != nil {
+		t.Fatal(err)
+	}
+	data, _ = os.ReadFile(path)
+	raw = nil
+	_ = json.Unmarshal(data, &raw)
+	if _, ok := raw["tls_error"]; ok {
+		t.Errorf("an empty tls_error is written: %s", data)
+	}
+
+	var nilWriter *Writer
+	if err := nilWriter.SetTLSError("x"); err != nil {
+		t.Errorf("a nil writer returned %v", err)
+	}
+}

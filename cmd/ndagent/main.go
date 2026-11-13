@@ -10,7 +10,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -140,23 +139,9 @@ func run(cmd *cobra.Command, args []string) error {
 		)
 	}
 
-	// The roots the control-plane connections verify against: the built-in
-	// set, plus extra_ca_file's CAs. Logged here because config loading
-	// runs before logging is initialized.
-	if cfg.ExtraCAError != nil {
-		log.Errorw("extra_ca_file could not be used; the control-plane connections trust the built-in roots only",
-			"extra_ca_file", cfg.ExtraCAFile,
-			"error", cfg.ExtraCAError,
-		)
-	}
-	for _, ca := range cfg.ExtraCAs {
-		log.Infow("extra_ca_file adds a CA to the control-plane roots",
-			"extra_ca_file", cfg.ExtraCAFile,
-			"subject", ca.Subject,
-			"sha256", ca.SHA256,
-			"not_after", ca.NotAfter.UTC().Format(time.RFC3339),
-		)
-	}
+	// What the control-plane connections verify against (tls_mode). Logged
+	// here because config loading runs before logging is initialized.
+	logControlPlaneTrust(log, cfg)
 
 	// Check if agent is enabled
 	if !cfg.IsEnabled() {
@@ -168,7 +153,7 @@ func run(cmd *cobra.Command, args []string) error {
 	log.Infow("Configuration loaded",
 		"server_host", cfg.ServerHost,
 		"server_port", cfg.ServerPort,
-		"ssl_verify", cfg.SSLVerify,
+		"tls_mode", string(cfg.TLSMode),
 		"test_mode", cfg.IsTestMode(),
 		"webadmin_port", cfg.WebadminPort,
 		"webadmin_protocol", cfg.WebadminProtocol,
@@ -178,12 +163,6 @@ func run(cmd *cobra.Command, args []string) error {
 		"check", cfg.ServerURICheck,
 		"start", cfg.ServerURIStart,
 	)
-
-	// Warn when SSL verification is disabled
-	if !cfg.SSLVerify {
-		log.Warn("SSL certificate verification is DISABLED. This makes connections vulnerable to man-in-the-middle attacks.")
-		log.Warn(`For production use, turn on "SSL Verification" (ssl_verify=true) in Services > NetDefense > Settings, Advanced Settings, Control Plane, and apply.`)
-	}
 
 	// Log test mode status
 	if cfg.IsTestMode() {
@@ -200,6 +179,12 @@ func run(cmd *cobra.Command, args []string) error {
 	// unwritable in a test rig) shouldn't take the agent down, so we
 	// log and proceed.
 	statusWriter := status.NewWriter(status.DefaultPath, version.Version, version.GitCommit, cfg.DeviceUUID)
+	if cfg.TLSError != nil {
+		// The plugin page says why every connection is refused.
+		if err := statusWriter.SetTLSError(cfg.TLSError.Error()); err != nil {
+			log.Warnw("Could not write the TLS Mode error to the status file", "path", status.DefaultPath, "error", err)
+		}
+	}
 	if err := statusWriter.MarkConnecting(); err != nil {
 		log.Warnw("Could not write initial status file", "path", status.DefaultPath, "error", err)
 	}

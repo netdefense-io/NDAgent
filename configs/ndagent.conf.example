@@ -14,14 +14,23 @@ device_uuid=your-device-uuid-here
 server_host=localhost
 server_port=8443
 
-# SSL certificate verification (disable only for testing)
-ssl_verify=true
-
-# SSL certificate verification for the first-connect trust key fetch
-# (TOFU). Independent of ssl_verify above — defaults to true even when
-# ssl_verify is disabled, so that toggle alone can't be used to plant a
-# rogue key before anything is pinned. Disable only for testing.
-tofu_ssl_verify=true
+# What the connections to NetDefense (registration and the broker socket,
+# the trust-key fetch, the relay) verify the server against:
+#   system      - the roots built into the agent plus extra_ca_file, never
+#                 the operating system's certificate store (the default)
+#   custom_ca   - only the CAs of tls_ca_file, for a NetDefense server whose
+#                 certificate a private CA issued (or a self-signed one)
+#   spki_pinned - only the server keys tls_spki_hashes lists, each
+#                 sha256/<base64 of the SHA-256 of its SubjectPublicKeyInfo>;
+#                 for keys you control (a public CA's certificate usually
+#                 comes with a new key at each renewal)
+# The mode covers the relay too: its CA goes in tls_ca_file, or its key in
+# tls_spki_hashes. Trust material a mode cannot use refuses every connection. Nothing turns
+# verification off: ssl_verify, tofu_ssl_verify and pathfinder_tls_verify
+# are no longer honoured, and one set to false is logged as ignored.
+tls_mode=system
+# tls_ca_file=/usr/local/etc/ndagent-ca.pem
+# tls_spki_hashes=sha256/<server key>,sha256/<relay key>,sha256/<next key>
 
 # Path to OPNsense config.xml file
 config_xml_path=/conf/config.xml
@@ -47,4 +56,3 @@ reject_dangerous_snippets=true
 
 # Pathfinder settings (for remote access via CONNECT task)
 # pathfinder_host=https://pathfinder.netdefense.io
-# pathfinder_tls_verify=true

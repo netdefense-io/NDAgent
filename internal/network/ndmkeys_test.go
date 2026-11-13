@@ -5,7 +5,6 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -18,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/netdefense-io/ndagent/internal/config"
@@ -65,8 +65,18 @@ func mockJWKSServer(t *testing.T, primaryKid, primaryX, emergencyKid, emergencyX
 			},
 		})
 	})
-	srv := httptest.NewTLSServer(mux)
+	return startJWKSTestServer(t, mux)
+}
 
+// testServerPins holds the key of each test server by host:port, so
+// newTestConfig can pin it.
+var testServerPins sync.Map
+
+// startJWKSTestServer serves mux over TLS with httptest's self-signed
+// certificate and returns (host, port, cleanup).
+func startJWKSTestServer(t *testing.T, mux http.Handler) (string, int, func()) {
+	t.Helper()
+	srv := httptest.NewTLSServer(mux)
 	u, err := url.Parse(srv.URL)
 	if err != nil {
 		srv.Close()
@@ -82,29 +92,23 @@ func mockJWKSServer(t *testing.T, primaryKid, primaryX, emergencyKid, emergencyX
 		srv.Close()
 		t.Fatalf("port atoi: %v", err)
 	}
+	testServerPins.Store(u.Host, config.SPKIPin(srv.Certificate()))
 	return host, port, srv.Close
 }
 
+// newTestConfig trusts the test server at host:port by pinning its key
+// (tls_mode=spki_pinned): no setting skips verification any more.
 func newTestConfig(host string, port int) *config.Config {
+	pin, _ := testServerPins.Load(net.JoinHostPort(host, strconv.Itoa(port)))
+	pinned, _ := pin.(string)
 	cfg := &config.Config{
-		ServerHost: host,
-		ServerPort: port,
-		SSLVerify:  false, // httptest uses self-signed
+		ServerHost:    host,
+		ServerPort:    port,
+		TLSMode:       config.TLSModeSPKIPinned,
+		TLSSPKIHashes: pinned,
 	}
+	cfg.LoadControlPlaneTrust()
 	return cfg
-}
-
-// Override the TLS config helper for the test's self-signed server.
-func patchTestTLS(cfg *config.Config) {
-	// httptest.Server uses a self-signed cert; the agent's GetTLSConfig
-	// already returns InsecureSkipVerify=true when SSLVerify is false.
-	// Confirm that's the path: build once and assert.
-	tc := cfg.GetTLSConfig()
-	if tc != nil && tc.InsecureSkipVerify {
-		return
-	}
-	// Force InsecureSkipVerify just in case.
-	_ = tls.Config{InsecureSkipVerify: true}
 }
 
 func TestLoadOrFetch_FetchesAndPersistsOnCacheMiss(t *testing.T) {
@@ -115,7 +119,6 @@ func TestLoadOrFetch_FetchesAndPersistsOnCacheMiss(t *testing.T) {
 	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	dispatch, rotation, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
@@ -177,7 +180,6 @@ func TestLoadOrFetch_UsesCacheOnSecondCall(t *testing.T) {
 
 	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	if _, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath); err != nil {
@@ -213,14 +215,10 @@ func TestLoadOrFetch_RejectsJWKSMissingEmergency(t *testing.T) {
 			},
 		})
 	})
-	srv := httptest.NewTLSServer(mux)
-	defer srv.Close()
-	u, _ := url.Parse(srv.URL)
-	host, portStr, _ := net.SplitHostPort(u.Host)
-	port, _ := strconv.Atoi(portStr)
+	host, port, cleanup := startJWKSTestServer(t, mux)
+	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	_, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
@@ -246,14 +244,10 @@ func TestLoadOrFetch_RejectsKidMismatch(t *testing.T) {
 			},
 		})
 	})
-	srv := httptest.NewTLSServer(mux)
-	defer srv.Close()
-	u, _ := url.Parse(srv.URL)
-	host, portStr, _ := net.SplitHostPort(u.Host)
-	port, _ := strconv.Atoi(portStr)
+	host, port, cleanup := startJWKSTestServer(t, mux)
+	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	_, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
@@ -273,7 +267,6 @@ func TestLoadOrFetch_IgnoresCorruptCacheAndRefetches(t *testing.T) {
 	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	if err := os.WriteFile(cachePath, []byte("not valid json"), 0o600); err != nil {
@@ -295,38 +288,55 @@ func TestLoadOrFetch_IgnoresCorruptCacheAndRefetches(t *testing.T) {
 	}
 }
 
-// TestFetchJWKS_TOFUVerifiesIndependentlyOfGlobalSSLVerify is the
-// revert guard for the TOFU/MITM fix: even with the global ssl_verify
-// disabled (dev/lab convenience), the first-connect JWKS fetch must
-// still validate the server's certificate as long as TOFUSSLVerify is
-// at its secure default (true). Against the self-signed test server
-// this must fail with a certificate error, proving the fetch no longer
-// piggybacks on cfg.GetTLSConfig()'s InsecureSkipVerify.
-func TestFetchJWKS_TOFUVerifiesIndependentlyOfGlobalSSLVerify(t *testing.T) {
+// TestFetchJWKS_VerifiesWhateverTheOldTogglesSay is the revert guard for the
+// TOFU/MITM fix: ssl_verify=false and tofu_ssl_verify=false, which once turned
+// verification off, no longer do. The first-connect JWKS fetch from a server
+// the TLS mode does not trust fails with a certificate error, under system
+// (httptest's self-signed certificate) and under a pin of another key, and
+// nothing is pinned.
+func TestFetchJWKS_VerifiesWhateverTheOldTogglesSay(t *testing.T) {
 	primaryKid, _, primaryX := makeKeyPair(t)
 	emergencyKid, _, emergencyX := makeKeyPair(t)
 
 	host, port, cleanup := mockJWKSServer(t, primaryKid, primaryX, emergencyKid, emergencyX)
 	defer cleanup()
 
-	cfg := &config.Config{
-		ServerHost:    host,
-		ServerPort:    port,
-		SSLVerify:     false, // global bypass — must NOT leak into the TOFU fetch
-		TOFUSSLVerify: true,  // secure default
-	}
+	otherKey := "sha256/" + base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
+	for _, c := range []struct {
+		name string
+		mode config.TLSMode
+		pins string
+	}{
+		{"system", config.TLSModeSystem, ""},
+		{"spki_pinned with another key", config.TLSModeSPKIPinned, otherKey},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			conf := filepath.Join(t.TempDir(), "ndagent.conf")
+			if err := os.WriteFile(conf, []byte(fmt.Sprintf("token=t\ndevice_uuid=d\nserver_host=%s\nserver_port=%d\n"+
+				"tls_mode=%s\ntls_spki_hashes=%s\nssl_verify=false\ntofu_ssl_verify=false\npathfinder_tls_verify=false\n",
+				host, port, c.mode, c.pins)), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := config.Load(conf)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.TLSError != nil || len(cfg.IgnoredVerifyKeys()) != 3 {
+				t.Fatalf("TLSError = %v, ignored = %v", cfg.TLSError, cfg.IgnoredVerifyKeys())
+			}
 
-	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
-	_, _, err := LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
-	if err == nil {
-		t.Fatal("expected TOFU fetch against a self-signed cert to fail when TOFUSSLVerify=true, got nil error")
-	}
-	if !strings.Contains(err.Error(), "x509") && !strings.Contains(err.Error(), "certificate") {
-		t.Errorf("error %q does not look like a TLS verification failure", err)
-	}
-
-	if _, err := os.Stat(cachePath); err == nil {
-		t.Error("cache file should not have been written after a failed TOFU fetch")
+			cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
+			_, _, err = LoadOrFetchNDMKeys(context.Background(), cfg, cachePath)
+			if err == nil {
+				t.Fatal("the TOFU fetch from an untrusted server succeeded")
+			}
+			if !config.IsUntrustedCertificate(err) {
+				t.Errorf("error %q is not an untrusted certificate", err)
+			}
+			if _, err := os.Stat(cachePath); err == nil {
+				t.Error("cache file should not have been written after a failed TOFU fetch")
+			}
+		})
 	}
 }
 
@@ -357,7 +367,6 @@ func TestLoadOrFetch_RePinWarnsOnCorruptCache(t *testing.T) {
 	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
 	if err := os.WriteFile(cachePath, []byte("not valid json"), 0o600); err != nil {
@@ -402,7 +411,6 @@ func TestLoadOrFetch_RePinWarnsWithPriorAndNewKidOnVersionMismatch(t *testing.T)
 	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	priorKid := "deadbeefdeadbeefdeadbeefdeadbeef"
 	staleCache := ndmKeysCacheFile{
@@ -456,7 +464,6 @@ func TestLoadOrFetch_FreshInstallDoesNotWarnRePin(t *testing.T) {
 	defer cleanup()
 
 	cfg := newTestConfig(host, port)
-	patchTestTLS(cfg)
 
 	// No file written at cachePath — genuine fresh install.
 	cachePath := filepath.Join(t.TempDir(), "ndm-keys.json")
@@ -470,9 +477,7 @@ func TestLoadOrFetch_FreshInstallDoesNotWarnRePin(t *testing.T) {
 	if entries := logs.FilterMessageSnippet("RE-PINNED").All(); len(entries) != 0 {
 		t.Errorf("fresh install must not log a RE-PINNED warning, got %+v", entries)
 	}
-	// Sanity: the normal first-pin log still fires (exact wording depends on
-	// cfg.TOFUSSLVerify — newTestConfig leaves it at the zero value, so this
-	// is the "TLS verification DISABLED" variant, not "on first fetch").
+	// Sanity: the normal first-pin log still fires.
 	if entries := logs.FilterField(zap.String("primary_kid", primaryKid)).All(); len(entries) != 1 {
 		t.Errorf("expected exactly 1 first-pin log carrying primary_kid=%s, got %d", primaryKid, len(entries))
 	}

@@ -140,21 +140,13 @@ func LoadOrFetchNDMKeys(
 		log.Warnw("NDM trust set RE-PINNED: previous local pin could not be loaded — verify this was expected", fields...)
 	}
 
-	if !cfg.TOFUSSLVerify {
-		log.Warnw("TOFU JWKS fetch performed with TLS verification DISABLED — vulnerable to MITM key-planting",
-			"primary_kid", cached.Primary.KID,
-			"emergency_kid", cached.Emergency.KID,
-			"broker_host", cfg.ServerHost,
-			"cache_path", cachePath,
-		)
-	} else {
-		log.Warnw("TOFU pinned NDM trust set on first fetch",
-			"primary_kid", cached.Primary.KID,
-			"emergency_kid", cached.Emergency.KID,
-			"broker_host", cfg.ServerHost,
-			"cache_path", cachePath,
-		)
-	}
+	log.Warnw("TOFU pinned NDM trust set on first fetch",
+		"primary_kid", cached.Primary.KID,
+		"emergency_kid", cached.Emergency.KID,
+		"broker_host", cfg.ServerHost,
+		"tls_mode", string(cfg.TLSMode),
+		"cache_path", cachePath,
+	)
 	return cacheToMaps(cached, log)
 }
 

@@ -27,24 +27,45 @@
         <advanced>true</advanced>
     </field>
     <field>
+        <id>settings.tlsMode</id>
+        <label>TLS Mode</label>
+        <type>dropdown</type>
+        <help>What the connections to NetDefense, the relay of remote sessions included, verify the server against. System: the roots built into the agent plus Extra CA File, never the firewall's certificate store. Custom CA: only the CAs of CA File, for a NetDefense server with a private CA. SPKI pinned: only the server keys of SPKI Hashes. Trust material that cannot be used refuses every connection. See https://netdefense.io/docs/ndagent/configuration/#tls-mode</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.tlsCaFile</id>
+        <label>CA File</label>
+        <type>text</type>
+        <help>TLS Mode Custom CA: path to a PEM file of the CA certificates trusted, alone, for the connections to NetDefense; it must hold the CA of the relay (Pathfinder Address) too. The file must be owned by root and writable by root alone, in a directory only root can write.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
+        <id>settings.tlsSpkiHashes</id>
+        <label>SPKI Hashes</label>
+        <type>text</type>
+        <help>TLS Mode SPKI pinned: the NetDefense server keys trusted, as sha256/ and base64, separated by commas or spaces (up to 16): the key of the server and the key of the relay (Pathfinder Address). Pin only a key you control: a certificate from a public CA usually comes with a new key at each renewal. Add the next key before a key changes.</help>
+        <advanced>true</advanced>
+    </field>
+    <field>
         <id>settings.sslVerify</id>
         <label>SSL Verification</label>
         <type>checkbox</type>
-        <help>Enable SSL certificate verification.</help>
+        <help>No longer honoured since agent 1.31.0: the connections to NetDefense are always verified, under TLS Mode. Shown only while it is off.</help>
         <advanced>true</advanced>
     </field>
     <field>
         <id>settings.tofuSslVerify</id>
         <label>TOFU Key Fetch SSL Verification</label>
         <type>checkbox</type>
-        <help>Enable SSL certificate verification for the first-connect trust key fetch. Kept on even if SSL Verification above is disabled, so it stays independently protected against a rogue key being planted before anything is pinned.</help>
+        <help>No longer honoured since agent 1.31.0: the trust key fetch is always verified, under TLS Mode. Shown only while it is off.</help>
         <advanced>true</advanced>
     </field>
     <field>
         <id>settings.extraCaFile</id>
         <label>Extra CA File</label>
         <type>text</type>
-        <help>Optional path to a PEM file of CA certificates trusted for the connections to NetDefense besides the built-in roots. Set it only when this firewall reaches the internet through a TLS-inspection proxy. See https://netdefense.io/docs/ndagent/configuration/#extra-ca-file</help>
+        <help>Optional path to a PEM file of CA certificates trusted for the connections to NetDefense besides the built-in roots, under TLS Mode System. Set it only when this firewall reaches the internet through a TLS-inspection proxy. See https://netdefense.io/docs/ndagent/configuration/#extra-ca-file</help>
         <advanced>true</advanced>
     </field>
     <field>
@@ -65,7 +86,7 @@
         <id>settings.pathfinderTlsVerify</id>
         <label>Pathfinder SSL Verification</label>
         <type>checkbox</type>
-        <help>Enable SSL certificate verification for Pathfinder connections.</help>
+        <help>No longer honoured since agent 1.31.0: the relay connection is always verified, under TLS Mode. Shown only while it is off.</help>
         <advanced>true</advanced>
     </field>
     <field>

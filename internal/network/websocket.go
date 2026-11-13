@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"math/rand"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
@@ -755,6 +757,48 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 	return inner
 }
 
+func (w *WebSocketClient) verifyNotice() string {
+	if w.cfg == nil {
+		return ""
+	}
+	return w.cfg.IgnoredVerifyNotice()
+}
+
+// resultNotice is the notice a result's message gets: none for a result that
+// carries content (a completed PULL or BACKUP), whose message NDBroker
+// replaces with its own, so the notice would only make the frame larger and
+// move the size BACKUP refuses up front.
+func resultNotice(notice string, data map[string]interface{}) string {
+	if _, ok := data["content"]; ok {
+		return ""
+	}
+	return notice
+}
+
+// withVerifyNotice appends notice (config.IgnoredVerifyNotice: a setting that
+// once turned verification off is off, and ignored) to the message of a
+// terminal result, so whoever reads the result learns it. A message that is
+// JSON is left as it is: NDCLI and NDManager parse those. A message that
+// already carries a notice, as a replayed one does (written, perhaps, under
+// other settings), keeps the one it has.
+func withVerifyNotice(notice, status, message string) string {
+	if notice == "" || (status != TaskStatusCompleted && status != TaskStatusFailed) {
+		return message
+	}
+	trimmed := strings.TrimSpace(message)
+	if config.CarriesIgnoredVerifyNotice(message) || (strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[")) && json.Valid([]byte(trimmed)) {
+		return message
+	}
+	if trimmed == "" {
+		return notice
+	}
+	text := strings.TrimRightFunc(message, unicode.IsSpace)
+	if !strings.ContainsAny(text[len(text)-1:], ".!?") {
+		text += "."
+	}
+	return text + " " + notice
+}
+
 // SendTaskResponse sends a task response to the server, wrapped in a
 // COSE_Sign1 envelope signed by the device private key.
 //
@@ -810,11 +854,13 @@ func (w *WebSocketClient) CompleteInProgressTaskWithData(taskID, status, message
 	defer w.drainMu.Unlock()
 
 	log := logging.Named("websocket")
+	notice := w.verifyNotice()
+	message = withVerifyNotice(resultNotice(notice, data), status, message)
 	resultBytes, err := json.Marshal(buildTaskResponseInner(status, message, data, log))
 	if err != nil {
 		return false, fmt.Errorf("marshal inner response: %w", err)
 	}
-	status, message, data, resultBytes, err = fitTaskResponse(taskID, status, message, data, resultBytes, log)
+	status, message, data, resultBytes, err = fitTaskResponse(taskID, status, message, notice, data, resultBytes, log)
 	if err != nil {
 		return false, err
 	}
@@ -830,12 +876,14 @@ func (w *WebSocketClient) CompleteInProgressTaskWithData(taskID, status, message
 // has already written the row (CompleteInProgressTask).
 func (w *WebSocketClient) sendTaskResponse(taskID, status, message string, data map[string]interface{}, record bool) error {
 	log := logging.Named("websocket")
+	notice := w.verifyNotice()
+	message = withVerifyNotice(resultNotice(notice, data), status, message)
 
 	innerBytes, err := json.Marshal(buildTaskResponseInner(status, message, data, log))
 	if err != nil {
 		return fmt.Errorf("marshal inner response: %w", err)
 	}
-	status, message, _, innerBytes, err = fitTaskResponse(taskID, status, message, data, innerBytes, log)
+	status, message, _, innerBytes, err = fitTaskResponse(taskID, status, message, notice, data, innerBytes, log)
 	if err != nil {
 		return err
 	}
@@ -1142,7 +1190,7 @@ func (w *WebSocketClient) GetPathfinderTLSConfig() *tls.Config {
 	return w.cfg.GetPathfinderTLSConfig()
 }
 
-// ReportUntrustedCertificate logs the extra_ca_file hint when err is a
+// ReportUntrustedCertificate logs the TLS Mode hint when err is a
 // control-plane handshake that failed on an untrusted certificate; see
 // config.Config.ReportUntrustedCertificate.
 func (w *WebSocketClient) ReportUntrustedCertificate(log *zap.SugaredLogger, endpoint string, err error) bool {

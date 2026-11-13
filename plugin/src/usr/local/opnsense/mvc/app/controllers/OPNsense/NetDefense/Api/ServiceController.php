@@ -63,6 +63,7 @@ class ServiceController extends ApiMutableServiceControllerBase
             'last_error' => '',
             'key_state' => '',
             'key_message' => '',
+            'tls_error' => '',
         ];
 
         if (!is_readable(self::STATUS_FILE)) {
@@ -95,6 +96,7 @@ class ServiceController extends ApiMutableServiceControllerBase
             'last_error' => isset($snap['last_error']) ? (string)$snap['last_error'] : '',
             'key_state' => isset($snap['key_state']) ? (string)$snap['key_state'] : '',
             'key_message' => isset($snap['key_message']) ? (string)$snap['key_message'] : '',
+            'tls_error' => isset($snap['tls_error']) ? (string)$snap['tls_error'] : '',
         ];
     }
 }

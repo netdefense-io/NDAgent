@@ -47,8 +47,9 @@ func oversizedResponseMessage(frameSize int) string {
 // and drops it again, at every connect. It returns the response to record and
 // send, with its inner JSON. The FAILED carries no data, so a FIRMWARE_TRACK
 // failure detail would go too, and NDManager would count the failure against
-// the track's release; no track result comes near the limit.
-func fitTaskResponse(taskID, status, message string, data map[string]interface{}, innerBytes []byte, log *zap.SugaredLogger) (string, string, map[string]interface{}, []byte, error) {
+// the track's release; no track result comes near the limit. The FAILED
+// carries notice too (see withVerifyNotice).
+func fitTaskResponse(taskID, status, message, notice string, data map[string]interface{}, innerBytes []byte, log *zap.SugaredLogger) (string, string, map[string]interface{}, []byte, error) {
 	size := frameSizeFor(len(innerBytes))
 	if size <= MaxTaskResponseFrame {
 		return status, message, data, innerBytes, nil
@@ -58,7 +59,7 @@ func fitTaskResponse(taskID, status, message string, data map[string]interface{}
 	}
 	log.Errorw("Task result is too large for one message to the broker; answering FAILED instead",
 		"task_id", taskID, "status", status, "frame_bytes", size, "limit", MaxTaskResponseFrame)
-	message = oversizedResponseMessage(size)
+	message = withVerifyNotice(notice, TaskStatusFailed, oversizedResponseMessage(size))
 	innerBytes, err := json.Marshal(buildTaskResponseInner(TaskStatusFailed, message, nil, log))
 	if err != nil {
 		return "", "", nil, nil, fmt.Errorf("marshal inner response: %w", err)
