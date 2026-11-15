@@ -1,0 +1,1 @@
+{"v":1,"role":"server","protocol":1,"relay":{"id":"us","region_id":900,"host":"relay-us.example.net","port":443,"stun_port":3478},"port":1,"node_key":"QEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEA=","peer_key":"AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=","psk":"AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM=","start_timeout_ms":8000}

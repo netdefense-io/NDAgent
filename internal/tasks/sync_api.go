@@ -1248,7 +1248,24 @@ func executeSyncAPI(ctx context.Context, client *opnapi.Client, aliases []APIAli
 			Status: "error",
 			Error:  msg,
 		})
+	} else if refused, pfMsg, err := pfRulesetRefused(); refused {
+		// Left owed: every later SYNC loads the ruleset again, and fails, until
+		// pf takes it.
+		msg := rulesetRefusedError(pfMsg)
+		log.Errorw("SYNC_API: pf refused the ruleset", "pf", pfMsg)
+		errors = append(errors, msg)
+		results = append(results, SyncAPIItemResult{
+			Type:   "rule_apply",
+			Name:   "apply",
+			Action: "apply",
+			Status: "error",
+			Error:  msg,
+			Code:   codeRulesetRefused,
+		})
 	} else {
+		if err != nil {
+			log.Warnw("SYNC_API: could not tell whether pf loaded the ruleset", "error", err)
+		}
 		owed.applied(applyFirewallRules)
 		results = append(results, appliedItem("rule_apply", "apply", owedOnly))
 	}

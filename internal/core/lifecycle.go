@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/netdefense-io/ndagent/internal/config"
+	"github.com/netdefense-io/ndagent/internal/directpeer"
 	"github.com/netdefense-io/ndagent/internal/logging"
 	"github.com/netdefense-io/ndagent/internal/network"
 	"github.com/netdefense-io/ndagent/internal/opnapi"
@@ -52,6 +53,12 @@ type LifecycleManager struct {
 	// phase: a device that is disabled waits in the registration phase and still
 	// has to release its pin after 30 days.
 	tracks *trackSupervisor
+
+	// directPeer carries the device's direct-peer remote access sessions. It
+	// lives with the process: a session outlives the control connection its
+	// task arrived on, and its end is reported on the connection of that
+	// moment.
+	directPeer *directpeer.Manager
 
 	// rebindTokenInConf records that ndagent.conf carried a bootstrap token
 	// when this run read it. Registration zeroes the in-memory copy as soon as
@@ -119,7 +126,11 @@ func NewLifecycleManager(cfg *config.Config, configPath string, shutdown *Shutdo
 		}
 	}
 
+	directPeer := newDirectPeerManager(cfg.DeviceUUID, directpeer.DefaultLedgerPath)
+	tasks.SetDirectPeerManager(directPeer)
+
 	return &LifecycleManager{
+		directPeer:         directPeer,
 		cfg:                cfg,
 		configPath:         configPath,
 		shutdown:           shutdown,
@@ -256,6 +267,9 @@ func (l *LifecycleManager) Run(ctx context.Context) error {
 	// Before the registration phase: a device that is never accepted (disabled)
 	// still has a firmware pin to release after 30 days.
 	l.startTracks()
+
+	// Remote sessions end with the agent, whatever phase it stops in.
+	defer l.directPeer.Shutdown(directPeerShutdownWait)
 
 	for {
 		// Check for shutdown at start of each iteration
@@ -488,6 +502,19 @@ func (l *LifecycleManager) runWebSocketPhase(ctx context.Context) error {
 				log.Infow(fmt.Sprintf(format, args...))
 			}, trackSweepInterval)
 	}
+
+	// Direct-peer sessions report on this phase's connection from here on,
+	// starting with what waited for one. Before Run: a result has to be in
+	// the task store when the first connect replays what the store holds.
+	l.directPeer.SetReporter(wsClient)
+	defer func() {
+		if ctx.Err() != nil {
+			// The agent is stopping: the sessions end while this phase's
+			// connection and task store can still take their ends.
+			l.directPeer.Shutdown(directPeerShutdownWait)
+		}
+		l.directPeer.SetReporter(nil)
+	}()
 
 	// Run WebSocket client (handles reconnection internally)
 	return wsClient.Run(phaseCtx)

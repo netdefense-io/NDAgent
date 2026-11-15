@@ -21,6 +21,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/netdefense-io/ndagent/internal/config"
+	"github.com/netdefense-io/ndagent/internal/directpeer"
 	"github.com/netdefense-io/ndagent/internal/facts"
 	"github.com/netdefense-io/ndagent/internal/firmware/track"
 	"github.com/netdefense-io/ndagent/internal/logging"
@@ -753,6 +754,17 @@ func buildTaskResponseInner(status, message string, data map[string]interface{},
 			log.Warnw("Dropping a firmware track failure detail the contract refuses", "detail", detail)
 		}
 	}
+	// A direct-peer CONNECT says what happened to its session beside its
+	// message. The control plane acts on it (a session reads as ready, or its
+	// relay admission ends), so only an object the contract accepts for this
+	// status is sent.
+	if connect, ok := data[directpeer.ResultKey]; ok {
+		if clean, valid := directpeer.CleanResult(status, connect); valid {
+			inner[directpeer.ResultKey] = clean
+		} else {
+			log.Warnw("Dropping a remote session result the contract refuses", "status", status)
+		}
+	}
 
 	return inner
 }
@@ -812,7 +824,7 @@ func withVerifyNotice(notice, status, message string) string {
 //
 // The envelope's payload is the JSON-serialized response object
 // ({status, message, content, results, validation_errors, errors,
-// admin_equivalent}).
+// admin_equivalent, connect}).
 //
 // Concurrency: multiple task goroutines can call this simultaneously
 // (e.g. an IN_PROGRESS heartbeat from one task racing with a final

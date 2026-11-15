@@ -146,7 +146,10 @@ type fakeRuleDevice struct {
 	// configd's error.
 	aliasApplies   int
 	ruleApplyFails bool
-	bodies         map[string][]map[string]string
+	// onRuleApply, when set, runs with the lock held in every filter apply
+	// that answers OK, where OPNsense loads the ruleset into pf.
+	onRuleApply func()
+	bodies      map[string][]map[string]string
 	// calls counts the getRule/<uuid>, setRule, delRule and toggleRule calls
 	// per "<call> <uuid>", the current one included when before runs.
 	calls map[string]int
@@ -296,6 +299,9 @@ func newFakeRuleDevice(t *testing.T, template map[string]interface{}, rows []map
 		f.mu.Lock()
 		f.writes = append(f.writes, "apply")
 		fails := f.ruleApplyFails
+		if !fails && f.onRuleApply != nil {
+			f.onRuleApply()
+		}
 		f.mu.Unlock()
 		if fails {
 			_ = json.NewEncoder(w).Encode(map[string]string{"status": "Execute error"})

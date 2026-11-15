@@ -1,0 +1,22 @@
+{"event":"hello","version":"1.2.3","commit":"abc1234","protocol":1,"ipc":1}
+{"event":"listening"}
+{"event":"connected"}
+{"event":"path","path":"relayed"}
+{"event":"path","path":"direct"}
+{"event":"relay","state":"lost"}
+{"event":"relay","state":"lost","reason":"relay_refused"}
+{"event":"relay","state":"lost","reason":"relay_unreachable","detail":"dial tcp4 203.0.113.5:443: connect: connection refused"}
+{"event":"relay","state":"connected"}
+{"event":"refused","reason":"unknown_peer","peer":"0a1b2c3d","count":3}
+{"event":"closed","reason":"peer_closed"}
+{"event":"closed","reason":"stdin_closed"}
+{"event":"closed","reason":"connection_lost"}
+{"event":"closed","reason":"stdout_closed"}
+{"event":"closed","reason":"terminated"}
+{"event":"error","reason":"bad_config","detail":"psk: missing"}
+{"event":"error","reason":"no_config","detail":"no configuration"}
+{"event":"error","reason":"relay_refused"}
+{"event":"error","reason":"relay_unreachable","detail":"lookup relay-us.example.net: no such host"}
+{"event":"error","reason":"start_failed"}
+{"event":"error","reason":"internal","detail":"panic: boom in run.Run (run.go:1)"}
+{"event":"log","msg":"a library log line"}

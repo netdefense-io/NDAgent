@@ -238,6 +238,10 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			"path", req.URL.Path,
 		)
 
+		// Decided from the client's own headers: a read-only session removes
+		// its Accept-Encoding before the request is forwarded.
+		compress := gzipAllowed(req)
+
 		// Read-only enforcement, before anything is forwarded.
 		var scrub *scrubRule
 		if p.readOnly {
@@ -319,10 +323,12 @@ func (p *HTTPProxy) HandleStream(stream *Stream) error {
 			)
 		}
 
+		if compress && gzipWanted(resp) {
+			gzipResponse(resp)
+		}
 		chunkIfUnframed(req, resp)
 
-		// Write response back to stream
-		if err := resp.Write(stream); err != nil {
+		if err := writeResponse(stream, resp); err != nil {
 			resp.Body.Close()
 			if stream.IsClosed() {
 				p.log.Debugw("Stream closed while writing response", "stream_id", stream.ID())
@@ -563,7 +569,7 @@ func (p *HTTPProxy) sendErrorResponse(stream *Stream, statusCode int, message st
 	resp.Header.Set("Content-Type", "text/plain")
 	resp.Header.Set("Connection", "close")
 
-	if err := resp.Write(stream); err != nil {
+	if err := writeResponse(stream, resp); err != nil {
 		p.log.Debugw("Failed to send error response", "error", err)
 	}
 }

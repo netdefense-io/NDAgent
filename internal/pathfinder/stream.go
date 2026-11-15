@@ -14,9 +14,18 @@ import (
 // stream the agent closed because its read buffer filled up.
 var ErrStreamOverflow = errors.New("stream read buffer overflow")
 
-// StreamManager manages multiplexed streams over a single Pathfinder connection.
+// FrameConn carries whole frames between the agent and the client of a
+// session. The relay client is one, StreamConn is another.
+type FrameConn interface {
+	// OnFrame sets the handler for incoming frames.
+	OnFrame(handler func([]byte))
+	// SendFrame sends one encoded frame. It is safe for concurrent use.
+	SendFrame(data []byte) error
+}
+
+// StreamManager manages multiplexed streams over a single session connection.
 type StreamManager struct {
-	client *Client
+	conn FrameConn
 
 	streams   map[uint32]*Stream
 	streamsMu sync.RWMutex
@@ -27,9 +36,9 @@ type StreamManager struct {
 	onAllClosed func()
 	handlerMu   sync.RWMutex
 
-	// sendFrameFunc, when non-nil, replaces the default client.SendFrame call
+	// sendFrameFunc, when non-nil, replaces the default conn.SendFrame call
 	// in sendFrame. Used by tests to intercept outgoing frames without a real
-	// WebSocket connection.
+	// connection.
 	sendFrameFunc func([]byte) error
 
 	// Track if we ever had streams (don't fire onAllClosed before first stream)
@@ -39,15 +48,15 @@ type StreamManager struct {
 }
 
 // NewStreamManager creates a new stream manager.
-func NewStreamManager(client *Client) *StreamManager {
+func NewStreamManager(conn FrameConn) *StreamManager {
 	sm := &StreamManager{
-		client:  client,
+		conn:    conn,
 		streams: make(map[uint32]*Stream),
 		log:     logging.Named("pathfinder.stream"),
 	}
 
 	// Set up frame handler
-	client.OnFrame(sm.handleFrame)
+	conn.OnFrame(sm.handleFrame)
 
 	return sm
 }
@@ -231,14 +240,14 @@ func (sm *StreamManager) handleAck(frame *Frame) {
 	sm.log.Debugw("Received ACK", "stream_id", frame.StreamID)
 }
 
-// sendFrame sends a frame via the client. If sendFrameFunc is set (typically in
-// tests), it is called instead of the real client.SendFrame.
+// sendFrame sends a frame via the connection. If sendFrameFunc is set (typically
+// in tests), it is called instead of the real SendFrame.
 func (sm *StreamManager) sendFrame(frame *Frame) error {
 	encoded := EncodeFrame(frame)
 	if sm.sendFrameFunc != nil {
 		return sm.sendFrameFunc(encoded)
 	}
-	return sm.client.SendFrame(encoded)
+	return sm.conn.SendFrame(encoded)
 }
 
 // removeStream removes a stream from the manager and fires the onAllClosed

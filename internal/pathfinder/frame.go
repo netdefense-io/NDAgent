@@ -13,6 +13,11 @@ const (
 	FrameTypeClose byte = 0x02 // Close stream
 	FrameTypeOpen  byte = 0x03 // Open stream (data = service name)
 	FrameTypeAck   byte = 0x04 // Acknowledge open
+
+	// FrameTypeKeepAlive says the sender is still there: stream 0, no data.
+	// It exists only on a byte stream (StreamConn), which sends and consumes
+	// it; over the relay nobody sends one.
+	FrameTypeKeepAlive byte = 0x05
 )
 
 // Frame header size: type (1) + stream_id (4) + length (4) = 9 bytes
@@ -89,6 +94,8 @@ func (f *Frame) TypeString() string {
 		return "OPEN"
 	case FrameTypeAck:
 		return "ACK"
+	case FrameTypeKeepAlive:
+		return "KEEPALIVE"
 	default:
 		return fmt.Sprintf("UNKNOWN(0x%02x)", f.Type)
 	}

@@ -435,6 +435,33 @@ ON CONFLICT(task_id) DO UPDATE SET
 	return nil
 }
 
+// CompleteAgain writes a terminal result for a task that may already have
+// one, and marks it undelivered. It is for a task with two results: a
+// direct-peer CONNECT answers once when its session is ready and again when
+// the session is over, hours later. Complete keeps delivered_at, so a second
+// result written with it would never be replayed if its send failed. The row
+// is created when it is gone (retention may have dropped the first result).
+func (s *Store) CompleteAgain(taskID, taskType, status, message string, data []byte) error {
+	if status != StatusCompleted && status != StatusFailed {
+		return fmt.Errorf("taskstore: CompleteAgain called with non-terminal status %q", status)
+	}
+	now := nowFn().Unix()
+	_, err := s.db.Exec(`
+INSERT INTO task_states (task_id, task_type, lifecycle, status, message, result_data, started_at, ended_at)
+VALUES (?, ?, 'synchronous', ?, ?, ?, ?, ?)
+ON CONFLICT(task_id) DO UPDATE SET
+    status = excluded.status,
+    message = excluded.message,
+    result_data = excluded.result_data,
+    ended_at = excluded.ended_at,
+    delivered_at = NULL
+`, taskID, taskType, status, message, data, now, now)
+	if err != nil {
+		return fmt.Errorf("complete again: %w", err)
+	}
+	return nil
+}
+
 // CompleteIfInProgress is Complete for a caller that is not the task's owner:
 // it writes the terminal status only while the row is still IN_PROGRESS and
 // reports whether it did. Complete overwrites whatever is there, which is right

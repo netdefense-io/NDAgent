@@ -124,6 +124,17 @@ func HandleConnect(ctx context.Context, ws *network.WebSocketClient, cmd network
 		"task_id", cmd.TaskID,
 	)
 
+	// A direct-peer task is another transport with its own answers. Anything
+	// that is not one takes the path below unchanged.
+	switch connectPayloadKind(cmd.Payload) {
+	case connectOpen:
+		return handleDirectPeerOpen(ctx, ws, cmd)
+	case connectClose:
+		return handleDirectPeerClose(ws, cmd)
+	case connectUnknown:
+		return handleUnreadableConnect(ws, cmd)
+	}
+
 	// Device-local remote-access ceiling — the first of two enforcement
 	// points (the second is pathfinder's ProxyStreamToLocal chokepoint).
 	// Refused here, before the payload is even parsed and before any relay
@@ -298,62 +309,13 @@ func connectToPathfinder(ctx context.Context, ws *network.WebSocketClient, sessi
 
 	log.Debugw("Client paired, setting up stream proxy")
 
-	// Create stream manager and proxy
-	streamMgr := pathfinder.NewStreamManager(client)
-	proxy := pathfinder.NewTCPProxyWithConfig(pathfinder.ProxyConfig{
-		Shell:              ws.GetPathfinderShell(),
-		WebadminUser:       webadminUser,
-		WebadminSessionDir: ws.GetWebadminSessionDir(),
-		WebadminPort:       ws.GetWebadminPort(),
-		ReadOnly:           readOnly,
-		Policy:             policy,
-	})
-	// Provide the connect-session context to the proxy so exec streams can
-	// use it for command timeouts and cancellation.
-	proxy.SetContext(ctx)
-
-	// Session lifetime is tied to the client's relay connection, NOT to the
-	// open-stream count. We deliberately do NOT cancel when streams drop to
-	// zero: webadmin rides one short-lived stream per HTTP request (the
-	// browser/CLI opens and closes a stream per request), so the count
-	// legitimately returns to zero between requests and after a terminal
-	// stream closes. Tearing down on all-streams-closed would kill the
-	// webadmin tunnel mid-session (and made read-only/terminal-less sessions
-	// unusable). The session instead ends when client.RunFrameLoop returns:
-	// the relay reports the client gone (peer_offline), the relay/WS
-	// disconnects (bounded by the ping/pong keepalive: pingInterval 30s /
-	// pongWait 60s in internal/pathfinder/client.go), or the parent context
-	// is cancelled (the agent's own connection ending, agent shutdown).
-	// CloseAll() + proxy.CloseAll() below still run on return, destroying
-	// the forged PHP session.
-
-	// Register the proxied services. Read-only sessions get webadmin only —
-	// the ssh service is not even advertised. The proxy's ProxyStreamToLocal
-	// chokepoint is the authoritative guard; this keeps the offered set
-	// honest as defense-in-depth.
-	services := pathfinder.DefaultOPNsenseServices(ws.GetWebadminPort())
-	if readOnly {
-		services = pathfinder.ReadOnlyOPNsenseServices(ws.GetWebadminPort())
-	}
-	for _, svc := range services {
-		proxy.AddService(svc)
-	}
-
-	// Handle incoming streams
-	streamMgr.OnNewStream(func(stream *pathfinder.Stream) {
-		log.Debugw("New stream opened",
-			"stream_id", stream.ID(),
-			"service", stream.ServiceName(),
-		)
-
-		if err := proxy.ProxyStreamToLocal(stream); err != nil {
-			log.Errorw("Failed to proxy stream",
-				"stream_id", stream.ID(),
-				"service", stream.ServiceName(),
-				"error", err,
-			)
-			stream.Close()
-		}
+	streamMgr, proxy := serveStreams(ctx, client, streamServiceConfig{
+		shell:              ws.GetPathfinderShell(),
+		webadminUser:       webadminUser,
+		webadminSessionDir: ws.GetWebadminSessionDir(),
+		webadminPort:       ws.GetWebadminPort(),
+		readOnly:           readOnly,
+		policy:             policy,
 	})
 
 	log.Debugw("Pathfinder session active, proxying streams")

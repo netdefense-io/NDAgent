@@ -69,6 +69,19 @@ read a body whole before chunking it passes every row. So
 ends with the connection open between two events, and requires the first event
 before the second is sent.
 
+The same holds for the buffer every response is written through
+(`writeResponse`): `TestHandleStream_AResponseLeavesInFewFrames` counts the DATA
+frames, which shows the coalescing but not that a quiet upstream is flushed, and
+the event-stream test and
+`TestHandleStream_ATricklingAnswerIsNotHeldInTheBuffer` fail when the timed
+flush is taken away. A compressed
+answer is checked the same way: `TestHandleStream_ACompressedAnswerStillStreams`
+decodes the first part, chunks and gzip, before the second is sent. A test
+whose backend blocks in a plain handler (not a hijacked connection) must also
+return on `r.Context().Done()`: `httptest.Server.Close` waits for its handlers,
+and a test that fails before it releases the handler otherwise hangs instead of
+failing.
+
 ## Request bodies the transport still holds
 
 An upstream can answer before it has read a request's body. The transport then

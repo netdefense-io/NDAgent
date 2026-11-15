@@ -1,0 +1,212 @@
+{
+  "name": "connect-direct-peer-v1",
+  "note": "Shared test vector of the direct-peer CONNECT contract, version 1. Every secret here is derived from a fixed text and is public: never use these values outside tests.",
+  "device_key": {
+    "ed25519_seed_b64": "ytvjpH4bNq554LyH4iWPHdO9Opcp8e2JZWFQRAGkykQ=",
+    "ed25519_public_b64": "GNYj+6IySqyqrU9AAhGW4DqyIfBRDzEKgc8THotleiE=",
+    "x25519_private_hex": "81673c4984b5e20d8ee26eab2b50e3e7cfbec5616bf8488ae46db32ce5a6a09c",
+    "x25519_public_hex": "ab2a451c1fa53d2bec12957c8cb5c5b1f324627662aef02e02bae84fbb6f5733"
+  },
+  "session_keys": {
+    "seed_hex": "b2bbd8edb8ff30905c088ea0e15ad7436130d541cdf399cbcc3f8d26b1e2ca44",
+    "server_node_key_hkdf_output_hex": "e8973626e7c81881fb5bd6f7c76199bc8acaa49859ced2201803e43d7038c2bc",
+    "server_node_private_hex": "e8973626e7c81881fb5bd6f7c76199bc8acaa49859ced2201803e43d7038c27c",
+    "server_node_public_hex": "00db23a1e87fd7c43931d68a2f78ff1b2fff8de909ac5edaaf52d8011562a079",
+    "server_disco_public_hex": "71cc077fae99a6d071b03fd3b48795023ae4872327807143446aa2ebc4398455",
+    "client_node_key_hkdf_output_hex": "698a823e7c116bef0a6a4286475e5d49d46bb82e954181e541ce384c6dd31c21",
+    "client_node_private_hex": "688a823e7c116bef0a6a4286475e5d49d46bb82e954181e541ce384c6dd31c61",
+    "client_node_public_hex": "cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d",
+    "preshared_key_hex": "4a34cb3e9478bf409d84c4dbfcc221bd41e6669961b543996982de1cd61b5d01"
+  },
+  "labels": {
+    "hpke_info": "netdefense-connect-v1",
+    "server_node_key": "netdefense-connect-v1 server-node-key",
+    "client_node_key": "netdefense-connect-v1 client-node-key",
+    "preshared_key": "netdefense-connect-v1 preshared-key"
+  },
+  "sealed": {
+    "plaintext": {
+      "v": 1,
+      "seed_hex": "b2bbd8edb8ff30905c088ea0e15ad7436130d541cdf399cbcc3f8d26b1e2ca44",
+      "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+      "device_uuid": "3f2b8c1e-6a4d-4e0b-9c57-d1a2b3c4e5f6",
+      "client_key_hex": "cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d",
+      "relay": {
+        "hostname": "relay-eu.example.net",
+        "derp_port": 443,
+        "stun_port": 3478
+      },
+      "exp": 1794700800
+    },
+    "plaintext_cbor_hex": "a761760164736565645820b2bbd8edb8ff30905c088ea0e15ad7436130d541cdf399cbcc3f8d26b1e2ca446a636f6e6e6563745f6964782065666639376633653361643539336430386532353062356135653439323434396b6465766963655f75756964782433663262386331652d366134642d346530622d396335372d6431613262336334653566366a636c69656e745f6b65795820cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d6572656c6179a368686f73746e616d657472656c61792d65752e6578616d706c652e6e657469646572705f706f72741901bb697374756e5f706f7274190d96636578701a6af8f600",
+    "hpke_ephemeral_private_hex": "211d621c56b19fc69e021f47de60b081059423d0e1106ac756d263b94600103d",
+    "enc_hex": "dc3e77e5511b7581fd3489c5659af4c489020381cf0009334eb2e2c6580c7132",
+    "sealed_b64": "3D535VEbdYH9NInFZZr0xIkCA4HPAAkzTrLixlgMcTKNfh4KQ913CpXJD4lOFj3Pp/RjzKij9VtG/NOGd7uE8LU8r3mXRbtaSUZFW2FHiAJrS6RAEv6FjahS9ShX5xFJLvTDKItg4CCbWkC0wr9PB0XzbhzCBlA2GHsopyeiPRLJpCJKadS7ms4EMHWmz9iy2vf5WjFp1Ph0yi9SmNiu49xubeQaf228k1Bzm0h8GH02sR3mjulxAUFETMnmw5NkGHCWJNac/K4/H9WNGeLuGWinD20hv0p3EW8FWl7aZAZBOS+63KXazBpMBFbkNafOsaL3dr7LY3JDrLIiIURmkhrH70637xj/YZJapxrBIsDJ+iKvan6ps0JZ/jMgjYfmuz0Q3xJtikFZiZVJs6MR",
+    "must_not_open": {
+      "sealed_with_another_info_b64": "3D535VEbdYH9NInFZZr0xIkCA4HPAAkzTrLixlgMcTKRqBOXuYLVQ+qzTMBm3c6ydTeJ4V5DV0U4VJpFGZEUEGzaDZCne4kZO7TaJIASJTrZJ8LsPzqoOsTvYWavr+S/fFoCzRxu9QN0b3wYng1UE+HRTdNRe/WvlmqCXCW62pSrGZjGV1ko3svvDkaO2dZK3HH0pERH7BJsfcXve2UDrE8WWrKiEeDBaLL5Cq4gH/xPK+xWoAlEKgoMvsY7iTkUVWgqSUflBT56HCUXAVTe6GSLQwk3/vIG9lcoKxGVTcH7GOpoMPcrgCD9TmuughLI8/AS4Dv/KJ2syGm5ngeLaK/LtdUCdTGqF4rRJ6ThbjLPNaSaoAJiNc5L1hpVfiTnEr5bW/XcbS3lmRZrCRnq",
+      "tampered_b64": "3D535VEbdYH9NInFZZr0xIkCA4HPAAkzTrLixlgMcTKNfh4KQ913CpXJD4lOFj3Pp/RjzKij9VtG/NOGd7uE8LU8r3mXRbtaSUZFW2FHiAJrS6RAEv6FjahS9ShX5xFJLvTDKItg4CCbWkC0wr9PB0XzbhzCBlA2GHsopyeiPRLJpCJKadS7ms4EMHWmz9iy2vf5WjFp1Ph0yi9SmNiu49xubeQaf228k1Bzm0h8GH02sR3mjulxAUFETMnmw5NkGHCWJNac/K4/H9WNGeLuGWinD20hv0p3EW8FWl7aZAZBOS+63KXazBpMBFbkNafOsaL3dr7LY3JDrLIiIURmkhrH70637xj/YZJapxrBIsDJ+iKvan6ps0JZ/jMgjYfmuz0Q3xJtikFZiZVJs6MQ"
+    }
+  },
+  "payloads": {
+    "open": {
+      "action": "open",
+      "admit_keys": {
+        "client": "cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d",
+        "server": "00db23a1e87fd7c43931d68a2f78ff1b2fff8de909ac5edaaf52d8011562a079"
+      },
+      "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+      "jti": "example-login-session-id",
+      "limits": {
+        "device_sessions": 4,
+        "idle_seconds": 1800,
+        "max_seconds": 28800,
+        "pair_seconds": 300
+      },
+      "protocol": 1,
+      "read_only": false,
+      "relay": {
+        "id": "eu",
+        "hostname": "relay-eu.example.net",
+        "derp_port": 443,
+        "stun_port": 3478
+      },
+      "sealed": "3D535VEbdYH9NInFZZr0xIkCA4HPAAkzTrLixlgMcTKNfh4KQ913CpXJD4lOFj3Pp/RjzKij9VtG/NOGd7uE8LU8r3mXRbtaSUZFW2FHiAJrS6RAEv6FjahS9ShX5xFJLvTDKItg4CCbWkC0wr9PB0XzbhzCBlA2GHsopyeiPRLJpCJKadS7ms4EMHWmz9iy2vf5WjFp1Ph0yi9SmNiu49xubeQaf228k1Bzm0h8GH02sR3mjulxAUFETMnmw5NkGHCWJNac/K4/H9WNGeLuGWinD20hv0p3EW8FWl7aZAZBOS+63KXazBpMBFbkNafOsaL3dr7LY3JDrLIiIURmkhrH70637xj/YZJapxrBIsDJ+iKvan6ps0JZ/jMgjYfmuz0Q3xJtikFZiZVJs6MR",
+      "transport": "direct-peer"
+    },
+    "open_canonical_json": "{\"action\":\"open\",\"admit_keys\":{\"client\":\"cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d\",\"server\":\"00db23a1e87fd7c43931d68a2f78ff1b2fff8de909ac5edaaf52d8011562a079\"},\"connect_id\":\"eff97f3e3ad593d08e250b5a5e492449\",\"jti\":\"example-login-session-id\",\"limits\":{\"device_sessions\":4,\"idle_seconds\":1800,\"max_seconds\":28800,\"pair_seconds\":300},\"protocol\":1,\"read_only\":false,\"relay\":{\"derp_port\":443,\"hostname\":\"relay-eu.example.net\",\"id\":\"eu\",\"stun_port\":3478},\"sealed\":\"3D535VEbdYH9NInFZZr0xIkCA4HPAAkzTrLixlgMcTKNfh4KQ913CpXJD4lOFj3Pp/RjzKij9VtG/NOGd7uE8LU8r3mXRbtaSUZFW2FHiAJrS6RAEv6FjahS9ShX5xFJLvTDKItg4CCbWkC0wr9PB0XzbhzCBlA2GHsopyeiPRLJpCJKadS7ms4EMHWmz9iy2vf5WjFp1Ph0yi9SmNiu49xubeQaf228k1Bzm0h8GH02sR3mjulxAUFETMnmw5NkGHCWJNac/K4/H9WNGeLuGWinD20hv0p3EW8FWl7aZAZBOS+63KXazBpMBFbkNafOsaL3dr7LY3JDrLIiIURmkhrH70637xj/YZJapxrBIsDJ+iKvan6ps0JZ/jMgjYfmuz0Q3xJtikFZiZVJs6MR\",\"transport\":\"direct-peer\"}",
+    "close": {
+      "action": "close",
+      "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+      "transport": "direct-peer"
+    },
+    "close_canonical_json": "{\"action\":\"close\",\"connect_id\":\"eff97f3e3ad593d08e250b5a5e492449\",\"transport\":\"direct-peer\"}",
+    "legacy": {
+      "jti": "example-login-session-id",
+      "pathfinder_session": "550e8400-e29b-41d4-a716-446655440000",
+      "read_only": false
+    },
+    "legacy_in_a_direct_peer_organization": {
+      "jti": "example-login-session-id",
+      "pathfinder_session": "550e8400-e29b-41d4-a716-446655440000",
+      "read_only": false,
+      "transport": "relay-legacy",
+      "transport_reason": "agent_too_old"
+    }
+  },
+  "responses": {
+    "listening": {
+      "status": "COMPLETED",
+      "message": "Remote session ready",
+      "connect": {
+        "event": "listening",
+        "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+        "protocol": 1
+      }
+    },
+    "session_end": {
+      "status": "COMPLETED",
+      "message": "Remote session ended: the client closed the session",
+      "connect": {
+        "event": "session-end",
+        "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+        "protocol": 1,
+        "reason": "client_closed",
+        "duration_seconds": 1832,
+        "paired_after_seconds": 4,
+        "path": "direct"
+      }
+    },
+    "failed": {
+      "status": "FAILED",
+      "message": "Remote session refused: the sealed session data could not be opened",
+      "connect": {
+        "event": "failed",
+        "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+        "reason": "unseal_failed"
+      }
+    },
+    "closed": {
+      "status": "COMPLETED",
+      "message": "Remote session closed",
+      "connect": {
+        "event": "closed",
+        "connect_id": "eff97f3e3ad593d08e250b5a5e492449",
+        "found": true
+      }
+    }
+  },
+  "admission": {
+    "request_server_key": {
+      "NodePublic": "nodekey:00db23a1e87fd7c43931d68a2f78ff1b2fff8de909ac5edaaf52d8011562a079",
+      "Source": "203.0.113.7"
+    },
+    "request_client_key": {
+      "NodePublic": "nodekey:cbd9804be55d87ff82584ed23a0bf513ca7ce4ac61eccfe2d85b66ef9cd5882d",
+      "Source": "2001:db8::17"
+    },
+    "allow": {
+      "Allow": true
+    },
+    "deny": {
+      "Allow": false
+    }
+  },
+  "session_store": {
+    "keyspace": "dev",
+    "session_key": "dev:connect:session:eff97f3e3ad593d08e250b5a5e492449"
+  },
+  "lists": {
+    "transports": [
+      "relay-legacy",
+      "direct-peer"
+    ],
+    "actions": [
+      "open",
+      "close"
+    ],
+    "events": [
+      "listening",
+      "session-end",
+      "failed",
+      "closed"
+    ],
+    "transport_reasons": [
+      "org_setting",
+      "direct_peer_disabled",
+      "client_unsupported",
+      "agent_too_old",
+      "protocol_mismatch"
+    ],
+    "end_reasons": [
+      "client_closed",
+      "client_timeout",
+      "no_client",
+      "idle_timeout",
+      "max_duration",
+      "closed",
+      "agent_shutdown",
+      "companion_exited",
+      "error"
+    ],
+    "failure_reasons": [
+      "policy_disabled",
+      "unsupported_action",
+      "companion_unavailable",
+      "protocol_mismatch",
+      "too_many_sessions",
+      "unseal_failed",
+      "binding_mismatch",
+      "replayed",
+      "key_mismatch",
+      "relay_unreachable",
+      "relay_refused",
+      "companion_failed",
+      "internal"
+    ],
+    "paths": [
+      "direct",
+      "relayed",
+      "none"
+    ]
+  }
+}
