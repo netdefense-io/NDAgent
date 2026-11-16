@@ -15,6 +15,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/netdefense-io/ndagent/internal/logging"
+	"github.com/netdefense-io/ndagent/internal/util"
 )
 
 // opnsenseShell is the default shell path
@@ -233,7 +234,9 @@ func (s *ShellSession) run() error {
 	}
 	cmd := exec.Command(s.shell)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "TERM=xterm-256color", "HOME=/root", "USER=root")
+	// service(8) starts the agent with PATH=/sbin:/bin:/usr/sbin:/usr/bin; the
+	// shell and the console menu it runs need /usr/local too.
+	cmd.Env = append(util.DeviceExecEnv(), "TERM=xterm-256color", "HOME=/root", "USER=root")
 
 	ptmx, err := pty.Start(cmd)
 	if err != nil {
